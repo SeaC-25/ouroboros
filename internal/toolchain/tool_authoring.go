@@ -1,6 +1,7 @@
 package toolchain
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -17,10 +18,16 @@ type AuthoredToolSpec struct {
 	RunCommand       []string               `yaml:"run_command,omitempty" json:"run_command,omitempty"`
 	RawScript        string                 `yaml:"raw_script,omitempty" json:"raw_script,omitempty"`
 	Parser           string                 `yaml:"parser" json:"parser"`
+	Adapter          AuthoredToolAdapter    `yaml:"adapter" json:"adapter"`
 	Inputs           []AuthoredToolInput    `yaml:"inputs" json:"inputs"`
 	ExpectedEvidence []AuthoredToolEvidence `yaml:"expected_evidence" json:"expected_evidence"`
 	Safety           AuthoredToolSafety     `yaml:"safety" json:"safety"`
 	Dependencies     []Dependency           `yaml:"dependencies,omitempty" json:"dependencies,omitempty"`
+}
+
+type AuthoredToolAdapter struct {
+	ID        string `yaml:"id" json:"id"`
+	Operation string `yaml:"operation" json:"operation"`
 }
 
 type AuthoredToolInput struct {
@@ -47,7 +54,9 @@ func LoadAuthoredToolSpec(path string) (AuthoredToolSpec, error) {
 		return AuthoredToolSpec{}, fmt.Errorf("read authored tool spec %s: %w", path, err)
 	}
 	var spec AuthoredToolSpec
-	if err := yaml.Unmarshal(data, &spec); err != nil {
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&spec); err != nil {
 		return AuthoredToolSpec{}, fmt.Errorf("parse authored tool spec %s: %w", path, err)
 	}
 	return spec, nil
@@ -68,9 +77,11 @@ func ValidateAuthoredToolSpec(spec AuthoredToolSpec) error {
 	if runner := strings.TrimSpace(spec.Runner); runner != "" && runner != "native" {
 		errs = append(errs, fmt.Errorf("runner must be native for authored tools, got %s", runner))
 	}
+	errs = append(errs, validateAuthoredToolAdapter(spec.Adapter)...)
 	errs = append(errs, validateAuthoredToolInputs(spec.Inputs)...)
 	errs = append(errs, validateAuthoredToolEvidence(spec.ExpectedEvidence)...)
 	errs = append(errs, validateAuthoredToolSafety(spec.Safety)...)
+	errs = append(errs, validateAuthoredToolDependencies(spec.Dependencies)...)
 	return errors.Join(errs...)
 }
 
@@ -91,6 +102,17 @@ func authoredToolManifest(spec AuthoredToolSpec) Manifest {
 		Healthcheck:  "built_in",
 		Dependencies: spec.Dependencies,
 	}
+}
+
+func validateAuthoredToolAdapter(adapter AuthoredToolAdapter) []error {
+	var errs []error
+	if strings.TrimSpace(adapter.ID) == "" {
+		errs = append(errs, errors.New("adapter id is required"))
+	}
+	if strings.TrimSpace(adapter.Operation) == "" {
+		errs = append(errs, errors.New("adapter operation is required"))
+	}
+	return errs
 }
 
 func validateAuthoredToolInputs(inputs []AuthoredToolInput) []error {
@@ -127,6 +149,19 @@ func validateAuthoredToolEvidence(evidence []AuthoredToolEvidence) []error {
 		fields := trimmedStrings(item.Fields)
 		if len(fields) == 0 {
 			errs = append(errs, fmt.Errorf("expected_evidence %d fields are required", i))
+		}
+	}
+	return errs
+}
+
+func validateAuthoredToolDependencies(dependencies []Dependency) []error {
+	var errs []error
+	for i, dependency := range dependencies {
+		if len(dependency.HealthCommand) > 0 {
+			errs = append(errs, fmt.Errorf("dependencies %d health_command is not supported for authored native tools", i))
+		}
+		if len(dependency.InstallCommand) > 0 {
+			errs = append(errs, fmt.Errorf("dependencies %d install_command is not supported for authored native tools", i))
 		}
 	}
 	return errs

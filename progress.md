@@ -1,6 +1,13 @@
 # Ouroboros Analysis Progress
 
 ## 2026-06-02
+- Continued model-authored native tool contract hardening in isolated worktree `.worktrees/authored-tool-contracts`.
+- Added RED toolchain tests requiring authored specs to declare `adapter.id` and `adapter.operation`, rejecting dependency `health_command` / `install_command`, and rejecting unknown YAML fields.
+- Implemented strict authored spec YAML loading with known-field validation.
+- Added `AuthoredToolAdapter` and validation so model-authored tools must choose a structured adapter contract instead of leaving execution semantics implicit.
+- Tightened authored dependency validation so model-authored specs can reference managed dependencies but cannot smuggle command arrays through dependency metadata.
+- Updated app and CLI authored tool output to surface adapter id and operation for validate/write/list/read paths.
+- Updated README/development docs and wrote `docs/progress/milestone-19-authored-tool-contracts.md`; remaining gaps are adapter registry execution, spec digests, parser registry validation, and real tool-specific adapters.
 - Continued native managed runner integration in isolated worktree `.worktrees/native-managed-runner`.
 - Added RED app tests proving `runner: native` did not execute an installed workspace managed binary and that exclusion handling had to block before payload execution.
 - Extended compiler plan nodes to carry manifest dependency metadata so native execution can resolve a single binary dependency without guessing across multi-tool packs.

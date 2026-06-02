@@ -1,6 +1,8 @@
 package toolchain
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -11,6 +13,7 @@ func TestAuthoredToolToManifestAcceptsStructuredNativeToolSpec(t *testing.T) {
 		Version:      "0.1.0",
 		Capabilities: []string{"web.auth_state_tracking", "evidence.collection"},
 		Parser:       "web_login_state_parser",
+		Adapter:      AuthoredToolAdapter{ID: "managed_binary", Operation: "http_probe"},
 		Inputs: []AuthoredToolInput{
 			{Name: "target_url", Type: "url", Required: true},
 		},
@@ -24,7 +27,7 @@ func TestAuthoredToolToManifestAcceptsStructuredNativeToolSpec(t *testing.T) {
 			AllowIsolationDisabled:    true,
 		},
 		Dependencies: []Dependency{
-			{Name: "httpx", Kind: "binary", HealthCommand: []string{"httpx", "-version"}},
+			{Name: "httpx", Kind: "binary", Source: "projectdiscovery/httpx"},
 		},
 	}
 
@@ -64,8 +67,57 @@ func TestValidateAuthoredToolSpecRejectsRawScripts(t *testing.T) {
 	}
 }
 
+func TestValidateAuthoredToolSpecRequiresNativeAdapterOperation(t *testing.T) {
+	spec := validAuthoredToolSpec()
+
+	err := ValidateAuthoredToolSpec(spec)
+	if err == nil || !strings.Contains(err.Error(), "adapter") || !strings.Contains(err.Error(), "operation") {
+		t.Fatalf("expected adapter/operation validation error, got %v", err)
+	}
+
+	spec.Adapter = AuthoredToolAdapter{ID: "managed_binary", Operation: "http_probe"}
+	if err := ValidateAuthoredToolSpec(spec); err != nil {
+		t.Fatalf("expected authored tool adapter contract to validate: %v", err)
+	}
+}
+
+func TestValidateAuthoredToolSpecRejectsDependencyCommandArrays(t *testing.T) {
+	spec := validAuthoredToolSpec()
+	spec.Adapter = AuthoredToolAdapter{ID: "managed_binary", Operation: "http_probe"}
+	spec.Dependencies = []Dependency{
+		{Name: "httpx", Kind: "binary", HealthCommand: []string{"httpx", "-version"}},
+	}
+
+	err := ValidateAuthoredToolSpec(spec)
+	if err == nil || !strings.Contains(err.Error(), "dependencies 0 health_command") {
+		t.Fatalf("expected authored dependency health_command rejection, got %v", err)
+	}
+
+	spec.Dependencies = []Dependency{
+		{Name: "httpx", Kind: "binary", InstallCommand: []string{"ouro-toolchain", "install", "httpx"}},
+	}
+	err = ValidateAuthoredToolSpec(spec)
+	if err == nil || !strings.Contains(err.Error(), "dependencies 0 install_command") {
+		t.Fatalf("expected authored dependency install_command rejection, got %v", err)
+	}
+}
+
+func TestLoadAuthoredToolSpecRejectsUnknownFields(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "authored-tool.yaml")
+	data := validAuthoredToolSpecYAMLForToolchainTest() + "scriptlet: nuclei -u $TARGET\n"
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatalf("write authored tool spec: %v", err)
+	}
+
+	_, err := LoadAuthoredToolSpec(path)
+	if err == nil || !strings.Contains(err.Error(), "scriptlet") {
+		t.Fatalf("expected unknown field rejection, got %v", err)
+	}
+}
+
 func TestValidateAuthoredToolSpecRequiresEvidenceAndSafety(t *testing.T) {
 	spec := validAuthoredToolSpec()
+	spec.Adapter = AuthoredToolAdapter{ID: "managed_binary", Operation: "http_probe"}
 	spec.ExpectedEvidence = nil
 	err := ValidateAuthoredToolSpec(spec)
 	if err == nil || !strings.Contains(err.Error(), "expected_evidence") {
@@ -73,6 +125,7 @@ func TestValidateAuthoredToolSpecRequiresEvidenceAndSafety(t *testing.T) {
 	}
 
 	spec = validAuthoredToolSpec()
+	spec.Adapter = AuthoredToolAdapter{ID: "managed_binary", Operation: "http_probe"}
 	spec.Safety = AuthoredToolSafety{}
 	err = ValidateAuthoredToolSpec(spec)
 	if err == nil || !strings.Contains(err.Error(), "safety") {
@@ -82,6 +135,7 @@ func TestValidateAuthoredToolSpecRequiresEvidenceAndSafety(t *testing.T) {
 
 func TestValidateAuthoredToolSpecRequiresExplicitSafetyClosePaths(t *testing.T) {
 	spec := validAuthoredToolSpec()
+	spec.Adapter = AuthoredToolAdapter{ID: "managed_binary", Operation: "http_probe"}
 	spec.Safety.TargetPolicy = "disabled"
 	err := ValidateAuthoredToolSpec(spec)
 	if err == nil || !strings.Contains(err.Error(), "allow_target_policy_disabled") {
@@ -93,6 +147,7 @@ func TestValidateAuthoredToolSpecRequiresExplicitSafetyClosePaths(t *testing.T) 
 	}
 
 	spec = validAuthoredToolSpec()
+	spec.Adapter = AuthoredToolAdapter{ID: "managed_binary", Operation: "http_probe"}
 	spec.Safety.Isolation = "disabled"
 	err = ValidateAuthoredToolSpec(spec)
 	if err == nil || !strings.Contains(err.Error(), "allow_isolation_disabled") {
@@ -121,4 +176,27 @@ func validAuthoredToolSpec() AuthoredToolSpec {
 			Isolation:    "process",
 		},
 	}
+}
+
+func validAuthoredToolSpecYAMLForToolchainTest() string {
+	return `name: web-login-state-enumerator
+version: "0.1.0"
+capabilities:
+  - web.auth_state_tracking
+parser: web_login_state_parser
+adapter:
+  id: managed_binary
+  operation: http_probe
+inputs:
+  - name: target_url
+    type: url
+    required: true
+expected_evidence:
+  - type: http_observation
+    fields:
+      - status_code
+safety:
+  target_policy: enforce
+  isolation: process
+`
 }

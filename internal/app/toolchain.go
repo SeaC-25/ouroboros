@@ -43,6 +43,8 @@ type AuthoredToolArtifact struct {
 	Name         string   `json:"name"`
 	Version      string   `json:"version"`
 	Parser       string   `json:"parser"`
+	AdapterID    string   `json:"adapter_id"`
+	Operation    string   `json:"operation"`
 	Capabilities []string `json:"capabilities"`
 	Dir          string   `json:"dir"`
 	SpecPath     string   `json:"spec_path"`
@@ -2372,7 +2374,7 @@ func prepareAuthoredToolArtifact(root string, spec toolchain.AuthoredToolSpec, s
 	if err != nil {
 		return AuthoredToolArtifact{}, toolchain.Manifest{}, err
 	}
-	return authoredToolArtifactFromManifest(status, dir, manifest), manifest, nil
+	return authoredToolArtifactFromSpec(status, dir, spec, manifest), manifest, nil
 }
 
 func readAuthoredToolFromDir(dir string, status string) (AuthoredToolArtifact, error) {
@@ -2404,15 +2406,17 @@ func readAuthoredToolFromDir(dir string, status string) (AuthoredToolArtifact, e
 	if !reflect.DeepEqual(expected, actual) {
 		return AuthoredToolArtifact{}, fmt.Errorf("authored tool manifest %s does not match authored spec", manifestPath)
 	}
-	return authoredToolArtifactFromManifest(status, dir, manifest), nil
+	return authoredToolArtifactFromSpec(status, dir, spec, manifest), nil
 }
 
-func authoredToolArtifactFromManifest(status string, dir string, manifest toolchain.Manifest) AuthoredToolArtifact {
+func authoredToolArtifactFromSpec(status string, dir string, spec toolchain.AuthoredToolSpec, manifest toolchain.Manifest) AuthoredToolArtifact {
 	return AuthoredToolArtifact{
 		Status:       status,
 		Name:         manifest.Name,
 		Version:      manifest.Version,
 		Parser:       manifest.Parser,
+		AdapterID:    strings.TrimSpace(spec.Adapter.ID),
+		Operation:    strings.TrimSpace(spec.Adapter.Operation),
 		Capabilities: append([]string(nil), manifest.Capabilities...),
 		Dir:          dir,
 		SpecPath:     filepath.Join(dir, "authored-tool.yaml"),

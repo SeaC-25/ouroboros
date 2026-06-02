@@ -64,6 +64,9 @@ func TestCreateAuthoredToolWritesSpecAndManifestInsideWorkspace(t *testing.T) {
 	if authored.Name != spec.Name || authored.Status != "written" {
 		t.Fatalf("unexpected authored tool result: %#v", authored)
 	}
+	if authored.AdapterID != spec.Adapter.ID || authored.Operation != spec.Adapter.Operation {
+		t.Fatalf("expected authored adapter metadata, got %#v", authored)
+	}
 	if authored.Dir != filepath.Join(root, "toolchain", spec.Name) {
 		t.Fatalf("expected authored tool dir under workspace toolchain, got %#v", authored)
 	}
@@ -198,6 +201,10 @@ func validAuthoredToolSpecForAppTest() toolchain.AuthoredToolSpec {
 		Version:      "0.1.0",
 		Capabilities: []string{"web.auth_state_tracking", "evidence.collection"},
 		Parser:       "web_login_state_parser",
+		Adapter: toolchain.AuthoredToolAdapter{
+			ID:        "managed_binary",
+			Operation: "http_probe",
+		},
 		Inputs: []toolchain.AuthoredToolInput{
 			{Name: "target_url", Type: "url", Required: true},
 		},
@@ -210,12 +217,11 @@ func validAuthoredToolSpecForAppTest() toolchain.AuthoredToolSpec {
 		},
 		Dependencies: []toolchain.Dependency{
 			{
-				Name:           "httpx",
-				Kind:           "binary",
-				Optional:       true,
-				HealthCommand:  []string{"httpx", "-version"},
-				InstallHint:    "install managed httpx",
-				InstallCommand: []string{"ouro-toolchain", "install", "httpx"},
+				Name:        "httpx",
+				Kind:        "binary",
+				Optional:    true,
+				Source:      "projectdiscovery/httpx",
+				InstallHint: "install managed httpx",
 			},
 		},
 	}

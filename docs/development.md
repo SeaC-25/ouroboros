@@ -247,14 +247,14 @@ When a `container_image` dependency also declares a `health_command`, the first 
 
 `ouro toolchain health <workspace>` prints the pack health row, dependency rows, remote latest digest/source metadata, and deterministic `install:` plan rows for missing or failed dependencies that declare install metadata, so missing required tools and available updates are visible before a run starts without triggering automatic installation. Run/replay events carry the same install-plan rows, and the TUI Toolchain Health tab renders them as remediation hints.
 
-Model-authored native tools use a structured spec, not shell snippets. `ouro toolchain authored-tool-validate <spec-file>` reads YAML, rejects `raw_script`, `run_command`, and non-native runners, and validates declared capabilities, parser, inputs, expected evidence, dependencies, and safety metadata. `ouro toolchain authored-tool-write <workspace> <spec-file>` persists a valid spec as:
+Model-authored native tools use a strict structured spec, not shell snippets. `ouro toolchain authored-tool-validate <spec-file>` reads YAML with known-field validation, rejects `raw_script`, `run_command`, non-native runners, unknown fields, and dependency `health_command` / `install_command` arrays, and validates declared capabilities, parser, adapter id, adapter operation, inputs, expected evidence, dependency references, and safety metadata. `ouro toolchain authored-tool-write <workspace> <spec-file>` persists a valid spec as:
 
 ```text
 workspace/toolchain/<tool-name>/authored-tool.yaml
 workspace/toolchain/<tool-name>/manifest.yaml
 ```
 
-The generated `manifest.yaml` uses `runner: native`, is loadable by the existing manifest loader, and contains no command array. Tool names must be direct path-safe segments; writes refuse traversal, symlinked toolchain paths, and existing tool directories. Read/list re-derive the manifest from `authored-tool.yaml` and reject drift, so a tampered manifest cannot silently change parser, runner, commands, capabilities, or dependencies. `ouro toolchain authored-tools <workspace> [name]` lists or reads those artifacts without executing tools, probing container runtimes, or contacting targets.
+The generated `manifest.yaml` uses `runner: native`, is loadable by the existing manifest loader, and contains no command array. The authored spec remains the authoritative contract for `adapter.id` and `adapter.operation`; CLI validate/write/list/read output prints those fields for review. Tool names must be direct path-safe segments; writes refuse traversal, symlinked toolchain paths, and existing tool directories. Read/list re-derive the manifest from `authored-tool.yaml` and reject drift, so a tampered manifest cannot silently change parser, runner, commands, capabilities, or dependencies. `ouro toolchain authored-tools <workspace> [name]` lists or reads those artifacts without executing tools, probing container runtimes, or contacting targets.
 
 Workspace-local managed tool bundles live under:
 

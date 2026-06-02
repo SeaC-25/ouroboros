@@ -10427,10 +10427,12 @@ func newToolchainAuthoredToolValidateCommand(out io.Writer) *cobra.Command {
 			}
 			_, err = fmt.Fprintf(
 				out,
-				"authored-tool: status=valid name=%s version=%s parser=%s capabilities=%d dependencies=%d\n",
+				"authored-tool: status=valid name=%s version=%s parser=%s adapter=%s operation=%s capabilities=%d dependencies=%d\n",
 				strings.TrimSpace(spec.Name),
 				strings.TrimSpace(spec.Version),
 				strings.TrimSpace(spec.Parser),
+				strings.TrimSpace(spec.Adapter.ID),
+				strings.TrimSpace(spec.Adapter.Operation),
 				len(spec.Capabilities),
 				len(spec.Dependencies),
 			)
@@ -10458,10 +10460,12 @@ func newToolchainAuthoredToolWriteCommand(out io.Writer) *cobra.Command {
 			}
 			_, err = fmt.Fprintf(
 				out,
-				"authored-tool: status=written name=%s version=%s parser=%s spec=%s manifest=%s\n",
+				"authored-tool: status=written name=%s version=%s parser=%s adapter=%s operation=%s spec=%s manifest=%s\n",
 				artifact.Name,
 				artifact.Version,
 				artifact.Parser,
+				artifact.AdapterID,
+				artifact.Operation,
 				artifact.SpecPath,
 				artifact.ManifestPath,
 			)
@@ -10506,10 +10510,12 @@ func newToolchainAuthoredToolsCommand(out io.Writer) *cobra.Command {
 func printAuthoredToolArtifact(out io.Writer, artifact app.AuthoredToolArtifact) error {
 	_, err := fmt.Fprintf(
 		out,
-		"authored-tool: name=%s version=%s parser=%s capabilities=%d spec=%s manifest=%s\n",
+		"authored-tool: name=%s version=%s parser=%s adapter=%s operation=%s capabilities=%d spec=%s manifest=%s\n",
 		artifact.Name,
 		artifact.Version,
 		artifact.Parser,
+		artifact.AdapterID,
+		artifact.Operation,
 		len(artifact.Capabilities),
 		artifact.SpecPath,
 		artifact.ManifestPath,

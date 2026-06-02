@@ -8308,8 +8308,10 @@ func TestToolchainAuthoredToolCommandsValidateWriteListAndRead(t *testing.T) {
 	if err := validateCmd.Execute(); err != nil {
 		t.Fatalf("validate authored tool: %v", err)
 	}
-	if !strings.Contains(validateOut.String(), "authored-tool: status=valid name=web-login-state-enumerator") {
-		t.Fatalf("expected validate output, got %q", validateOut.String())
+	for _, want := range []string{"authored-tool: status=valid name=web-login-state-enumerator", "adapter=managed_binary", "operation=http_probe"} {
+		if !strings.Contains(validateOut.String(), want) {
+			t.Fatalf("expected validate output to contain %q, got %q", want, validateOut.String())
+		}
 	}
 
 	var writeOut bytes.Buffer
@@ -8318,8 +8320,10 @@ func TestToolchainAuthoredToolCommandsValidateWriteListAndRead(t *testing.T) {
 	if err := writeCmd.Execute(); err != nil {
 		t.Fatalf("write authored tool: %v", err)
 	}
-	if !strings.Contains(writeOut.String(), "authored-tool: status=written name=web-login-state-enumerator") {
-		t.Fatalf("expected write output, got %q", writeOut.String())
+	for _, want := range []string{"authored-tool: status=written name=web-login-state-enumerator", "adapter=managed_binary", "operation=http_probe"} {
+		if !strings.Contains(writeOut.String(), want) {
+			t.Fatalf("expected write output to contain %q, got %q", want, writeOut.String())
+		}
 	}
 
 	var listOut bytes.Buffer
@@ -8328,8 +8332,10 @@ func TestToolchainAuthoredToolCommandsValidateWriteListAndRead(t *testing.T) {
 	if err := listCmd.Execute(); err != nil {
 		t.Fatalf("list authored tools: %v", err)
 	}
-	if !strings.Contains(listOut.String(), "authored-tool: name=web-login-state-enumerator") {
-		t.Fatalf("expected list output, got %q", listOut.String())
+	for _, want := range []string{"authored-tool: name=web-login-state-enumerator", "adapter=managed_binary", "operation=http_probe"} {
+		if !strings.Contains(listOut.String(), want) {
+			t.Fatalf("expected list output to contain %q, got %q", want, listOut.String())
+		}
 	}
 
 	var readOut bytes.Buffer
@@ -8338,7 +8344,7 @@ func TestToolchainAuthoredToolCommandsValidateWriteListAndRead(t *testing.T) {
 	if err := readCmd.Execute(); err != nil {
 		t.Fatalf("read authored tool: %v", err)
 	}
-	for _, want := range []string{"authored-tool: name=web-login-state-enumerator", "parser=web_login_state_parser", "manifest="} {
+	for _, want := range []string{"authored-tool: name=web-login-state-enumerator", "parser=web_login_state_parser", "adapter=managed_binary", "operation=http_probe", "manifest="} {
 		if !strings.Contains(readOut.String(), want) {
 			t.Fatalf("expected read output to contain %q, got %q", want, readOut.String())
 		}
@@ -8357,6 +8363,33 @@ func TestToolchainAuthoredToolValidateRejectsRawScript(t *testing.T) {
 	err := cmd.Execute()
 	if err == nil || !strings.Contains(err.Error(), "raw_script") {
 		t.Fatalf("expected raw script validation error, got %v output=%q", err, out.String())
+	}
+}
+
+func TestToolchainAuthoredToolValidateRejectsUnknownFieldAndDependencyCommand(t *testing.T) {
+	unknownPath := filepath.Join(t.TempDir(), "unknown-authored-tool.yaml")
+	if err := os.WriteFile(unknownPath, []byte(validAuthoredToolSpecYAMLForCLITest()+"scriptlet: nuclei -u $TARGET\n"), 0o644); err != nil {
+		t.Fatalf("write unknown authored spec: %v", err)
+	}
+	var unknownOut bytes.Buffer
+	unknownCmd := newRootCommand(&unknownOut, new(bytes.Buffer))
+	unknownCmd.SetArgs([]string{"toolchain", "authored-tool-validate", unknownPath})
+	err := unknownCmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "scriptlet") {
+		t.Fatalf("expected unknown field validation error, got %v output=%q", err, unknownOut.String())
+	}
+
+	commandPath := filepath.Join(t.TempDir(), "command-authored-tool.yaml")
+	commandSpec := strings.Replace(validAuthoredToolSpecYAMLForCLITest(), "install_hint: install managed httpx\n", "install_hint: install managed httpx\n    install_command: [ouro-toolchain, install, httpx]\n", 1)
+	if err := os.WriteFile(commandPath, []byte(commandSpec), 0o644); err != nil {
+		t.Fatalf("write command authored spec: %v", err)
+	}
+	var commandOut bytes.Buffer
+	commandCmd := newRootCommand(&commandOut, new(bytes.Buffer))
+	commandCmd.SetArgs([]string{"toolchain", "authored-tool-validate", commandPath})
+	err = commandCmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "install_command") {
+		t.Fatalf("expected dependency command validation error, got %v output=%q", err, commandOut.String())
 	}
 }
 
@@ -8538,6 +8571,9 @@ capabilities:
   - web.auth_state_tracking
   - evidence.collection
 parser: web_login_state_parser
+adapter:
+  id: managed_binary
+  operation: http_probe
 inputs:
   - name: target_url
     type: url
@@ -8554,9 +8590,8 @@ dependencies:
   - name: httpx
     kind: binary
     optional: true
-    health_command: [httpx, -version]
+    source: projectdiscovery/httpx
     install_hint: install managed httpx
-    install_command: [ouro-toolchain, install, httpx]
 `
 }
 
