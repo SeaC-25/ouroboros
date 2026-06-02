@@ -1520,6 +1520,10 @@ func NewRuntimeWorkerTransportHTTPHandlerWithOptions(root, workerID string, opti
 			http.Error(w, "worker transport receiver requires http-json request", http.StatusBadRequest)
 			return
 		}
+		if err := requireRuntimeWorkerSideEffectSafetyAuthorization(root, time.Now().UTC()); err != nil {
+			http.Error(w, "worker transport receiver safety authorization: "+err.Error(), http.StatusBadRequest)
+			return
+		}
 		request.Status = "pending"
 		request.TransportMode = "file-outbox"
 		request.AckedAt = ""

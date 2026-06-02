@@ -906,6 +906,136 @@ func TestRuntimeWorkerTransportHTTPHandlerRequiresBearerTokenWithoutWritingReque
 	}
 }
 
+func TestRuntimeWorkerTransportHTTPHandlerRejectsBearerTokenBeforeSafetyAuthorization(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	now := time.Date(2026, 6, 2, 15, 28, 0, 0, time.UTC)
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	body := RuntimeWorkerTransportDispatchRequest{
+		Version:               1,
+		Status:                "pending",
+		TransportMode:         "http-json",
+		DispatchExecutionPath: filepath.Join(root, "runtime", "worker-queue-dispatch-executions", "dispatch.json"),
+		ClaimPath:             filepath.Join(root, "runtime", "worker-queue-claims", "claim.json"),
+		WorkerID:              "remote-web-1",
+		RunID:                 "run-http",
+		ExecutionID:           "tool-web",
+		Tool:                  "web-api-pack",
+		Capability:            "web.discovery",
+		CreatedAt:             now.Format(time.RFC3339Nano),
+	}
+	data, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	writeRuntimeWorkerDisabledSafetyScope(t, root)
+	handler := NewRuntimeWorkerTransportHTTPHandlerWithOptions(root, "remote-web-1", RuntimeWorkerTransportHTTPHandlerOptions{
+		AuthToken: "secret-worker-token",
+	})
+
+	missing := httptest.NewRecorder()
+	handler.ServeHTTP(missing, httptest.NewRequest(http.MethodPost, "/dispatch", strings.NewReader(string(data))))
+	if missing.Code != http.StatusUnauthorized || strings.Contains(missing.Body.String(), "safety bypass authorization") {
+		t.Fatalf("expected bearer rejection before safety details, got status=%d body=%s", missing.Code, missing.Body.String())
+	}
+	wrongRequest := httptest.NewRequest(http.MethodPost, "/dispatch", strings.NewReader(string(data)))
+	wrongRequest.Header.Set("Authorization", "Bearer wrong-token")
+	wrong := httptest.NewRecorder()
+	handler.ServeHTTP(wrong, wrongRequest)
+	if wrong.Code != http.StatusUnauthorized || strings.Contains(wrong.Body.String(), "safety bypass authorization") {
+		t.Fatalf("expected wrong bearer rejection before safety details, got status=%d body=%s", wrong.Code, wrong.Body.String())
+	}
+	requests, err := ListRuntimeWorkerTransportDispatchRequests(root, "remote-web-1")
+	if err != nil {
+		t.Fatalf("list worker transport requests after unauthorized attempts: %v", err)
+	}
+	if len(requests) != 0 {
+		t.Fatalf("unauthorized requests must not be persisted, got %#v", requests)
+	}
+}
+
+func TestRuntimeWorkerTransportHTTPHandlerRequiresCurrentSafetyAuthorizationBeforePersistingRequest(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	now := time.Date(2026, 6, 2, 15, 30, 0, 0, time.UTC)
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	body := RuntimeWorkerTransportDispatchRequest{
+		Version:               1,
+		Status:                "pending",
+		TransportMode:         "http-json",
+		DispatchExecutionPath: filepath.Join(root, "runtime", "worker-queue-dispatch-executions", "dispatch.json"),
+		ClaimPath:             filepath.Join(root, "runtime", "worker-queue-claims", "claim.json"),
+		WorkerID:              "remote-web-1",
+		RunID:                 "run-http",
+		ExecutionID:           "tool-web",
+		Tool:                  "web-api-pack",
+		Capability:            "web.discovery",
+		CreatedAt:             now.Format(time.RFC3339Nano),
+	}
+	data, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	writeRuntimeWorkerDisabledSafetyScope(t, root)
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/dispatch", strings.NewReader(string(data)))
+	NewRuntimeWorkerTransportHTTPHandler(root, "remote-web-1").ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "worker runtime side effect requires current safety bypass authorization") {
+		t.Fatalf("expected strict safety authorization rejection, got status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	requests, err := ListRuntimeWorkerTransportDispatchRequests(root, "remote-web-1")
+	if err != nil {
+		t.Fatalf("list worker transport requests after blocked http receive: %v", err)
+	}
+	if len(requests) != 0 {
+		t.Fatalf("blocked http receive must not persist file-outbox request, got %#v", requests)
+	}
+}
+
+func TestRuntimeWorkerTransportHTTPHandlerAllowsRequestWithCurrentSafetyAuthorization(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	now := time.Date(2026, 6, 2, 15, 32, 0, 0, time.UTC)
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	body := RuntimeWorkerTransportDispatchRequest{
+		Version:               1,
+		Status:                "pending",
+		TransportMode:         "http-json",
+		DispatchExecutionPath: filepath.Join(root, "runtime", "worker-queue-dispatch-executions", "dispatch.json"),
+		ClaimPath:             filepath.Join(root, "runtime", "worker-queue-claims", "claim.json"),
+		WorkerID:              "remote-web-1",
+		RunID:                 "run-http",
+		ExecutionID:           "tool-web",
+		Tool:                  "web-api-pack",
+		Capability:            "web.discovery",
+		CreatedAt:             now.Format(time.RFC3339Nano),
+	}
+	data, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	writeRuntimeWorkerDisabledSafetyScope(t, root)
+	writeRuntimeWorkerCurrentSafetyAuthorization(t, root)
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/dispatch", strings.NewReader(string(data)))
+	NewRuntimeWorkerTransportHTTPHandler(root, "remote-web-1").ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("expected authorized request to be accepted, got status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	requests, err := ListRuntimeWorkerTransportDispatchRequests(root, "remote-web-1")
+	if err != nil {
+		t.Fatalf("list worker transport requests after authorized http receive: %v", err)
+	}
+	if len(requests) != 1 || requests[0].Status != "pending" || requests[0].TransportMode != "file-outbox" {
+		t.Fatalf("expected one authorized pending file-outbox request, got %#v", requests)
+	}
+}
+
 func TestRuntimeWorkerQueueDispatchResultHTTPHandlerSubmitsAuthorizedResult(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
 	now := time.Date(2026, 5, 30, 18, 30, 0, 0, time.UTC)

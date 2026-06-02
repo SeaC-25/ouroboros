@@ -11633,6 +11633,7 @@ func TestRuntimeWorkerLifecyclePolicyCommandRejectsLeaseRecoveryWithoutLifecycle
 	if err := app.InitWorkspace(root); err != nil {
 		t.Fatalf("init workspace: %v", err)
 	}
+	t.Setenv("OURO_MISSING_WORKER_RECEIVER_TOKEN", "")
 
 	var out bytes.Buffer
 	var stderr bytes.Buffer
@@ -16142,6 +16143,7 @@ func TestRuntimeWorkerTransportServeHTTPCommandRejectsNegativeMaxRequestsBeforeL
 		"--execute",
 		"--listen", "not-a-tcp-address",
 		"--max-requests", "-1",
+		"--auth-token-env", "OURO_MISSING_WORKER_RECEIVER_TOKEN",
 	})
 	err := cmd.Execute()
 	if err == nil || !strings.Contains(err.Error(), "--max-requests cannot be negative") {
@@ -16241,6 +16243,153 @@ func TestRuntimeWorkerTransportServeHTTPCommandPersistsOneRequest(t *testing.T) 
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("expected serve output to contain %q, got %q", want, out.String())
 		}
+	}
+}
+
+func TestRuntimeWorkerTransportServeHTTPCommandRequiresCurrentSafetyAuthorizationBeforePersistingRequest(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	writeRuntimeWorkerHTTPDisabledSafetyScope(t, root)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("allocate listen address: %v", err)
+	}
+	addr := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatalf("close temporary listener: %v", err)
+	}
+
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{
+		"runtime", "worker-transport-serve-http", root, "remote-web-1",
+		"--execute",
+		"--listen", addr,
+		"--max-requests", "1",
+	})
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Execute()
+	}()
+
+	body := app.RuntimeWorkerTransportDispatchRequest{
+		Version:               1,
+		Status:                "pending",
+		TransportMode:         "http-json",
+		DispatchExecutionPath: filepath.Join(root, "runtime", "worker-queue-dispatch-executions", "dispatch.json"),
+		ClaimPath:             filepath.Join(root, "runtime", "worker-queue-claims", "claim.json"),
+		WorkerID:              "remote-web-1",
+		RunID:                 "run-http",
+		ExecutionID:           "tool-web",
+		Tool:                  "web-api-pack",
+		Capability:            "web.discovery",
+		CreatedAt:             time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	data, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	client := http.Client{Timeout: 100 * time.Millisecond}
+	var blockedBody string
+	var lastErr error
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		response, err := client.Post("http://"+addr+"/dispatch", "application/json", bytes.NewReader(data))
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		blockedData, _ := io.ReadAll(response.Body)
+		_ = response.Body.Close()
+		blockedBody = string(blockedData)
+		if response.StatusCode == http.StatusBadRequest && strings.Contains(blockedBody, "worker runtime side effect requires current safety bypass authorization") {
+			lastErr = nil
+			break
+		}
+		if response.StatusCode >= 200 && response.StatusCode <= 299 {
+			t.Fatalf("blocked worker transport request must not be accepted before safety authorization, got status=%d body=%s", response.StatusCode, blockedBody)
+		}
+		lastErr = fmt.Errorf("unexpected status %d body=%s", response.StatusCode, blockedBody)
+	}
+	if lastErr != nil {
+		t.Fatalf("post blocked worker transport request: %v", lastErr)
+	}
+	requests, err := app.ListRuntimeWorkerTransportDispatchRequests(root, "remote-web-1")
+	if err != nil {
+		t.Fatalf("list worker transport requests after blocked receive: %v", err)
+	}
+	if len(requests) != 0 {
+		t.Fatalf("blocked http receive must not persist requests, got %#v", requests)
+	}
+
+	writeRuntimeWorkerHTTPCurrentSafetyAuthorization(t, root)
+	var accepted bool
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		response, err := client.Post("http://"+addr+"/dispatch", "application/json", bytes.NewReader(data))
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		_ = response.Body.Close()
+		if response.StatusCode == http.StatusAccepted {
+			accepted = true
+			lastErr = nil
+			break
+		}
+		lastErr = fmt.Errorf("unexpected status %d after authorization", response.StatusCode)
+	}
+	if !accepted {
+		t.Fatalf("post authorized worker transport request: %v", lastErr)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("serve http worker transport: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("serve http command did not exit after authorized max request")
+	}
+	requests, err = app.ListRuntimeWorkerTransportDispatchRequests(root, "remote-web-1")
+	if err != nil {
+		t.Fatalf("list worker transport requests after authorized receive: %v", err)
+	}
+	if len(requests) != 1 || requests[0].Status != "pending" || requests[0].TransportMode != "file-outbox" {
+		t.Fatalf("expected one authorized pending request, got %#v", requests)
+	}
+	if !strings.Contains(out.String(), "worker-transport-serve-http: accepted=1") {
+		t.Fatalf("expected command to count only authorized accepted request, got output=%q blocked=%q", out.String(), blockedBody)
+	}
+}
+
+func writeRuntimeWorkerHTTPDisabledSafetyScope(t *testing.T, root string) {
+	t.Helper()
+	scope := `version: 1
+scope:
+  target_policy: disabled
+  targets: []
+  exclusions: []
+execution:
+  isolation: process
+`
+	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
+		t.Fatalf("write disabled safety scope: %v", err)
+	}
+}
+
+func writeRuntimeWorkerHTTPCurrentSafetyAuthorization(t *testing.T, root string) {
+	t.Helper()
+	authorization := `version: 1
+safety_bypasses:
+  - control: scope.target_policy
+    mode: disabled
+    authorized_by: alice
+    reason: authorized runtime worker target-boundary bypass
+    ticket: ENG-4242
+    expires: 2999-06-30
+`
+	if err := os.WriteFile(filepath.Join(root, "authorization.yaml"), []byte(authorization), 0o644); err != nil {
+		t.Fatalf("write current safety authorization: %v", err)
 	}
 }
 
