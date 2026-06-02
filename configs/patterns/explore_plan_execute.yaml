@@ -1,0 +1,53 @@
+name: explore_plan_execute
+version: "1"
+metadata:
+  purpose: deliberate explore, plan, execute loop
+  source: aide-for-pentest
+max_steps: 9
+nodes:
+  - id: explore
+    kind: action
+  - id: plan
+    kind: planning
+  - id: execute
+    kind: action
+  - id: evaluate
+    kind: decision
+  - id: complete
+    kind: result
+    terminal: true
+  - id: exhausted
+    kind: result
+    terminal: true
+edges:
+  - from: explore
+    to: plan
+    condition: signal_found
+  - from: plan
+    to: execute
+    condition: plan_ready
+  - from: execute
+    to: evaluate
+    condition: always
+  - from: evaluate
+    to: complete
+    condition: objective_met
+  - from: evaluate
+    to: explore
+    condition: needs_more_signal
+  - from: evaluate
+    to: exhausted
+    condition: exhausted
+conditions:
+  - name: signal_found
+    description: exploration found enough evidence to plan
+  - name: plan_ready
+    description: a bounded execution plan exists
+  - name: always
+    description: unconditional transition
+  - name: objective_met
+    description: objective has verified evidence
+  - name: needs_more_signal
+    description: execution needs more exploration
+  - name: exhausted
+    description: no useful path remains

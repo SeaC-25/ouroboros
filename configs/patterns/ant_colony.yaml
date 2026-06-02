@@ -1,0 +1,60 @@
+name: ant_colony
+version: "1"
+metadata:
+  purpose: parallel path search with shared trail memory
+  source: aide-for-pentest
+max_steps: 16
+nodes:
+  - id: spawn
+    kind: orchestration
+  - id: explore_path
+    kind: action
+  - id: deposit
+    kind: memory
+  - id: converge
+    kind: decision
+  - id: exploit_path
+    kind: action
+  - id: complete
+    kind: result
+    terminal: true
+  - id: exhausted
+    kind: result
+    terminal: true
+edges:
+  - from: spawn
+    to: explore_path
+    condition: workers_available
+  - from: explore_path
+    to: deposit
+    condition: signal_found
+  - from: deposit
+    to: converge
+    condition: always
+  - from: converge
+    to: exploit_path
+    condition: strong_trail
+  - from: converge
+    to: explore_path
+    condition: weak_trail
+  - from: exploit_path
+    to: complete
+    condition: objective_met
+  - from: converge
+    to: exhausted
+    condition: exhausted
+conditions:
+  - name: workers_available
+    description: parallel workers can be assigned
+  - name: signal_found
+    description: a path produced useful evidence
+  - name: always
+    description: unconditional transition
+  - name: strong_trail
+    description: shared memory favors one path
+  - name: weak_trail
+    description: no path has enough confidence yet
+  - name: objective_met
+    description: objective has verified evidence
+  - name: exhausted
+    description: path search budget is exhausted

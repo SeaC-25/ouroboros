@@ -1,0 +1,11 @@
+name: ctf-pack
+version: "0.1.0"
+capabilities:
+  - ctf.challenge_classification
+  - ctf.artifact_analysis
+  - ctf.fast_hypothesis
+  - ctf.candidate_verification
+  - ctf.result_proof
+runner: native
+parser: ctf_parser
+healthcheck: built_in

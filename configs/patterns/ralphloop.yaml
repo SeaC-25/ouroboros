@@ -1,0 +1,46 @@
+name: ralphloop
+version: "1"
+metadata:
+  purpose: persistent retry with bounded mutation
+  source: aide-for-pentest
+max_steps: 12
+nodes:
+  - id: attempt
+    kind: action
+  - id: evaluate
+    kind: decision
+  - id: mutate
+    kind: mutation
+  - id: success
+    kind: result
+    terminal: true
+  - id: exhausted
+    kind: result
+    terminal: true
+edges:
+  - from: attempt
+    to: evaluate
+    condition: always
+  - from: evaluate
+    to: success
+    condition: solved
+  - from: evaluate
+    to: mutate
+    condition: failed_retryable
+  - from: mutate
+    to: attempt
+    condition: budget_available
+  - from: evaluate
+    to: exhausted
+    condition: exhausted
+conditions:
+  - name: always
+    description: unconditional transition
+  - name: solved
+    description: objective is proven complete
+  - name: failed_retryable
+    description: attempt failed but produced a mutation path
+  - name: budget_available
+    description: retry budget remains
+  - name: exhausted
+    description: retry budget or useful mutations are exhausted

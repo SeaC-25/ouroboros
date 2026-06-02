@@ -1,0 +1,11 @@
+name: web-api-pack
+version: "0.1.0"
+capabilities:
+  - web.discovery
+  - web.route_enumeration
+  - web.auth_state_tracking
+  - web.candidate_generation
+  - evidence.collection
+runner: native
+parser: web_api_parser
+healthcheck: built_in

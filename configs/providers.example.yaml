@@ -1,0 +1,6 @@
+version: 1
+providers:
+  - name: offline
+    type: offline
+    model: offline-model
+    enabled: true

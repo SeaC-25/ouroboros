@@ -1,0 +1,16 @@
+id: test-template
+
+info:
+  name: Test Exposure Template
+  author: ouroboros
+  severity: info
+  description: Detects a deliberately exposed test template for corpus search.
+
+requests:
+  - method: GET
+    path:
+      - "{{BaseURL}}/.well-known/ouroboros-test"
+    matchers:
+      - type: word
+        words:
+          - "ouroboros corpus exposure"

@@ -1,0 +1,2609 @@
+package app
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"net/netip"
+	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+	"unicode"
+
+	"github.com/ouroboros/ouroboros/internal/compiler"
+	"github.com/ouroboros/ouroboros/internal/eventlog"
+	"github.com/ouroboros/ouroboros/internal/evidence"
+	"github.com/ouroboros/ouroboros/internal/frontier"
+	"github.com/ouroboros/ouroboros/internal/toolchain"
+)
+
+type ToolchainStatus struct {
+	Name            string
+	Version         string
+	Runner          string
+	Parser          string
+	CapabilityCount int
+	Health          toolchain.HealthReport
+	Dependencies    []toolchain.DependencyReport
+	InstallPlan     []toolchain.DependencyInstallStep
+}
+
+type ToolCompilePreviewOptions struct {
+	Action           compiler.SemanticAction
+	Budget           compiler.CompileBudget
+	DomainPriorities []compiler.DomainPriority
+	FrontierScores   []compiler.CandidateFrontierScore
+	HistoricalStats  []compiler.CandidateHistory
+}
+
+type ToolCompilePreview struct {
+	Workspace string                  `json:"workspace"`
+	Action    compiler.SemanticAction `json:"action"`
+	Mode      string                  `json:"mode"`
+	Nodes     []compiler.PlanNode     `json:"nodes"`
+	Warnings  []string                `json:"warnings,omitempty"`
+}
+
+type ToolCompilePreviewReview struct {
+	Status     string                              `json:"status"`
+	Mode       string                              `json:"mode"`
+	Path       string                              `json:"path,omitempty"`
+	Preview    ToolCompilePreview                  `json:"preview"`
+	Annotation *ToolCompilePreviewReviewAnnotation `json:"annotation,omitempty"`
+}
+
+type ToolCompilePreviewReviewAnnotation struct {
+	Decision   string `json:"decision"`
+	Reason     string `json:"reason,omitempty"`
+	Reviewer   string `json:"reviewer,omitempty"`
+	ReviewedAt string `json:"reviewed_at,omitempty"`
+}
+
+type ToolCompilePreviewReviewAnnotationOptions struct {
+	Decision   string
+	Reason     string
+	Reviewer   string
+	ReviewedAt time.Time
+}
+
+type ToolCompilePreviewReviewComparison struct {
+	Status       string                                  `json:"status"`
+	Mode         string                                  `json:"mode"`
+	Base         ToolCompilePreviewReviewComparisonSide  `json:"base"`
+	Candidate    ToolCompilePreviewReviewComparisonSide  `json:"candidate"`
+	Summary      ToolCompilePreviewReviewComparisonStats `json:"summary"`
+	NodeDiffs    []ToolCompilePreviewReviewNodeDiff      `json:"node_diffs,omitempty"`
+	WarningDiffs []ToolCompilePreviewReviewWarningDiff   `json:"warning_diffs,omitempty"`
+}
+
+type ToolCompilePreviewReviewComparisonSide struct {
+	Path     string                  `json:"path"`
+	Action   compiler.SemanticAction `json:"action"`
+	Nodes    int                     `json:"nodes"`
+	Warnings int                     `json:"warnings"`
+	Decision string                  `json:"decision,omitempty"`
+}
+
+type ToolCompilePreviewReviewComparisonStats struct {
+	NodeDelta          int `json:"node_delta"`
+	WarningDelta       int `json:"warning_delta"`
+	AddedNodes         int `json:"added_nodes"`
+	RemovedNodes       int `json:"removed_nodes"`
+	ChangedNodes       int `json:"changed_nodes"`
+	ReorderedNodes     int `json:"reordered_nodes"`
+	ScoreChangedNodes  int `json:"score_changed_nodes"`
+	SignalChangedNodes int `json:"signal_changed_nodes"`
+}
+
+type ToolCompilePreviewReviewNodeDiff struct {
+	Change           string   `json:"change"`
+	ManifestName     string   `json:"manifest_name"`
+	Capability       string   `json:"capability"`
+	BaseID           string   `json:"base_id,omitempty"`
+	CandidateID      string   `json:"candidate_id,omitempty"`
+	BaseIndex        int      `json:"base_index"`
+	CandidateIndex   int      `json:"candidate_index"`
+	BaseScore        float64  `json:"base_score,omitempty"`
+	CandidateScore   float64  `json:"candidate_score,omitempty"`
+	BaseSignals      []string `json:"base_signals,omitempty"`
+	CandidateSignals []string `json:"candidate_signals,omitempty"`
+}
+
+type ToolCompilePreviewReviewWarningDiff struct {
+	Change  string `json:"change"`
+	Warning string `json:"warning"`
+}
+
+type ToolCompilePreviewReviewSelection struct {
+	Path            string                  `json:"path,omitempty"`
+	Status          string                  `json:"status"`
+	Mode            string                  `json:"mode"`
+	ReviewPath      string                  `json:"review_path"`
+	Action          compiler.SemanticAction `json:"action"`
+	ReviewNodes     int                     `json:"review_nodes"`
+	ReviewWarnings  int                     `json:"review_warnings"`
+	SupersededPaths []string                `json:"superseded_paths,omitempty"`
+	SelectedBy      string                  `json:"selected_by,omitempty"`
+	SelectedAt      string                  `json:"selected_at,omitempty"`
+	ClearedBy       string                  `json:"cleared_by,omitempty"`
+	ClearedAt       string                  `json:"cleared_at,omitempty"`
+	Reason          string                  `json:"reason,omitempty"`
+}
+
+type ToolCompilePreviewReviewSelectionOptions struct {
+	SelectedBy string
+	SelectedAt time.Time
+	Reason     string
+}
+
+type ToolCompilePreviewReviewSelectionClearOptions struct {
+	ClearedBy string
+	ClearedAt time.Time
+	Reason    string
+}
+
+type ToolCompilePreviewSignalArtifact struct {
+	Path    string                    `json:"path"`
+	Status  string                    `json:"status"`
+	Mode    string                    `json:"mode"`
+	Signals ToolCompilePreviewSignals `json:"signals"`
+}
+
+type ToolCompilePreviewSignalDeriveOptions struct {
+	Write        bool
+	MaxPlanNodes int
+}
+
+type ToolCompilePreviewSignalDerivation struct {
+	Path    string                                    `json:"path"`
+	Status  string                                    `json:"status"`
+	Mode    string                                    `json:"mode"`
+	RunID   string                                    `json:"run_id"`
+	Signals ToolCompilePreviewSignals                 `json:"signals"`
+	Summary ToolCompilePreviewSignalDerivationSummary `json:"summary"`
+}
+
+type ToolCompilePreviewSignalDerivationSummary struct {
+	ToolExecutions int `json:"tool_executions"`
+	Successes      int `json:"successes"`
+	Failures       int `json:"failures"`
+	Ignored        int `json:"ignored"`
+	FrontierScores int `json:"frontier_scores"`
+}
+
+type ToolCompilePreviewSignals struct {
+	SchemaVersion    int                                      `json:"schema_version,omitempty"`
+	Budget           ToolCompilePreviewSignalBudget           `json:"budget,omitempty"`
+	DomainPriorities []ToolCompilePreviewSignalDomainPriority `json:"domain_priorities,omitempty"`
+	FrontierScores   []ToolCompilePreviewSignalFrontierScore  `json:"frontier_scores,omitempty"`
+	HistoricalStats  []ToolCompilePreviewSignalHistory        `json:"historical_stats,omitempty"`
+}
+
+type ToolCompilePreviewSignalBudget struct {
+	MaxPlanNodes int `json:"max_plan_nodes,omitempty"`
+}
+
+type ToolCompilePreviewSignalDomainPriority struct {
+	Domain string  `json:"domain"`
+	Weight float64 `json:"weight"`
+}
+
+type ToolCompilePreviewSignalFrontierScore struct {
+	ManifestName string                       `json:"manifest_name"`
+	Capability   string                       `json:"capability"`
+	Path         ToolCompilePreviewSignalPath `json:"path"`
+}
+
+type ToolCompilePreviewSignalPath struct {
+	ID                 string  `json:"id,omitempty"`
+	Target             string  `json:"target,omitempty"`
+	Hypothesis         string  `json:"hypothesis,omitempty"`
+	ExpectedUnlock     string  `json:"expected_unlock,omitempty"`
+	MissionValue       float64 `json:"mission_value,omitempty"`
+	UnlockPotential    float64 `json:"unlock_potential,omitempty"`
+	EvidenceConfidence float64 `json:"evidence_confidence,omitempty"`
+	Novelty            float64 `json:"novelty,omitempty"`
+	Cost               float64 `json:"cost,omitempty"`
+	DuplicateRisk      float64 `json:"duplicate_risk,omitempty"`
+	Noise              float64 `json:"noise,omitempty"`
+	ExhaustedPenalty   float64 `json:"exhausted_penalty,omitempty"`
+}
+
+type ToolCompilePreviewSignalHistory struct {
+	ManifestName string `json:"manifest_name"`
+	Capability   string `json:"capability"`
+	Successes    int    `json:"successes,omitempty"`
+	Failures     int    `json:"failures,omitempty"`
+}
+
+type ToolchainInstallRequest struct {
+	Status      string   `json:"status"`
+	Pack        string   `json:"pack"`
+	Dependency  string   `json:"dependency"`
+	Kind        string   `json:"kind"`
+	State       string   `json:"state"`
+	Required    bool     `json:"required"`
+	Command     []string `json:"command"`
+	Hint        string   `json:"hint,omitempty"`
+	Source      string   `json:"source,omitempty"`
+	ImageDigest string   `json:"image_digest,omitempty"`
+	DependsOn   []string `json:"depends_on,omitempty"`
+	Path        string   `json:"path,omitempty"`
+}
+
+type ToolchainInstallRequestSummary struct {
+	Total    int `json:"total"`
+	Pending  int `json:"pending"`
+	Approved int `json:"approved"`
+	Denied   int `json:"denied"`
+}
+
+type ToolchainInstallDispatchPlan struct {
+	Summary ToolchainInstallRequestSummary `json:"summary"`
+	Ready   []ToolchainInstallRequest      `json:"ready"`
+	Skipped []ToolchainInstallDispatchSkip `json:"skipped"`
+}
+
+type ToolchainInstallDispatchSkip struct {
+	Request ToolchainInstallRequest `json:"request"`
+	Reason  string                  `json:"reason"`
+}
+
+type ToolchainInstallDispatch struct {
+	Status  string                         `json:"status"`
+	Mode    string                         `json:"mode"`
+	Path    string                         `json:"path,omitempty"`
+	Summary ToolchainInstallRequestSummary `json:"summary"`
+	Ready   []ToolchainInstallRequest      `json:"ready"`
+	Skipped []ToolchainInstallDispatchSkip `json:"skipped"`
+}
+
+type ToolchainInstallDispatchExecutionOptions struct {
+	Execute bool
+}
+
+type ToolchainInstallDispatchExecution struct {
+	Status       string                                    `json:"status"`
+	Mode         string                                    `json:"mode"`
+	Path         string                                    `json:"path,omitempty"`
+	DispatchPath string                                    `json:"dispatch_path"`
+	Warnings     []string                                  `json:"warnings,omitempty"`
+	Results      []ToolchainInstallDispatchExecutionResult `json:"results"`
+	Skipped      []ToolchainInstallDispatchSkip            `json:"skipped"`
+}
+
+type ToolchainInstallDispatchExecutionResult struct {
+	RequestPath string   `json:"request_path,omitempty"`
+	Pack        string   `json:"pack"`
+	Dependency  string   `json:"dependency"`
+	Command     []string `json:"command"`
+	Status      string   `json:"status"`
+	Output      string   `json:"output,omitempty"`
+	Error       string   `json:"error,omitempty"`
+}
+
+type ToolchainInstallRetryPlan struct {
+	Summary ToolchainInstallRetrySummary     `json:"summary"`
+	Ready   []ToolchainInstallRetryCandidate `json:"ready"`
+	Skipped []ToolchainInstallRetrySkip      `json:"skipped"`
+}
+
+type ToolchainInstallRetrySummary struct {
+	Total   int `json:"total"`
+	Ready   int `json:"ready"`
+	Skipped int `json:"skipped"`
+}
+
+type ToolchainInstallRetryCandidate struct {
+	ExecutionPath string   `json:"execution_path"`
+	DispatchPath  string   `json:"dispatch_path"`
+	RequestPath   string   `json:"request_path,omitempty"`
+	Pack          string   `json:"pack"`
+	Dependency    string   `json:"dependency"`
+	Command       []string `json:"command"`
+	LastStatus    string   `json:"last_status"`
+	LastOutput    string   `json:"last_output,omitempty"`
+	LastError     string   `json:"last_error,omitempty"`
+}
+
+type ToolchainInstallRetrySkip struct {
+	ExecutionPath string `json:"execution_path"`
+	DispatchPath  string `json:"dispatch_path"`
+	RequestPath   string `json:"request_path,omitempty"`
+	Pack          string `json:"pack"`
+	Dependency    string `json:"dependency"`
+	Status        string `json:"status"`
+	Reason        string `json:"reason"`
+}
+
+type ToolchainInstallRetryDispatch struct {
+	Status  string                           `json:"status"`
+	Mode    string                           `json:"mode"`
+	Path    string                           `json:"path,omitempty"`
+	Summary ToolchainInstallRetrySummary     `json:"summary"`
+	Ready   []ToolchainInstallRetryCandidate `json:"ready"`
+	Skipped []ToolchainInstallRetrySkip      `json:"skipped"`
+}
+
+type ToolchainInstallRetryDispatchExecutionOptions struct {
+	Execute bool
+}
+
+type ToolchainInstallRetryDispatchExecution struct {
+	Status            string                                `json:"status"`
+	Mode              string                                `json:"mode"`
+	Path              string                                `json:"path,omitempty"`
+	RetryDispatchPath string                                `json:"retry_dispatch_path"`
+	Warnings          []string                              `json:"warnings,omitempty"`
+	Results           []ToolchainInstallRetryDispatchResult `json:"results"`
+	Skipped           []ToolchainInstallRetrySkip           `json:"skipped"`
+}
+
+type ToolchainInstallRetryDispatchResult struct {
+	ExecutionPath string   `json:"execution_path"`
+	DispatchPath  string   `json:"dispatch_path"`
+	RequestPath   string   `json:"request_path,omitempty"`
+	Pack          string   `json:"pack"`
+	Dependency    string   `json:"dependency"`
+	Command       []string `json:"command"`
+	LastStatus    string   `json:"last_status"`
+	LastOutput    string   `json:"last_output,omitempty"`
+	LastError     string   `json:"last_error,omitempty"`
+	Status        string   `json:"status"`
+	Output        string   `json:"output,omitempty"`
+	Error         string   `json:"error,omitempty"`
+}
+
+func SummarizeToolchainInstallRequests(requests []ToolchainInstallRequest) ToolchainInstallRequestSummary {
+	summary := ToolchainInstallRequestSummary{Total: len(requests)}
+	for _, request := range requests {
+		switch strings.ToLower(strings.TrimSpace(request.Status)) {
+		case "pending":
+			summary.Pending++
+		case "approved":
+			summary.Approved++
+		case "denied":
+			summary.Denied++
+		}
+	}
+	return summary
+}
+
+func (s ToolchainInstallRequestSummary) Line() string {
+	return fmt.Sprintf("total=%d pending=%d approved=%d denied=%d", s.Total, s.Pending, s.Approved, s.Denied)
+}
+
+func (s ToolchainInstallRequestSummary) Compact() string {
+	return fmt.Sprintf("p%d/a%d/d%d", s.Pending, s.Approved, s.Denied)
+}
+
+func LoadToolCompilePreviewSignals(root string) (ToolCompilePreviewSignals, bool, error) {
+	path := toolCompilePreviewSignalsPath(root)
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return ToolCompilePreviewSignals{}, false, nil
+	}
+	if err != nil {
+		return ToolCompilePreviewSignals{}, false, fmt.Errorf("read compile preview signals: %w", err)
+	}
+	var signals ToolCompilePreviewSignals
+	if err := json.Unmarshal(data, &signals); err != nil {
+		return ToolCompilePreviewSignals{}, false, fmt.Errorf("decode compile preview signals: %w", err)
+	}
+	if signals.SchemaVersion != 0 && signals.SchemaVersion != 1 {
+		return ToolCompilePreviewSignals{}, false, fmt.Errorf("unsupported compile preview signals schema_version: %d", signals.SchemaVersion)
+	}
+	return signals, true, nil
+}
+
+func WriteToolCompilePreviewSignals(root string, signals ToolCompilePreviewSignals) (ToolCompilePreviewSignalArtifact, error) {
+	normalized, err := normalizeToolCompilePreviewSignals(signals)
+	if err != nil {
+		return ToolCompilePreviewSignalArtifact{}, err
+	}
+	if _, err := toolCompilePreviewOptionsFromSignals(normalized); err != nil {
+		return ToolCompilePreviewSignalArtifact{}, err
+	}
+	dir := filepath.Join(root, "toolchain")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return ToolCompilePreviewSignalArtifact{}, fmt.Errorf("create compile preview signals directory: %w", err)
+	}
+	path := toolCompilePreviewSignalsPath(root)
+	data, err := json.MarshalIndent(normalized, "", "  ")
+	if err != nil {
+		return ToolCompilePreviewSignalArtifact{}, fmt.Errorf("encode compile preview signals: %w", err)
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return ToolCompilePreviewSignalArtifact{}, fmt.Errorf("write compile preview signals: %w", err)
+	}
+	return ToolCompilePreviewSignalArtifact{
+		Path:    path,
+		Status:  "written",
+		Mode:    "metadata-only",
+		Signals: normalized,
+	}, nil
+}
+
+func DeriveToolCompilePreviewSignalsFromReplay(ctx context.Context, root, runID string, options ToolCompilePreviewSignalDeriveOptions) (ToolCompilePreviewSignalDerivation, error) {
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return ToolCompilePreviewSignalDerivation{}, fmt.Errorf("run id is required")
+	}
+	if options.MaxPlanNodes < 0 {
+		return ToolCompilePreviewSignalDerivation{}, fmt.Errorf("max_plan_nodes must be non-negative")
+	}
+	eventDBPath := filepath.Join(root, "replay", "events.db")
+	if _, err := os.Stat(eventDBPath); err != nil {
+		if os.IsNotExist(err) {
+			return ToolCompilePreviewSignalDerivation{}, fmt.Errorf("replay event log not found: %s", eventDBPath)
+		}
+		return ToolCompilePreviewSignalDerivation{}, fmt.Errorf("stat replay event log: %w", err)
+	}
+	store, err := eventlog.OpenSQLite(eventDBPath)
+	if err != nil {
+		return ToolCompilePreviewSignalDerivation{}, err
+	}
+	defer store.Close()
+
+	events, err := store.Replay(ctx, runID)
+	if err != nil {
+		return ToolCompilePreviewSignalDerivation{}, err
+	}
+	if len(events) == 0 {
+		return ToolCompilePreviewSignalDerivation{}, fmt.Errorf("run %s has no replay events", runID)
+	}
+	manifests, err := toolchain.LoadManifests(filepath.Join(root, "toolchain"))
+	if err != nil {
+		return ToolCompilePreviewSignalDerivation{}, fmt.Errorf("load toolchain manifests: %w", err)
+	}
+	signals, summary, err := toolCompilePreviewSignalsFromReplayEvents(events, manifests, options)
+	if err != nil {
+		return ToolCompilePreviewSignalDerivation{}, err
+	}
+	derivation := ToolCompilePreviewSignalDerivation{
+		Path:    toolCompilePreviewSignalsPath(root),
+		Status:  "dry-run",
+		Mode:    "metadata-only",
+		RunID:   runID,
+		Signals: signals,
+		Summary: summary,
+	}
+	if options.Write {
+		artifact, err := WriteToolCompilePreviewSignals(root, signals)
+		if err != nil {
+			return ToolCompilePreviewSignalDerivation{}, err
+		}
+		derivation.Path = artifact.Path
+		derivation.Status = artifact.Status
+		derivation.Signals = artifact.Signals
+	}
+	return derivation, nil
+}
+
+func PreviewToolCompilePlan(root string, options ToolCompilePreviewOptions) (ToolCompilePreview, error) {
+	persistedSignals, found, err := LoadToolCompilePreviewSignals(root)
+	if err != nil {
+		return ToolCompilePreview{}, err
+	}
+	if found {
+		merged, err := mergeToolCompilePreviewOptions(options, persistedSignals)
+		if err != nil {
+			return ToolCompilePreview{}, err
+		}
+		options = merged
+	}
+	action := options.Action
+	if strings.TrimSpace(string(action)) == "" {
+		action = compiler.ActionDiscoverAssets
+	}
+	manifests, err := toolchain.LoadManifests(filepath.Join(root, "toolchain"))
+	if err != nil {
+		return ToolCompilePreview{}, fmt.Errorf("load toolchain manifests: %w", err)
+	}
+	plan, err := compiler.NewCompiler().Compile(compiler.CompileRequest{
+		Action: action,
+		Evidence: compiler.EvidenceSlice{
+			Nodes: []evidence.Node{
+				{
+					ID:         "fact-workspace",
+					Type:       evidence.NodeTarget,
+					Label:      filepath.Base(root),
+					SourceKind: "workspace",
+				},
+			},
+		},
+		Manifests:        manifests,
+		Budget:           options.Budget,
+		DomainPriorities: append([]compiler.DomainPriority(nil), options.DomainPriorities...),
+		FrontierScores:   append([]compiler.CandidateFrontierScore(nil), options.FrontierScores...),
+		HistoricalStats:  append([]compiler.CandidateHistory(nil), options.HistoricalStats...),
+	})
+	if err != nil {
+		return ToolCompilePreview{}, err
+	}
+	return ToolCompilePreview{
+		Workspace: root,
+		Action:    action,
+		Mode:      "metadata-only",
+		Nodes:     append([]compiler.PlanNode(nil), plan.Nodes...),
+		Warnings:  append([]string(nil), plan.Warnings...),
+	}, nil
+}
+
+func CreateToolCompilePreviewReview(root string, options ToolCompilePreviewOptions) (ToolCompilePreviewReview, error) {
+	preview, err := PreviewToolCompilePlan(root, options)
+	if err != nil {
+		return ToolCompilePreviewReview{}, err
+	}
+	review := ToolCompilePreviewReview{
+		Status:  "dry-run",
+		Mode:    "metadata-only",
+		Preview: preview,
+	}
+	dir := toolCompilePreviewReviewDir(root)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return ToolCompilePreviewReview{}, fmt.Errorf("create compile preview review directory: %w", err)
+	}
+	review.Path = filepath.Join(dir, safeToolCompilePreviewReviewName(review)+".json")
+	data, err := json.MarshalIndent(review, "", "  ")
+	if err != nil {
+		return ToolCompilePreviewReview{}, fmt.Errorf("encode compile preview review: %w", err)
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(review.Path, data, 0o644); err != nil {
+		return ToolCompilePreviewReview{}, fmt.Errorf("write compile preview review: %w", err)
+	}
+	return review, nil
+}
+
+func ListToolCompilePreviewReviews(root string) ([]ToolCompilePreviewReview, error) {
+	doctor, err := DoctorWorkspace(root)
+	if err != nil {
+		return nil, err
+	}
+	if !doctor.Ready {
+		return nil, fmt.Errorf("workspace is not ready: %v", doctor.Errors)
+	}
+	paths, err := filepath.Glob(filepath.Join(toolCompilePreviewReviewDir(root), "*.json"))
+	if err != nil {
+		return nil, fmt.Errorf("glob compile preview reviews: %w", err)
+	}
+	sort.Strings(paths)
+	reviews := make([]ToolCompilePreviewReview, 0, len(paths))
+	for _, path := range paths {
+		review, err := readToolCompilePreviewReviewFile(path)
+		if err != nil {
+			return nil, err
+		}
+		reviews = append(reviews, review)
+	}
+	return reviews, nil
+}
+
+func ReadToolCompilePreviewReview(root, reviewPath string) (ToolCompilePreviewReview, error) {
+	doctor, err := DoctorWorkspace(root)
+	if err != nil {
+		return ToolCompilePreviewReview{}, err
+	}
+	if !doctor.Ready {
+		return ToolCompilePreviewReview{}, fmt.Errorf("workspace is not ready: %v", doctor.Errors)
+	}
+	path, err := resolveToolCompilePreviewReviewPath(root, reviewPath)
+	if err != nil {
+		return ToolCompilePreviewReview{}, err
+	}
+	return readToolCompilePreviewReviewFile(path)
+}
+
+func AnnotateToolCompilePreviewReview(root, reviewPath string, options ToolCompilePreviewReviewAnnotationOptions) (ToolCompilePreviewReview, error) {
+	annotation, err := normalizeToolCompilePreviewReviewAnnotation(options)
+	if err != nil {
+		return ToolCompilePreviewReview{}, err
+	}
+	doctor, err := DoctorWorkspace(root)
+	if err != nil {
+		return ToolCompilePreviewReview{}, err
+	}
+	if !doctor.Ready {
+		return ToolCompilePreviewReview{}, fmt.Errorf("workspace is not ready: %v", doctor.Errors)
+	}
+	path, err := resolveToolCompilePreviewReviewPath(root, reviewPath)
+	if err != nil {
+		return ToolCompilePreviewReview{}, err
+	}
+	review, err := readToolCompilePreviewReviewFile(path)
+	if err != nil {
+		return ToolCompilePreviewReview{}, err
+	}
+	review.Annotation = &annotation
+	data, err := json.MarshalIndent(review, "", "  ")
+	if err != nil {
+		return ToolCompilePreviewReview{}, fmt.Errorf("encode compile preview review annotation: %w", err)
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return ToolCompilePreviewReview{}, fmt.Errorf("write compile preview review annotation: %w", err)
+	}
+	review.Path = path
+	return review, nil
+}
+
+func CompareToolCompilePreviewReviews(root, baseReviewPath, candidateReviewPath string) (ToolCompilePreviewReviewComparison, error) {
+	base, err := ReadToolCompilePreviewReview(root, baseReviewPath)
+	if err != nil {
+		return ToolCompilePreviewReviewComparison{}, err
+	}
+	candidate, err := ReadToolCompilePreviewReview(root, candidateReviewPath)
+	if err != nil {
+		return ToolCompilePreviewReviewComparison{}, err
+	}
+	return compareToolCompilePreviewReviewValues(base, candidate), nil
+}
+
+func SelectToolCompilePreviewReview(root, reviewPath string, options ToolCompilePreviewReviewSelectionOptions) (ToolCompilePreviewReviewSelection, error) {
+	review, err := ReadToolCompilePreviewReview(root, reviewPath)
+	if err != nil {
+		return ToolCompilePreviewReviewSelection{}, err
+	}
+	reviews, err := ListToolCompilePreviewReviews(root)
+	if err != nil {
+		return ToolCompilePreviewReviewSelection{}, err
+	}
+	selectedBy := strings.TrimSpace(options.SelectedBy)
+	if selectedBy == "" {
+		selectedBy = "operator"
+	}
+	selectedAt := options.SelectedAt
+	if selectedAt.IsZero() {
+		selectedAt = time.Now().UTC()
+	}
+	superseded := make([]string, 0, len(reviews))
+	for _, candidate := range reviews {
+		if candidate.Path == "" || candidate.Path == review.Path {
+			continue
+		}
+		superseded = append(superseded, candidate.Path)
+	}
+	sort.Strings(superseded)
+	selection := ToolCompilePreviewReviewSelection{
+		Path:            toolCompilePreviewReviewSelectionPath(root),
+		Status:          "current",
+		Mode:            "metadata-only",
+		ReviewPath:      review.Path,
+		Action:          review.Preview.Action,
+		ReviewNodes:     len(review.Preview.Nodes),
+		ReviewWarnings:  len(review.Preview.Warnings),
+		SupersededPaths: superseded,
+		SelectedBy:      selectedBy,
+		SelectedAt:      selectedAt.UTC().Format(time.RFC3339),
+		Reason:          strings.TrimSpace(options.Reason),
+	}
+	if err := writeToolCompilePreviewReviewSelection(selection); err != nil {
+		return ToolCompilePreviewReviewSelection{}, err
+	}
+	return selection, nil
+}
+
+func ClearToolCompilePreviewReviewSelection(root string, options ToolCompilePreviewReviewSelectionClearOptions) (ToolCompilePreviewReviewSelection, error) {
+	selection, found, err := ReadToolCompilePreviewReviewSelection(root)
+	if err != nil {
+		return ToolCompilePreviewReviewSelection{}, err
+	}
+	if !found {
+		selection = ToolCompilePreviewReviewSelection{
+			Path:   toolCompilePreviewReviewSelectionPath(root),
+			Mode:   "metadata-only",
+			Status: "cleared",
+		}
+	}
+	clearedBy := strings.TrimSpace(options.ClearedBy)
+	if clearedBy == "" {
+		clearedBy = "operator"
+	}
+	clearedAt := options.ClearedAt
+	if clearedAt.IsZero() {
+		clearedAt = time.Now().UTC()
+	}
+	selection.Path = toolCompilePreviewReviewSelectionPath(root)
+	selection.Status = "cleared"
+	selection.Mode = "metadata-only"
+	selection.ClearedBy = clearedBy
+	selection.ClearedAt = clearedAt.UTC().Format(time.RFC3339)
+	selection.Reason = strings.TrimSpace(options.Reason)
+	if err := writeToolCompilePreviewReviewSelection(selection); err != nil {
+		return ToolCompilePreviewReviewSelection{}, err
+	}
+	return selection, nil
+}
+
+func writeToolCompilePreviewReviewSelection(selection ToolCompilePreviewReviewSelection) error {
+	if err := os.MkdirAll(filepath.Dir(selection.Path), 0o755); err != nil {
+		return fmt.Errorf("create compile preview review selection directory: %w", err)
+	}
+	data, err := json.MarshalIndent(selection, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode compile preview review selection: %w", err)
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(selection.Path, data, 0o644); err != nil {
+		return fmt.Errorf("write compile preview review selection: %w", err)
+	}
+	return nil
+}
+
+func toolCompilePreviewReviewSelectionIsCurrent(selection ToolCompilePreviewReviewSelection) bool {
+	return strings.TrimSpace(selection.Status) == "current"
+}
+
+func toolCompilePreviewReviewSelectionIsCleared(selection ToolCompilePreviewReviewSelection) bool {
+	return strings.TrimSpace(selection.Status) == "cleared"
+}
+
+func ReadToolCompilePreviewReviewSelection(root string) (ToolCompilePreviewReviewSelection, bool, error) {
+	doctor, err := DoctorWorkspace(root)
+	if err != nil {
+		return ToolCompilePreviewReviewSelection{}, false, err
+	}
+	if !doctor.Ready {
+		return ToolCompilePreviewReviewSelection{}, false, fmt.Errorf("workspace is not ready: %v", doctor.Errors)
+	}
+	path := toolCompilePreviewReviewSelectionPath(root)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return ToolCompilePreviewReviewSelection{}, false, nil
+		}
+		return ToolCompilePreviewReviewSelection{}, false, fmt.Errorf("read compile preview review selection %s: %w", path, err)
+	}
+	var selection ToolCompilePreviewReviewSelection
+	if err := json.Unmarshal(data, &selection); err != nil {
+		return ToolCompilePreviewReviewSelection{}, false, fmt.Errorf("decode compile preview review selection %s: %w", path, err)
+	}
+	selection.Path = path
+	return selection, true, nil
+}
+
+func readToolCompilePreviewReviewFile(path string) (ToolCompilePreviewReview, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ToolCompilePreviewReview{}, fmt.Errorf("read compile preview review %s: %w", path, err)
+	}
+	var review ToolCompilePreviewReview
+	if err := json.Unmarshal(data, &review); err != nil {
+		return ToolCompilePreviewReview{}, fmt.Errorf("decode compile preview review %s: %w", path, err)
+	}
+	review.Path = path
+	return review, nil
+}
+
+func compareToolCompilePreviewReviewValues(base, candidate ToolCompilePreviewReview) ToolCompilePreviewReviewComparison {
+	comparison := ToolCompilePreviewReviewComparison{
+		Status: "compared",
+		Mode:   "metadata-only",
+		Base: ToolCompilePreviewReviewComparisonSide{
+			Path:     base.Path,
+			Action:   base.Preview.Action,
+			Nodes:    len(base.Preview.Nodes),
+			Warnings: len(base.Preview.Warnings),
+			Decision: compilePreviewReviewDecision(base),
+		},
+		Candidate: ToolCompilePreviewReviewComparisonSide{
+			Path:     candidate.Path,
+			Action:   candidate.Preview.Action,
+			Nodes:    len(candidate.Preview.Nodes),
+			Warnings: len(candidate.Preview.Warnings),
+			Decision: compilePreviewReviewDecision(candidate),
+		},
+	}
+	comparison.Summary.NodeDelta = len(candidate.Preview.Nodes) - len(base.Preview.Nodes)
+	comparison.Summary.WarningDelta = len(candidate.Preview.Warnings) - len(base.Preview.Warnings)
+	baseNodes := map[string]compiler.PlanNode{}
+	baseIndexes := map[string]int{}
+	for index, node := range base.Preview.Nodes {
+		key := compilePreviewReviewNodeKey(node)
+		baseNodes[key] = node
+		baseIndexes[key] = index
+	}
+	candidateNodes := map[string]compiler.PlanNode{}
+	candidateIndexes := map[string]int{}
+	for index, node := range candidate.Preview.Nodes {
+		key := compilePreviewReviewNodeKey(node)
+		candidateNodes[key] = node
+		candidateIndexes[key] = index
+	}
+	for index, node := range candidate.Preview.Nodes {
+		key := compilePreviewReviewNodeKey(node)
+		baseNode, ok := baseNodes[key]
+		if !ok {
+			comparison.Summary.AddedNodes++
+			comparison.NodeDiffs = append(comparison.NodeDiffs, ToolCompilePreviewReviewNodeDiff{
+				Change:         "added",
+				ManifestName:   node.ManifestName,
+				Capability:     node.Capability,
+				CandidateID:    node.ID,
+				BaseIndex:      -1,
+				CandidateIndex: index,
+				CandidateScore: node.SelectionScore,
+				CandidateSignals: append(
+					[]string(nil),
+					node.SelectionSignals...,
+				),
+			})
+			continue
+		}
+		changes := []string{}
+		baseIndex := baseIndexes[key]
+		if baseIndex != index {
+			changes = append(changes, "reordered")
+			comparison.Summary.ReorderedNodes++
+		}
+		if baseNode.SelectionScore != node.SelectionScore {
+			changes = append(changes, "score")
+			comparison.Summary.ScoreChangedNodes++
+		}
+		if strings.Join(baseNode.SelectionSignals, "\x00") != strings.Join(node.SelectionSignals, "\x00") {
+			changes = append(changes, "signals")
+			comparison.Summary.SignalChangedNodes++
+		}
+		if len(changes) == 0 {
+			continue
+		}
+		comparison.Summary.ChangedNodes++
+		comparison.NodeDiffs = append(comparison.NodeDiffs, ToolCompilePreviewReviewNodeDiff{
+			Change:           strings.Join(changes, ","),
+			ManifestName:     node.ManifestName,
+			Capability:       node.Capability,
+			BaseID:           baseNode.ID,
+			CandidateID:      node.ID,
+			BaseIndex:        baseIndex,
+			CandidateIndex:   index,
+			BaseScore:        baseNode.SelectionScore,
+			CandidateScore:   node.SelectionScore,
+			BaseSignals:      append([]string(nil), baseNode.SelectionSignals...),
+			CandidateSignals: append([]string(nil), node.SelectionSignals...),
+		})
+	}
+	for index, node := range base.Preview.Nodes {
+		key := compilePreviewReviewNodeKey(node)
+		if _, ok := candidateNodes[key]; ok {
+			continue
+		}
+		comparison.Summary.RemovedNodes++
+		comparison.NodeDiffs = append(comparison.NodeDiffs, ToolCompilePreviewReviewNodeDiff{
+			Change:         "removed",
+			ManifestName:   node.ManifestName,
+			Capability:     node.Capability,
+			BaseID:         node.ID,
+			BaseIndex:      index,
+			CandidateIndex: -1,
+			BaseScore:      node.SelectionScore,
+			BaseSignals:    append([]string(nil), node.SelectionSignals...),
+		})
+	}
+	comparison.WarningDiffs = compilePreviewReviewWarningDiffs(base.Preview.Warnings, candidate.Preview.Warnings)
+	return comparison
+}
+
+func compilePreviewReviewDecision(review ToolCompilePreviewReview) string {
+	if review.Annotation == nil {
+		return ""
+	}
+	return strings.TrimSpace(review.Annotation.Decision)
+}
+
+func compilePreviewReviewNodeKey(node compiler.PlanNode) string {
+	return strings.Join([]string{
+		strings.TrimSpace(node.ManifestName),
+		strings.TrimSpace(node.Capability),
+		strings.TrimSpace(node.Runner),
+		strings.TrimSpace(node.Parser),
+		strings.Join(node.RunCommand, "\x00"),
+	}, "\x00")
+}
+
+func compilePreviewReviewWarningDiffs(baseWarnings, candidateWarnings []string) []ToolCompilePreviewReviewWarningDiff {
+	baseCounts := map[string]int{}
+	for _, warning := range baseWarnings {
+		trimmed := strings.TrimSpace(warning)
+		if trimmed == "" {
+			continue
+		}
+		baseCounts[trimmed]++
+	}
+	candidateCounts := map[string]int{}
+	for _, warning := range candidateWarnings {
+		trimmed := strings.TrimSpace(warning)
+		if trimmed == "" {
+			continue
+		}
+		candidateCounts[trimmed]++
+	}
+	keys := make([]string, 0, len(baseCounts)+len(candidateCounts))
+	seen := map[string]bool{}
+	for warning := range baseCounts {
+		keys = append(keys, warning)
+		seen[warning] = true
+	}
+	for warning := range candidateCounts {
+		if !seen[warning] {
+			keys = append(keys, warning)
+		}
+	}
+	sort.Strings(keys)
+	diffs := []ToolCompilePreviewReviewWarningDiff{}
+	for _, warning := range keys {
+		if candidateCounts[warning] > baseCounts[warning] {
+			for i := 0; i < candidateCounts[warning]-baseCounts[warning]; i++ {
+				diffs = append(diffs, ToolCompilePreviewReviewWarningDiff{Change: "added", Warning: warning})
+			}
+		}
+		if baseCounts[warning] > candidateCounts[warning] {
+			for i := 0; i < baseCounts[warning]-candidateCounts[warning]; i++ {
+				diffs = append(diffs, ToolCompilePreviewReviewWarningDiff{Change: "removed", Warning: warning})
+			}
+		}
+	}
+	return diffs
+}
+
+func normalizeToolCompilePreviewReviewAnnotation(options ToolCompilePreviewReviewAnnotationOptions) (ToolCompilePreviewReviewAnnotation, error) {
+	decision := strings.ToLower(strings.TrimSpace(options.Decision))
+	switch decision {
+	case "accepted", "deferred", "rejected":
+	case "":
+		return ToolCompilePreviewReviewAnnotation{}, fmt.Errorf("compile preview review annotation decision is required")
+	default:
+		return ToolCompilePreviewReviewAnnotation{}, fmt.Errorf("unsupported compile preview review annotation decision %q", options.Decision)
+	}
+	reviewer := strings.TrimSpace(options.Reviewer)
+	if reviewer == "" {
+		reviewer = "operator"
+	}
+	reviewedAt := options.ReviewedAt
+	if reviewedAt.IsZero() {
+		reviewedAt = time.Now().UTC()
+	}
+	return ToolCompilePreviewReviewAnnotation{
+		Decision:   decision,
+		Reason:     strings.TrimSpace(options.Reason),
+		Reviewer:   reviewer,
+		ReviewedAt: reviewedAt.UTC().Format(time.RFC3339),
+	}, nil
+}
+
+func toolCompilePreviewSignalsPath(root string) string {
+	return filepath.Join(root, "toolchain", "compile-preview-signals.json")
+}
+
+func normalizeToolCompilePreviewSignals(signals ToolCompilePreviewSignals) (ToolCompilePreviewSignals, error) {
+	if signals.SchemaVersion == 0 {
+		signals.SchemaVersion = 1
+	}
+	if signals.SchemaVersion != 1 {
+		return ToolCompilePreviewSignals{}, fmt.Errorf("unsupported compile preview signals schema_version: %d", signals.SchemaVersion)
+	}
+	if signals.Budget.MaxPlanNodes < 0 {
+		return ToolCompilePreviewSignals{}, fmt.Errorf("compile preview signals budget max_plan_nodes must be non-negative")
+	}
+	return signals, nil
+}
+
+func toolCompilePreviewSignalsFromReplayEvents(events []eventlog.Event, manifests []toolchain.Manifest, options ToolCompilePreviewSignalDeriveOptions) (ToolCompilePreviewSignals, ToolCompilePreviewSignalDerivationSummary, error) {
+	signals := ToolCompilePreviewSignals{
+		SchemaVersion: 1,
+		Budget:        ToolCompilePreviewSignalBudget{MaxPlanNodes: options.MaxPlanNodes},
+	}
+	summary := ToolCompilePreviewSignalDerivationSummary{}
+	historyByKey := map[string]ToolCompilePreviewSignalHistory{}
+	frontierByKey := map[string]ToolCompilePreviewSignalFrontierScore{}
+	for _, event := range events {
+		switch event.Type {
+		case eventlog.EventTool:
+			var execution struct {
+				Tool            string `json:"tool"`
+				ExecutionStatus string `json:"execution_status"`
+				Capability      string `json:"capability"`
+			}
+			if err := json.Unmarshal(event.Payload, &execution); err != nil {
+				return ToolCompilePreviewSignals{}, ToolCompilePreviewSignalDerivationSummary{}, fmt.Errorf("decode replay tool event %d: %w", event.ID, err)
+			}
+			status := strings.ToLower(strings.TrimSpace(execution.ExecutionStatus))
+			if status == "" {
+				continue
+			}
+			summary.ToolExecutions++
+			manifestName := strings.TrimSpace(execution.Tool)
+			capability := strings.TrimSpace(execution.Capability)
+			if manifestName == "" || capability == "" {
+				summary.Ignored++
+				continue
+			}
+			key := manifestName + "\x00" + capability
+			stat := historyByKey[key]
+			stat.ManifestName = manifestName
+			stat.Capability = capability
+			switch status {
+			case "completed":
+				stat.Successes++
+				summary.Successes++
+			case "failed":
+				stat.Failures++
+				summary.Failures++
+			default:
+				summary.Ignored++
+				continue
+			}
+			historyByKey[key] = stat
+		case eventlog.EventFact:
+			var candidatePath toolCompilePreviewReplayCandidatePathPayload
+			if err := json.Unmarshal(event.Payload, &candidatePath); err != nil {
+				return ToolCompilePreviewSignals{}, ToolCompilePreviewSignalDerivationSummary{}, fmt.Errorf("decode replay fact event %d: %w", event.ID, err)
+			}
+			scores, err := toolCompilePreviewFrontierScoresFromReplayCandidatePath(candidatePath, manifests)
+			if err != nil {
+				return ToolCompilePreviewSignals{}, ToolCompilePreviewSignalDerivationSummary{}, fmt.Errorf("derive frontier score from fact event %d: %w", event.ID, err)
+			}
+			for _, score := range scores {
+				key := strings.TrimSpace(score.ManifestName) + "\x00" + strings.TrimSpace(score.Capability)
+				if strings.TrimSpace(key) == "\x00" {
+					continue
+				}
+				if current, ok := frontierByKey[key]; ok && frontier.Score(current.Path.toCandidatePath()) >= frontier.Score(score.Path.toCandidatePath()) {
+					continue
+				}
+				frontierByKey[key] = score
+			}
+		case eventlog.EventIntent:
+			var intent toolCompilePreviewReplayIntentPayload
+			if err := json.Unmarshal(event.Payload, &intent); err != nil {
+				return ToolCompilePreviewSignals{}, ToolCompilePreviewSignalDerivationSummary{}, fmt.Errorf("decode replay intent event %d: %w", event.ID, err)
+			}
+			scores, err := toolCompilePreviewFrontierScoresFromReplayIntent(intent, manifests)
+			if err != nil {
+				return ToolCompilePreviewSignals{}, ToolCompilePreviewSignalDerivationSummary{}, fmt.Errorf("derive frontier score from intent event %d: %w", event.ID, err)
+			}
+			for _, score := range scores {
+				key := strings.TrimSpace(score.ManifestName) + "\x00" + strings.TrimSpace(score.Capability)
+				if strings.TrimSpace(key) == "\x00" {
+					continue
+				}
+				if current, ok := frontierByKey[key]; ok && frontier.Score(current.Path.toCandidatePath()) >= frontier.Score(score.Path.toCandidatePath()) {
+					continue
+				}
+				frontierByKey[key] = score
+			}
+		default:
+			continue
+		}
+	}
+	keys := make([]string, 0, len(historyByKey))
+	for key := range historyByKey {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		signals.HistoricalStats = append(signals.HistoricalStats, historyByKey[key])
+	}
+	frontierKeys := make([]string, 0, len(frontierByKey))
+	for key := range frontierByKey {
+		frontierKeys = append(frontierKeys, key)
+	}
+	sort.Strings(frontierKeys)
+	for _, key := range frontierKeys {
+		signals.FrontierScores = append(signals.FrontierScores, frontierByKey[key])
+	}
+	summary.FrontierScores = len(signals.FrontierScores)
+	return signals, summary, nil
+}
+
+type toolCompilePreviewReplayIntentPayload struct {
+	ID                 string  `json:"id"`
+	IntentID           string  `json:"intent_id"`
+	Kind               string  `json:"kind"`
+	Goal               string  `json:"goal"`
+	Target             string  `json:"target"`
+	Rationale          string  `json:"rationale"`
+	Action             string  `json:"action"`
+	Domain             string  `json:"domain"`
+	ManifestName       string  `json:"manifest_name"`
+	Capability         string  `json:"capability"`
+	Confidence         float64 `json:"confidence"`
+	MissionValue       float64 `json:"mission_value"`
+	UnlockPotential    float64 `json:"unlock_potential"`
+	EvidenceConfidence float64 `json:"evidence_confidence"`
+	Novelty            float64 `json:"novelty"`
+	Cost               float64 `json:"cost"`
+	DuplicateRisk      float64 `json:"duplicate_risk"`
+	Noise              float64 `json:"noise"`
+	ExhaustedPenalty   float64 `json:"exhausted_penalty"`
+}
+
+type toolCompilePreviewReplayCandidatePathPayload struct {
+	ID                 string  `json:"id"`
+	FactID             string  `json:"fact_id"`
+	Kind               string  `json:"kind"`
+	Statement          string  `json:"statement"`
+	Target             string  `json:"target"`
+	ExpectedUnlock     string  `json:"expected_unlock"`
+	Action             string  `json:"action"`
+	Domain             string  `json:"domain"`
+	ManifestName       string  `json:"manifest_name"`
+	Capability         string  `json:"capability"`
+	Confidence         float64 `json:"confidence"`
+	MissionValue       float64 `json:"mission_value"`
+	UnlockPotential    float64 `json:"unlock_potential"`
+	EvidenceConfidence float64 `json:"evidence_confidence"`
+	Novelty            float64 `json:"novelty"`
+	Cost               float64 `json:"cost"`
+	DuplicateRisk      float64 `json:"duplicate_risk"`
+	Noise              float64 `json:"noise"`
+	ExhaustedPenalty   float64 `json:"exhausted_penalty"`
+}
+
+func toolCompilePreviewFrontierScoresFromReplayIntent(intent toolCompilePreviewReplayIntentPayload, manifests []toolchain.Manifest) ([]ToolCompilePreviewSignalFrontierScore, error) {
+	if strings.TrimSpace(intent.Kind) != "hypothesis" {
+		return nil, nil
+	}
+	path := toolCompilePreviewSignalPathFromIntent(intent)
+	return toolCompilePreviewFrontierScoresFromMetadata(manifests, toolCompilePreviewFrontierMetadata{
+		ManifestName: intent.ManifestName,
+		Capability:   intent.Capability,
+		Action:       intent.Action,
+		Domain:       intent.Domain,
+		Target:       intent.Target,
+		ID:           firstNonEmptyString(intent.IntentID, intent.ID),
+		Path:         path,
+	})
+}
+
+func toolCompilePreviewFrontierScoresFromReplayCandidatePath(candidate toolCompilePreviewReplayCandidatePathPayload, manifests []toolchain.Manifest) ([]ToolCompilePreviewSignalFrontierScore, error) {
+	if !toolCompilePreviewCandidatePathKind(candidate.Kind) {
+		return nil, nil
+	}
+	path := toolCompilePreviewSignalPathFromCandidatePath(candidate)
+	return toolCompilePreviewFrontierScoresFromMetadata(manifests, toolCompilePreviewFrontierMetadata{
+		ManifestName: candidate.ManifestName,
+		Capability:   candidate.Capability,
+		Action:       candidate.Action,
+		Domain:       candidate.Domain,
+		Target:       candidate.Target,
+		ID:           firstNonEmptyString(candidate.FactID, candidate.ID),
+		Path:         path,
+	})
+}
+
+type toolCompilePreviewFrontierMetadata struct {
+	ManifestName string
+	Capability   string
+	Action       string
+	Domain       string
+	Target       string
+	ID           string
+	Path         ToolCompilePreviewSignalPath
+}
+
+func toolCompilePreviewFrontierScoresFromMetadata(manifests []toolchain.Manifest, metadata toolCompilePreviewFrontierMetadata) ([]ToolCompilePreviewSignalFrontierScore, error) {
+	if toolCompilePreviewSignalPathScore(metadata.Path) == 0 {
+		return nil, nil
+	}
+	manifestName := strings.TrimSpace(metadata.ManifestName)
+	capability := strings.TrimSpace(metadata.Capability)
+	if manifestName != "" && capability != "" {
+		return []ToolCompilePreviewSignalFrontierScore{{
+			ManifestName: manifestName,
+			Capability:   capability,
+			Path:         metadata.Path,
+		}}, nil
+	}
+	action := compiler.SemanticAction(strings.TrimSpace(metadata.Action))
+	if action == "" {
+		return nil, nil
+	}
+	domain, ok := toolCompilePreviewDomainForFields(metadata.Domain, metadata.Target, metadata.ID)
+	if !ok {
+		return nil, nil
+	}
+	plan, err := compiler.NewCompiler().Compile(compiler.CompileRequest{
+		Action: action,
+		Evidence: compiler.EvidenceSlice{
+			Nodes: []evidence.Node{
+				{
+					ID:         "frontier-" + strings.TrimSpace(metadata.Path.ID),
+					Type:       evidence.NodeHypothesis,
+					Label:      strings.TrimSpace(metadata.Path.Hypothesis),
+					SourceKind: "replay-frontier",
+				},
+			},
+		},
+		Manifests: manifests,
+	})
+	if err != nil {
+		return nil, nil
+	}
+	scores := []ToolCompilePreviewSignalFrontierScore{}
+	for _, node := range plan.Nodes {
+		nodeDomain, ok := toolCompilePreviewDomainForCapability(node.Capability)
+		if !ok || nodeDomain != domain {
+			continue
+		}
+		scores = append(scores, ToolCompilePreviewSignalFrontierScore{
+			ManifestName: node.ManifestName,
+			Capability:   node.Capability,
+			Path:         metadata.Path,
+		})
+	}
+	return scores, nil
+}
+
+func toolCompilePreviewCandidatePathKind(kind string) bool {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "candidate_path", "frontier_path", "frontier_candidate":
+		return true
+	default:
+		return false
+	}
+}
+
+func toolCompilePreviewSignalPathFromIntent(intent toolCompilePreviewReplayIntentPayload) ToolCompilePreviewSignalPath {
+	confidence := intent.Confidence
+	path := ToolCompilePreviewSignalPath{
+		ID:                 firstNonEmptyString(intent.IntentID, intent.ID),
+		Target:             strings.TrimSpace(intent.Target),
+		Hypothesis:         strings.TrimSpace(intent.Goal),
+		ExpectedUnlock:     strings.TrimSpace(intent.Rationale),
+		MissionValue:       intent.MissionValue,
+		UnlockPotential:    intent.UnlockPotential,
+		EvidenceConfidence: intent.EvidenceConfidence,
+		Novelty:            intent.Novelty,
+		Cost:               intent.Cost,
+		DuplicateRisk:      intent.DuplicateRisk,
+		Noise:              intent.Noise,
+		ExhaustedPenalty:   intent.ExhaustedPenalty,
+	}
+	return toolCompilePreviewSignalPathWithConfidence(path, confidence)
+}
+
+func toolCompilePreviewSignalPathFromCandidatePath(candidate toolCompilePreviewReplayCandidatePathPayload) ToolCompilePreviewSignalPath {
+	path := ToolCompilePreviewSignalPath{
+		ID:                 firstNonEmptyString(candidate.FactID, candidate.ID),
+		Target:             strings.TrimSpace(candidate.Target),
+		Hypothesis:         strings.TrimSpace(candidate.Statement),
+		ExpectedUnlock:     strings.TrimSpace(candidate.ExpectedUnlock),
+		MissionValue:       candidate.MissionValue,
+		UnlockPotential:    candidate.UnlockPotential,
+		EvidenceConfidence: candidate.EvidenceConfidence,
+		Novelty:            candidate.Novelty,
+		Cost:               candidate.Cost,
+		DuplicateRisk:      candidate.DuplicateRisk,
+		Noise:              candidate.Noise,
+		ExhaustedPenalty:   candidate.ExhaustedPenalty,
+	}
+	return toolCompilePreviewSignalPathWithConfidence(path, candidate.Confidence)
+}
+
+func toolCompilePreviewSignalPathWithConfidence(path ToolCompilePreviewSignalPath, confidence float64) ToolCompilePreviewSignalPath {
+	if confidence > 0 {
+		if path.MissionValue == 0 {
+			path.MissionValue = confidence
+		}
+		if path.UnlockPotential == 0 {
+			path.UnlockPotential = confidence
+		}
+		if path.EvidenceConfidence == 0 {
+			path.EvidenceConfidence = confidence
+		}
+	}
+	return path
+}
+
+func toolCompilePreviewSignalPathScore(path ToolCompilePreviewSignalPath) float64 {
+	return frontier.Score(path.toCandidatePath())
+}
+
+func toolCompilePreviewIntentDomain(intent toolCompilePreviewReplayIntentPayload) (frontier.Domain, bool) {
+	return toolCompilePreviewDomainForFields(intent.Domain, intent.Target, firstNonEmptyString(intent.IntentID, intent.ID))
+}
+
+func toolCompilePreviewDomainForFields(domainText, targetText, idText string) (frontier.Domain, bool) {
+	if domain, err := parseToolCompilePreviewSignalDomain(domainText); err == nil {
+		return domain, true
+	}
+	target := strings.TrimSpace(targetText)
+	if parsed, err := url.Parse(target); err == nil && parsed.Scheme != "" && parsed.Host != "" {
+		return frontier.DomainWebAPI, true
+	}
+	if _, err := netip.ParsePrefix(target); err == nil {
+		return frontier.DomainInfra, true
+	}
+	if _, err := netip.ParseAddr(target); err == nil {
+		return frontier.DomainInfra, true
+	}
+	id := strings.ToLower(strings.TrimSpace(idText))
+	switch {
+	case strings.HasPrefix(id, "web-"), strings.HasPrefix(id, "web_"):
+		return frontier.DomainWebAPI, true
+	case strings.HasPrefix(id, "infra-"), strings.HasPrefix(id, "infra_"):
+		return frontier.DomainInfra, true
+	case strings.HasPrefix(id, "ctf-"), strings.HasPrefix(id, "ctf_"):
+		return frontier.DomainCTF, true
+	}
+	if target != "" {
+		return frontier.DomainCTF, true
+	}
+	return "", false
+}
+
+func toolCompilePreviewDomainForCapability(capability string) (frontier.Domain, bool) {
+	switch {
+	case strings.HasPrefix(capability, "web."):
+		return frontier.DomainWebAPI, true
+	case strings.HasPrefix(capability, "infra."):
+		return frontier.DomainInfra, true
+	case strings.HasPrefix(capability, "ctf."):
+		return frontier.DomainCTF, true
+	default:
+		return "", false
+	}
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func mergeToolCompilePreviewOptions(options ToolCompilePreviewOptions, signals ToolCompilePreviewSignals) (ToolCompilePreviewOptions, error) {
+	persisted, err := toolCompilePreviewOptionsFromSignals(signals)
+	if err != nil {
+		return ToolCompilePreviewOptions{}, err
+	}
+	merged := options
+	if merged.Budget.MaxPlanNodes == 0 {
+		merged.Budget = persisted.Budget
+	}
+	merged.DomainPriorities = append(append([]compiler.DomainPriority(nil), persisted.DomainPriorities...), merged.DomainPriorities...)
+	merged.FrontierScores = append(append([]compiler.CandidateFrontierScore(nil), persisted.FrontierScores...), merged.FrontierScores...)
+	merged.HistoricalStats = append(append([]compiler.CandidateHistory(nil), persisted.HistoricalStats...), merged.HistoricalStats...)
+	return merged, nil
+}
+
+func toolCompilePreviewOptionsFromSignals(signals ToolCompilePreviewSignals) (ToolCompilePreviewOptions, error) {
+	options := ToolCompilePreviewOptions{
+		Budget: compiler.CompileBudget{MaxPlanNodes: signals.Budget.MaxPlanNodes},
+	}
+	for _, priority := range signals.DomainPriorities {
+		domain, err := parseToolCompilePreviewSignalDomain(priority.Domain)
+		if err != nil {
+			return ToolCompilePreviewOptions{}, err
+		}
+		options.DomainPriorities = append(options.DomainPriorities, compiler.DomainPriority{
+			Domain: domain,
+			Weight: priority.Weight,
+		})
+	}
+	for _, score := range signals.FrontierScores {
+		manifestName := strings.TrimSpace(score.ManifestName)
+		capability := strings.TrimSpace(score.Capability)
+		if manifestName == "" && capability == "" {
+			continue
+		}
+		options.FrontierScores = append(options.FrontierScores, compiler.CandidateFrontierScore{
+			ManifestName: manifestName,
+			Capability:   capability,
+			Path:         score.Path.toCandidatePath(),
+		})
+	}
+	for _, history := range signals.HistoricalStats {
+		manifestName := strings.TrimSpace(history.ManifestName)
+		capability := strings.TrimSpace(history.Capability)
+		if manifestName == "" && capability == "" {
+			continue
+		}
+		options.HistoricalStats = append(options.HistoricalStats, compiler.CandidateHistory{
+			ManifestName: manifestName,
+			Capability:   capability,
+			Successes:    history.Successes,
+			Failures:     history.Failures,
+		})
+	}
+	return options, nil
+}
+
+func parseToolCompilePreviewSignalDomain(value string) (frontier.Domain, error) {
+	switch strings.TrimSpace(value) {
+	case string(frontier.DomainWebAPI), "web":
+		return frontier.DomainWebAPI, nil
+	case string(frontier.DomainInfra), "infra":
+		return frontier.DomainInfra, nil
+	case string(frontier.DomainCTF), "ctf":
+		return frontier.DomainCTF, nil
+	default:
+		return "", fmt.Errorf("unsupported compile preview signal domain: %s", value)
+	}
+}
+
+func (path ToolCompilePreviewSignalPath) toCandidatePath() frontier.CandidatePath {
+	return frontier.CandidatePath{
+		ID:                 strings.TrimSpace(path.ID),
+		Target:             strings.TrimSpace(path.Target),
+		Hypothesis:         strings.TrimSpace(path.Hypothesis),
+		ExpectedUnlock:     strings.TrimSpace(path.ExpectedUnlock),
+		MissionValue:       path.MissionValue,
+		UnlockPotential:    path.UnlockPotential,
+		EvidenceConfidence: path.EvidenceConfidence,
+		Novelty:            path.Novelty,
+		Cost:               path.Cost,
+		DuplicateRisk:      path.DuplicateRisk,
+		Noise:              path.Noise,
+		ExhaustedPenalty:   path.ExhaustedPenalty,
+	}
+}
+
+func PlanApprovedToolchainInstalls(root string) (ToolchainInstallDispatchPlan, error) {
+	requests, err := ListToolchainInstallRequests(root)
+	if err != nil {
+		return ToolchainInstallDispatchPlan{}, err
+	}
+	return toolchainInstallDispatchPlanFromRequests(requests), nil
+}
+
+func PlanFailedToolchainInstallRetries(root string) (ToolchainInstallRetryPlan, error) {
+	executions, err := ListToolchainInstallDispatchExecutions(root)
+	if err != nil {
+		return ToolchainInstallRetryPlan{}, err
+	}
+	return toolchainInstallRetryPlanFromExecutions(executions), nil
+}
+
+func CreateToolchainInstallRetryDispatch(root string) (ToolchainInstallRetryDispatch, error) {
+	plan, err := PlanFailedToolchainInstallRetries(root)
+	if err != nil {
+		return ToolchainInstallRetryDispatch{}, err
+	}
+	dispatch := ToolchainInstallRetryDispatch{
+		Status:  "dry-run",
+		Mode:    "metadata-only",
+		Summary: plan.Summary,
+		Ready:   append([]ToolchainInstallRetryCandidate(nil), plan.Ready...),
+		Skipped: append([]ToolchainInstallRetrySkip(nil), plan.Skipped...),
+	}
+	dir := toolchainInstallRetryDispatchDir(root)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return ToolchainInstallRetryDispatch{}, fmt.Errorf("create install retry dispatch directory: %w", err)
+	}
+	dispatch.Path = filepath.Join(dir, safeInstallRetryDispatchName(plan)+".json")
+	data, err := json.MarshalIndent(dispatch, "", "  ")
+	if err != nil {
+		return ToolchainInstallRetryDispatch{}, fmt.Errorf("encode install retry dispatch: %w", err)
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(dispatch.Path, data, 0o644); err != nil {
+		return ToolchainInstallRetryDispatch{}, fmt.Errorf("write install retry dispatch: %w", err)
+	}
+	return dispatch, nil
+}
+
+func ListToolchainInstallRetryDispatches(root string) ([]ToolchainInstallRetryDispatch, error) {
+	doctor, err := DoctorWorkspace(root)
+	if err != nil {
+		return nil, err
+	}
+	if !doctor.Ready {
+		return nil, fmt.Errorf("workspace is not ready: %v", doctor.Errors)
+	}
+
+	paths, err := filepath.Glob(filepath.Join(toolchainInstallRetryDispatchDir(root), "*.json"))
+	if err != nil {
+		return nil, fmt.Errorf("glob install retry dispatches: %w", err)
+	}
+	sort.Strings(paths)
+	dispatches := make([]ToolchainInstallRetryDispatch, 0, len(paths))
+	for _, path := range paths {
+		dispatch, err := readToolchainInstallRetryDispatchFile(path)
+		if err != nil {
+			return nil, err
+		}
+		dispatches = append(dispatches, dispatch)
+	}
+	return dispatches, nil
+}
+
+func ReadToolchainInstallRetryDispatch(root, dispatchPath string) (ToolchainInstallRetryDispatch, error) {
+	doctor, err := DoctorWorkspace(root)
+	if err != nil {
+		return ToolchainInstallRetryDispatch{}, err
+	}
+	if !doctor.Ready {
+		return ToolchainInstallRetryDispatch{}, fmt.Errorf("workspace is not ready: %v", doctor.Errors)
+	}
+	path, err := resolveToolchainInstallRetryDispatchPath(root, dispatchPath)
+	if err != nil {
+		return ToolchainInstallRetryDispatch{}, err
+	}
+	return readToolchainInstallRetryDispatchFile(path)
+}
+
+func readToolchainInstallRetryDispatchFile(path string) (ToolchainInstallRetryDispatch, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ToolchainInstallRetryDispatch{}, fmt.Errorf("read install retry dispatch %s: %w", path, err)
+	}
+	var dispatch ToolchainInstallRetryDispatch
+	if err := json.Unmarshal(data, &dispatch); err != nil {
+		return ToolchainInstallRetryDispatch{}, fmt.Errorf("decode install retry dispatch %s: %w", path, err)
+	}
+	dispatch.Path = path
+	return dispatch, nil
+}
+
+func ExecuteToolchainInstallRetryDispatch(root, dispatchPath string, options ToolchainInstallRetryDispatchExecutionOptions) (ToolchainInstallRetryDispatchExecution, error) {
+	if !options.Execute {
+		return ToolchainInstallRetryDispatchExecution{}, fmt.Errorf("install retry dispatch execution requires explicit execute")
+	}
+	doctor, err := DoctorWorkspace(root)
+	if err != nil {
+		return ToolchainInstallRetryDispatchExecution{}, err
+	}
+	if !doctor.Ready {
+		return ToolchainInstallRetryDispatchExecution{}, fmt.Errorf("workspace is not ready: %v", doctor.Errors)
+	}
+	dispatch, err := ReadToolchainInstallRetryDispatch(root, dispatchPath)
+	if err != nil {
+		return ToolchainInstallRetryDispatchExecution{}, err
+	}
+	if installRequestDisplayStatus(dispatch.Status) != "dry-run" || installRequestDisplayStatus(dispatch.Mode) != "metadata-only" {
+		return ToolchainInstallRetryDispatchExecution{}, fmt.Errorf("install retry dispatch must be dry-run metadata-only before execution")
+	}
+	if err := revalidateRetryDispatchRequestsApproved(root, dispatch.Ready); err != nil {
+		return ToolchainInstallRetryDispatchExecution{}, err
+	}
+	execution := ToolchainInstallRetryDispatchExecution{
+		Status:            "completed",
+		Mode:              "execute",
+		RetryDispatchPath: dispatch.Path,
+		Warnings:          append([]string(nil), doctor.Warnings...),
+		Skipped:           append([]ToolchainInstallRetrySkip(nil), dispatch.Skipped...),
+	}
+	for _, candidate := range dispatch.Ready {
+		result := ToolchainInstallRetryDispatchResult{
+			ExecutionPath: candidate.ExecutionPath,
+			DispatchPath:  candidate.DispatchPath,
+			RequestPath:   candidate.RequestPath,
+			Pack:          candidate.Pack,
+			Dependency:    candidate.Dependency,
+			Command:       append([]string(nil), candidate.Command...),
+			LastStatus:    candidate.LastStatus,
+			LastOutput:    candidate.LastOutput,
+			LastError:     candidate.LastError,
+			Status:        "completed",
+		}
+		output, err := runToolchainInstallRetryCommand(root, dispatch.Path, candidate)
+		result.Output = strings.TrimSpace(output)
+		if err != nil {
+			result.Status = "failed"
+			result.Error = err.Error()
+			execution.Status = "failed"
+			execution.Results = append(execution.Results, result)
+			if writeErr := writeToolchainInstallRetryDispatchExecution(root, &execution); writeErr != nil {
+				return execution, writeErr
+			}
+			return execution, fmt.Errorf("execute retry install command for %s/%s: %w", candidate.Pack, candidate.Dependency, err)
+		}
+		execution.Results = append(execution.Results, result)
+	}
+	if err := writeToolchainInstallRetryDispatchExecution(root, &execution); err != nil {
+		return execution, err
+	}
+	return execution, nil
+}
+
+func revalidateRetryDispatchRequestsApproved(root string, candidates []ToolchainInstallRetryCandidate) error {
+	for _, candidate := range candidates {
+		request, err := readToolchainInstallRequestForRetry(root, candidate.RequestPath)
+		if err != nil {
+			return err
+		}
+		status := installRequestDisplayStatus(request.Status)
+		if status != "approved" {
+			return fmt.Errorf("install retry dispatch ready request must be approved: %s/%s status=%s", candidate.Pack, candidate.Dependency, status)
+		}
+		if strings.TrimSpace(request.Pack) != strings.TrimSpace(candidate.Pack) || strings.TrimSpace(request.Dependency) != strings.TrimSpace(candidate.Dependency) {
+			return fmt.Errorf("install retry dispatch request mismatch: candidate=%s/%s request=%s/%s", candidate.Pack, candidate.Dependency, request.Pack, request.Dependency)
+		}
+	}
+	return nil
+}
+
+func readToolchainInstallRequestForRetry(root string, requestPath string) (ToolchainInstallRequest, error) {
+	path, err := resolveToolchainInstallRequestPath(root, requestPath)
+	if err != nil {
+		return ToolchainInstallRequest{}, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ToolchainInstallRequest{}, fmt.Errorf("read install request %s: %w", path, err)
+	}
+	var request ToolchainInstallRequest
+	if err := json.Unmarshal(data, &request); err != nil {
+		return ToolchainInstallRequest{}, fmt.Errorf("decode install request %s: %w", path, err)
+	}
+	request.Path = path
+	return request, nil
+}
+
+func runToolchainInstallRetryCommand(root, retryDispatchPath string, candidate ToolchainInstallRetryCandidate) (string, error) {
+	if len(candidate.Command) == 0 {
+		return "", fmt.Errorf("retry install command is empty for %s/%s", candidate.Pack, candidate.Dependency)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, candidate.Command[0], candidate.Command[1:]...)
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(),
+		"OURO_WORKSPACE="+root,
+		"OURO_INSTALL_RETRY_DISPATCH="+retryDispatchPath,
+		"OURO_INSTALL_SOURCE_EXECUTION="+candidate.ExecutionPath,
+		"OURO_INSTALL_DISPATCH="+candidate.DispatchPath,
+		"OURO_INSTALL_REQUEST="+candidate.RequestPath,
+		"OURO_INSTALL_PACK="+candidate.Pack,
+		"OURO_INSTALL_DEPENDENCY="+candidate.Dependency,
+	)
+	output, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return string(output), fmt.Errorf("retry install command timed out")
+	}
+	return string(output), err
+}
+
+func writeToolchainInstallRetryDispatchExecution(root string, execution *ToolchainInstallRetryDispatchExecution) error {
+	dir := toolchainInstallRetryExecutionDir(root)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create install retry execution directory: %w", err)
+	}
+	name := safeInstallRequestName(strings.Join([]string{
+		"install-retry-execution",
+		execution.RetryDispatchPath,
+		time.Now().UTC().Format(time.RFC3339Nano),
+	}, "|"))
+	execution.Path = filepath.Join(dir, name+".json")
+	data, err := json.MarshalIndent(execution, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode install retry execution: %w", err)
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(execution.Path, data, 0o644); err != nil {
+		return fmt.Errorf("write install retry execution: %w", err)
+	}
+	return nil
+}
+
+func ListToolchainInstallRetryDispatchExecutions(root string) ([]ToolchainInstallRetryDispatchExecution, error) {
+	doctor, err := DoctorWorkspace(root)
+	if err != nil {
+		return nil, err
+	}
+	if !doctor.Ready {
+		return nil, fmt.Errorf("workspace is not ready: %v", doctor.Errors)
+	}
+
+	paths, err := filepath.Glob(filepath.Join(toolchainInstallRetryExecutionDir(root), "*.json"))
+	if err != nil {
+		return nil, fmt.Errorf("glob install retry executions: %w", err)
+	}
+	sort.Strings(paths)
+	executions := make([]ToolchainInstallRetryDispatchExecution, 0, len(paths))
+	for _, path := range paths {
+		execution, err := readToolchainInstallRetryDispatchExecutionFile(path)
+		if err != nil {
+			return nil, err
+		}
+		executions = append(executions, execution)
+	}
+	return executions, nil
+}
+
+func ReadToolchainInstallRetryDispatchExecution(root, executionPath string) (ToolchainInstallRetryDispatchExecution, error) {
+	doctor, err := DoctorWorkspace(root)
+	if err != nil {
+		return ToolchainInstallRetryDispatchExecution{}, err
+	}
+	if !doctor.Ready {
+		return ToolchainInstallRetryDispatchExecution{}, fmt.Errorf("workspace is not ready: %v", doctor.Errors)
+	}
+	path, err := resolveToolchainInstallRetryExecutionPath(root, executionPath)
+	if err != nil {
+		return ToolchainInstallRetryDispatchExecution{}, err
+	}
+	return readToolchainInstallRetryDispatchExecutionFile(path)
+}
+
+func readToolchainInstallRetryDispatchExecutionFile(path string) (ToolchainInstallRetryDispatchExecution, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ToolchainInstallRetryDispatchExecution{}, fmt.Errorf("read install retry execution %s: %w", path, err)
+	}
+	var execution ToolchainInstallRetryDispatchExecution
+	if err := json.Unmarshal(data, &execution); err != nil {
+		return ToolchainInstallRetryDispatchExecution{}, fmt.Errorf("decode install retry execution %s: %w", path, err)
+	}
+	execution.Path = path
+	return execution, nil
+}
+
+func CreateToolchainInstallDispatch(root string) (ToolchainInstallDispatch, error) {
+	plan, err := PlanApprovedToolchainInstalls(root)
+	if err != nil {
+		return ToolchainInstallDispatch{}, err
+	}
+	dispatch := ToolchainInstallDispatch{
+		Status:  "dry-run",
+		Mode:    "metadata-only",
+		Summary: plan.Summary,
+		Ready:   append([]ToolchainInstallRequest(nil), plan.Ready...),
+		Skipped: append([]ToolchainInstallDispatchSkip(nil), plan.Skipped...),
+	}
+	dir := toolchainInstallDispatchDir(root)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return ToolchainInstallDispatch{}, fmt.Errorf("create install dispatch directory: %w", err)
+	}
+	dispatch.Path = filepath.Join(dir, safeInstallDispatchName(plan)+".json")
+	data, err := json.MarshalIndent(dispatch, "", "  ")
+	if err != nil {
+		return ToolchainInstallDispatch{}, fmt.Errorf("encode install dispatch: %w", err)
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(dispatch.Path, data, 0o644); err != nil {
+		return ToolchainInstallDispatch{}, fmt.Errorf("write install dispatch: %w", err)
+	}
+	return dispatch, nil
+}
+
+func ListToolchainInstallDispatches(root string) ([]ToolchainInstallDispatch, error) {
+	doctor, err := DoctorWorkspace(root)
+	if err != nil {
+		return nil, err
+	}
+	if !doctor.Ready {
+		return nil, fmt.Errorf("workspace is not ready: %v", doctor.Errors)
+	}
+
+	paths, err := filepath.Glob(filepath.Join(toolchainInstallDispatchDir(root), "*.json"))
+	if err != nil {
+		return nil, fmt.Errorf("glob install dispatches: %w", err)
+	}
+	sort.Strings(paths)
+	dispatches := make([]ToolchainInstallDispatch, 0, len(paths))
+	for _, path := range paths {
+		dispatch, err := readToolchainInstallDispatchFile(path)
+		if err != nil {
+			return nil, err
+		}
+		dispatches = append(dispatches, dispatch)
+	}
+	return dispatches, nil
+}
+
+func ReadToolchainInstallDispatch(root, dispatchPath string) (ToolchainInstallDispatch, error) {
+	doctor, err := DoctorWorkspace(root)
+	if err != nil {
+		return ToolchainInstallDispatch{}, err
+	}
+	if !doctor.Ready {
+		return ToolchainInstallDispatch{}, fmt.Errorf("workspace is not ready: %v", doctor.Errors)
+	}
+	path, err := resolveToolchainInstallDispatchPath(root, dispatchPath)
+	if err != nil {
+		return ToolchainInstallDispatch{}, err
+	}
+	return readToolchainInstallDispatchFile(path)
+}
+
+func readToolchainInstallDispatchFile(path string) (ToolchainInstallDispatch, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ToolchainInstallDispatch{}, fmt.Errorf("read install dispatch %s: %w", path, err)
+	}
+	var dispatch ToolchainInstallDispatch
+	if err := json.Unmarshal(data, &dispatch); err != nil {
+		return ToolchainInstallDispatch{}, fmt.Errorf("decode install dispatch %s: %w", path, err)
+	}
+	dispatch.Path = path
+	return dispatch, nil
+}
+
+func ExecuteToolchainInstallDispatch(root, dispatchPath string, options ToolchainInstallDispatchExecutionOptions) (ToolchainInstallDispatchExecution, error) {
+	if !options.Execute {
+		return ToolchainInstallDispatchExecution{}, fmt.Errorf("install dispatch execution requires explicit execute")
+	}
+	doctor, err := DoctorWorkspace(root)
+	if err != nil {
+		return ToolchainInstallDispatchExecution{}, err
+	}
+	if !doctor.Ready {
+		return ToolchainInstallDispatchExecution{}, fmt.Errorf("workspace is not ready: %v", doctor.Errors)
+	}
+	dispatch, err := ReadToolchainInstallDispatch(root, dispatchPath)
+	if err != nil {
+		return ToolchainInstallDispatchExecution{}, err
+	}
+	if installRequestDisplayStatus(dispatch.Status) != "dry-run" || installRequestDisplayStatus(dispatch.Mode) != "metadata-only" {
+		return ToolchainInstallDispatchExecution{}, fmt.Errorf("install dispatch must be dry-run metadata-only before execution")
+	}
+	execution := ToolchainInstallDispatchExecution{
+		Status:       "completed",
+		Mode:         "execute",
+		DispatchPath: dispatch.Path,
+		Warnings:     append([]string(nil), doctor.Warnings...),
+		Skipped:      append([]ToolchainInstallDispatchSkip(nil), dispatch.Skipped...),
+	}
+	for _, request := range dispatch.Ready {
+		if installRequestDisplayStatus(request.Status) != "approved" {
+			return execution, fmt.Errorf("install dispatch ready request must be approved: %s/%s status=%s", request.Pack, request.Dependency, installRequestDisplayStatus(request.Status))
+		}
+		result := ToolchainInstallDispatchExecutionResult{
+			RequestPath: request.Path,
+			Pack:        request.Pack,
+			Dependency:  request.Dependency,
+			Command:     append([]string(nil), request.Command...),
+			Status:      "completed",
+		}
+		output, err := runToolchainInstallCommand(root, dispatch.Path, request)
+		result.Output = strings.TrimSpace(output)
+		if err != nil {
+			result.Status = "failed"
+			result.Error = err.Error()
+			execution.Status = "failed"
+			execution.Results = append(execution.Results, result)
+			if writeErr := writeToolchainInstallDispatchExecution(root, &execution); writeErr != nil {
+				return execution, writeErr
+			}
+			return execution, fmt.Errorf("execute install command for %s/%s: %w", request.Pack, request.Dependency, err)
+		}
+		execution.Results = append(execution.Results, result)
+	}
+	if err := writeToolchainInstallDispatchExecution(root, &execution); err != nil {
+		return execution, err
+	}
+	return execution, nil
+}
+
+func runToolchainInstallCommand(root, dispatchPath string, request ToolchainInstallRequest) (string, error) {
+	if len(request.Command) == 0 {
+		return "", fmt.Errorf("install command is empty for %s/%s", request.Pack, request.Dependency)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, request.Command[0], request.Command[1:]...)
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(),
+		"OURO_WORKSPACE="+root,
+		"OURO_INSTALL_DISPATCH="+dispatchPath,
+		"OURO_INSTALL_REQUEST="+request.Path,
+		"OURO_INSTALL_PACK="+request.Pack,
+		"OURO_INSTALL_DEPENDENCY="+request.Dependency,
+	)
+	output, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return string(output), fmt.Errorf("install command timed out")
+	}
+	return string(output), err
+}
+
+func writeToolchainInstallDispatchExecution(root string, execution *ToolchainInstallDispatchExecution) error {
+	dir := toolchainInstallExecutionDir(root)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create install execution directory: %w", err)
+	}
+	name := safeInstallRequestName(strings.Join([]string{
+		"install-execution",
+		execution.DispatchPath,
+		time.Now().UTC().Format(time.RFC3339Nano),
+	}, "|"))
+	execution.Path = filepath.Join(dir, name+".json")
+	data, err := json.MarshalIndent(execution, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode install execution: %w", err)
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(execution.Path, data, 0o644); err != nil {
+		return fmt.Errorf("write install execution: %w", err)
+	}
+	return nil
+}
+
+func ListToolchainInstallDispatchExecutions(root string) ([]ToolchainInstallDispatchExecution, error) {
+	doctor, err := DoctorWorkspace(root)
+	if err != nil {
+		return nil, err
+	}
+	if !doctor.Ready {
+		return nil, fmt.Errorf("workspace is not ready: %v", doctor.Errors)
+	}
+
+	paths, err := filepath.Glob(filepath.Join(toolchainInstallExecutionDir(root), "*.json"))
+	if err != nil {
+		return nil, fmt.Errorf("glob install executions: %w", err)
+	}
+	sort.Strings(paths)
+	executions := make([]ToolchainInstallDispatchExecution, 0, len(paths))
+	for _, path := range paths {
+		execution, err := readToolchainInstallDispatchExecutionFile(path)
+		if err != nil {
+			return nil, err
+		}
+		executions = append(executions, execution)
+	}
+	return executions, nil
+}
+
+func ReadToolchainInstallDispatchExecution(root, executionPath string) (ToolchainInstallDispatchExecution, error) {
+	doctor, err := DoctorWorkspace(root)
+	if err != nil {
+		return ToolchainInstallDispatchExecution{}, err
+	}
+	if !doctor.Ready {
+		return ToolchainInstallDispatchExecution{}, fmt.Errorf("workspace is not ready: %v", doctor.Errors)
+	}
+	path, err := resolveToolchainInstallExecutionPath(root, executionPath)
+	if err != nil {
+		return ToolchainInstallDispatchExecution{}, err
+	}
+	return readToolchainInstallDispatchExecutionFile(path)
+}
+
+func readToolchainInstallDispatchExecutionFile(path string) (ToolchainInstallDispatchExecution, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ToolchainInstallDispatchExecution{}, fmt.Errorf("read install execution %s: %w", path, err)
+	}
+	var execution ToolchainInstallDispatchExecution
+	if err := json.Unmarshal(data, &execution); err != nil {
+		return ToolchainInstallDispatchExecution{}, fmt.Errorf("decode install execution %s: %w", path, err)
+	}
+	execution.Path = path
+	return execution, nil
+}
+
+func toolchainInstallDispatchPlanFromRequests(requests []ToolchainInstallRequest) ToolchainInstallDispatchPlan {
+	plan := ToolchainInstallDispatchPlan{
+		Summary: SummarizeToolchainInstallRequests(requests),
+	}
+	requestByDependency := map[string]ToolchainInstallRequest{}
+	for _, request := range requests {
+		requestByDependency[toolchainInstallRequestDependencyKey(request.Pack, request.Dependency)] = request
+	}
+	skipped := map[string]bool{}
+	emitted := map[string]bool{}
+	waiting := map[string]ToolchainInstallRequest{}
+	for _, request := range requests {
+		status := installRequestDisplayStatus(request.Status)
+		key := toolchainInstallRequestKey(request)
+		if status != "approved" {
+			plan.Skipped = append(plan.Skipped, ToolchainInstallDispatchSkip{
+				Request: request,
+				Reason:  "not-approved: " + status,
+			})
+			skipped[key] = true
+			continue
+		}
+		if reason := toolchainInstallMissingOrUnapprovedDependencyReason(request, requestByDependency); reason != "" {
+			plan.Skipped = append(plan.Skipped, ToolchainInstallDispatchSkip{Request: request, Reason: reason})
+			skipped[key] = true
+			continue
+		}
+		waiting[key] = request
+	}
+	for len(waiting) > 0 {
+		progress := false
+		for _, request := range requests {
+			key := toolchainInstallRequestKey(request)
+			if _, ok := waiting[key]; !ok {
+				continue
+			}
+			if reason := toolchainInstallBlockedDependencyReason(request, requestByDependency, skipped, emitted); reason != "" {
+				plan.Skipped = append(plan.Skipped, ToolchainInstallDispatchSkip{Request: request, Reason: reason})
+				skipped[key] = true
+				delete(waiting, key)
+				progress = true
+				continue
+			}
+			if !toolchainInstallDependenciesEmitted(request, requestByDependency, emitted) {
+				continue
+			}
+			plan.Ready = append(plan.Ready, request)
+			emitted[key] = true
+			delete(waiting, key)
+			progress = true
+		}
+		if progress {
+			continue
+		}
+		for _, request := range requests {
+			key := toolchainInstallRequestKey(request)
+			if _, ok := waiting[key]; !ok {
+				continue
+			}
+			reason := "dependency-not-approved: unresolved status=blocked"
+			if len(request.DependsOn) > 0 {
+				reason = fmt.Sprintf("dependency-not-approved: %s status=blocked", strings.TrimSpace(request.DependsOn[0]))
+			}
+			plan.Skipped = append(plan.Skipped, ToolchainInstallDispatchSkip{Request: request, Reason: reason})
+			skipped[key] = true
+			delete(waiting, key)
+		}
+	}
+	return plan
+}
+
+func toolchainInstallMissingOrUnapprovedDependencyReason(request ToolchainInstallRequest, requestsByDependency map[string]ToolchainInstallRequest) string {
+	for _, dependency := range request.DependsOn {
+		dependency = strings.TrimSpace(dependency)
+		if dependency == "" {
+			continue
+		}
+		prerequisite, ok := requestsByDependency[toolchainInstallRequestDependencyKey(request.Pack, dependency)]
+		if !ok {
+			return fmt.Sprintf("dependency-not-approved: %s status=missing-request", dependency)
+		}
+		status := installRequestDisplayStatus(prerequisite.Status)
+		if status != "approved" {
+			return fmt.Sprintf("dependency-not-approved: %s status=%s", dependency, status)
+		}
+	}
+	return ""
+}
+
+func toolchainInstallBlockedDependencyReason(request ToolchainInstallRequest, requestsByDependency map[string]ToolchainInstallRequest, skipped map[string]bool, emitted map[string]bool) string {
+	for _, dependency := range request.DependsOn {
+		dependency = strings.TrimSpace(dependency)
+		if dependency == "" {
+			continue
+		}
+		prerequisite, ok := requestsByDependency[toolchainInstallRequestDependencyKey(request.Pack, dependency)]
+		if !ok {
+			return fmt.Sprintf("dependency-not-approved: %s status=missing-request", dependency)
+		}
+		prerequisiteKey := toolchainInstallRequestKey(prerequisite)
+		status := installRequestDisplayStatus(prerequisite.Status)
+		switch {
+		case status != "approved":
+			return fmt.Sprintf("dependency-not-approved: %s status=%s", dependency, status)
+		case skipped[prerequisiteKey]:
+			return fmt.Sprintf("dependency-not-approved: %s status=blocked", dependency)
+		case !emitted[prerequisiteKey]:
+			continue
+		}
+	}
+	return ""
+}
+
+func toolchainInstallDependenciesEmitted(request ToolchainInstallRequest, requestsByDependency map[string]ToolchainInstallRequest, emitted map[string]bool) bool {
+	for _, dependency := range request.DependsOn {
+		dependency = strings.TrimSpace(dependency)
+		if dependency == "" {
+			continue
+		}
+		prerequisite, ok := requestsByDependency[toolchainInstallRequestDependencyKey(request.Pack, dependency)]
+		if !ok {
+			return false
+		}
+		if !emitted[toolchainInstallRequestKey(prerequisite)] {
+			return false
+		}
+	}
+	return true
+}
+
+func toolchainInstallRequestKey(request ToolchainInstallRequest) string {
+	return strings.Join([]string{
+		strings.TrimSpace(request.Path),
+		strings.TrimSpace(request.Pack),
+		strings.TrimSpace(request.Dependency),
+	}, "\x00")
+}
+
+func toolchainInstallRequestDependencyKey(pack string, dependency string) string {
+	return strings.TrimSpace(pack) + "\x00" + strings.TrimSpace(dependency)
+}
+
+func toolchainInstallRetryPlanFromExecutions(executions []ToolchainInstallDispatchExecution) ToolchainInstallRetryPlan {
+	var plan ToolchainInstallRetryPlan
+	for _, execution := range executions {
+		for _, result := range execution.Results {
+			status := installRequestDisplayStatus(result.Status)
+			plan.Summary.Total++
+			if status == "failed" {
+				plan.Ready = append(plan.Ready, ToolchainInstallRetryCandidate{
+					ExecutionPath: execution.Path,
+					DispatchPath:  execution.DispatchPath,
+					RequestPath:   result.RequestPath,
+					Pack:          result.Pack,
+					Dependency:    result.Dependency,
+					Command:       append([]string(nil), result.Command...),
+					LastStatus:    status,
+					LastOutput:    result.Output,
+					LastError:     result.Error,
+				})
+				plan.Summary.Ready++
+				continue
+			}
+			plan.Skipped = append(plan.Skipped, ToolchainInstallRetrySkip{
+				ExecutionPath: execution.Path,
+				DispatchPath:  execution.DispatchPath,
+				RequestPath:   result.RequestPath,
+				Pack:          result.Pack,
+				Dependency:    result.Dependency,
+				Status:        status,
+				Reason:        "not-failed: " + status,
+			})
+			plan.Summary.Skipped++
+		}
+	}
+	return plan
+}
+
+func InspectToolchains(root string) ([]ToolchainStatus, error) {
+	doctor, err := DoctorWorkspace(root)
+	if err != nil {
+		return nil, err
+	}
+	if !doctor.Ready {
+		return nil, fmt.Errorf("workspace is not ready: %v", doctor.Errors)
+	}
+
+	manifests, err := toolchain.LoadManifests(filepath.Join(root, "toolchain"))
+	if err != nil {
+		return nil, err
+	}
+	statuses := make([]ToolchainStatus, 0, len(manifests))
+	healthRunner := toolchain.DefaultHealthRunner{}
+	dependencyRunner := toolchain.DefaultDependencyRunner{}
+	metadataProvider := toolchain.DefaultMetadataProvider{}
+	for _, manifest := range manifests {
+		dependencies := toolchain.CheckDependenciesWithMetadata(context.Background(), manifest, dependencyRunner, metadataProvider)
+		installPlan := toolchain.PlanDependencyInstalls(manifest, dependencies)
+		health := toolchain.CheckHealth(manifest, healthRunner)
+		health = toolchain.ApplyDependencyHealth(health, dependencies)
+		statuses = append(statuses, ToolchainStatus{
+			Name:            manifest.Name,
+			Version:         manifest.Version,
+			Runner:          manifest.Runner,
+			Parser:          manifest.Parser,
+			CapabilityCount: len(manifest.Capabilities),
+			Health:          health,
+			Dependencies:    dependencies,
+			InstallPlan:     installPlan,
+		})
+	}
+	return statuses, nil
+}
+
+func CreateToolchainInstallRequest(root, pack, dependency string) (ToolchainInstallRequest, error) {
+	statuses, err := InspectToolchains(root)
+	if err != nil {
+		return ToolchainInstallRequest{}, err
+	}
+
+	for _, status := range statuses {
+		if status.Name != pack {
+			continue
+		}
+		for _, step := range status.InstallPlan {
+			if step.Name != dependency {
+				continue
+			}
+			request := ToolchainInstallRequest{
+				Status:      "pending",
+				Pack:        status.Name,
+				Dependency:  step.Name,
+				Kind:        step.Kind,
+				State:       string(step.State),
+				Required:    step.Required,
+				Command:     append([]string(nil), step.Command...),
+				Hint:        step.Hint,
+				Source:      step.Source,
+				ImageDigest: step.ImageDigest,
+				DependsOn:   append([]string(nil), step.DependsOn...),
+			}
+			dir := toolchainInstallRequestDir(root)
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				return ToolchainInstallRequest{}, fmt.Errorf("create install request directory: %w", err)
+			}
+			request.Path = filepath.Join(dir, safeInstallRequestName(pack+"-"+dependency)+".json")
+			data, err := json.MarshalIndent(request, "", "  ")
+			if err != nil {
+				return ToolchainInstallRequest{}, fmt.Errorf("encode install request: %w", err)
+			}
+			data = append(data, '\n')
+			if err := os.WriteFile(request.Path, data, 0o644); err != nil {
+				return ToolchainInstallRequest{}, fmt.Errorf("write install request: %w", err)
+			}
+			return request, nil
+		}
+		return ToolchainInstallRequest{}, fmt.Errorf("install plan step not found for %s/%s", pack, dependency)
+	}
+	return ToolchainInstallRequest{}, fmt.Errorf("toolchain pack not found: %s", pack)
+}
+
+func ListToolchainInstallRequests(root string) ([]ToolchainInstallRequest, error) {
+	doctor, err := DoctorWorkspace(root)
+	if err != nil {
+		return nil, err
+	}
+	if !doctor.Ready {
+		return nil, fmt.Errorf("workspace is not ready: %v", doctor.Errors)
+	}
+
+	paths, err := filepath.Glob(filepath.Join(toolchainInstallRequestDir(root), "*.json"))
+	if err != nil {
+		return nil, fmt.Errorf("glob install requests: %w", err)
+	}
+	sort.Strings(paths)
+	requests := make([]ToolchainInstallRequest, 0, len(paths))
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("read install request %s: %w", path, err)
+		}
+		var request ToolchainInstallRequest
+		if err := json.Unmarshal(data, &request); err != nil {
+			return nil, fmt.Errorf("decode install request %s: %w", path, err)
+		}
+		request.Path = path
+		requests = append(requests, request)
+	}
+	return requests, nil
+}
+
+func UpdateToolchainInstallRequestStatus(root, requestPath, status string) (ToolchainInstallRequest, error) {
+	nextStatus, err := normalizeInstallRequestStatus(status)
+	if err != nil {
+		return ToolchainInstallRequest{}, err
+	}
+	doctor, err := DoctorWorkspace(root)
+	if err != nil {
+		return ToolchainInstallRequest{}, err
+	}
+	if !doctor.Ready {
+		return ToolchainInstallRequest{}, fmt.Errorf("workspace is not ready: %v", doctor.Errors)
+	}
+	path, err := resolveToolchainInstallRequestPath(root, requestPath)
+	if err != nil {
+		return ToolchainInstallRequest{}, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ToolchainInstallRequest{}, fmt.Errorf("read install request %s: %w", path, err)
+	}
+	var request ToolchainInstallRequest
+	if err := json.Unmarshal(data, &request); err != nil {
+		return ToolchainInstallRequest{}, fmt.Errorf("decode install request %s: %w", path, err)
+	}
+	request.Status = nextStatus
+	request.Path = path
+	encoded, err := json.MarshalIndent(request, "", "  ")
+	if err != nil {
+		return ToolchainInstallRequest{}, fmt.Errorf("encode install request: %w", err)
+	}
+	encoded = append(encoded, '\n')
+	if err := os.WriteFile(path, encoded, 0o644); err != nil {
+		return ToolchainInstallRequest{}, fmt.Errorf("write install request %s: %w", path, err)
+	}
+	return request, nil
+}
+
+func normalizeInstallRequestStatus(status string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "approved":
+		return "approved", nil
+	case "denied":
+		return "denied", nil
+	default:
+		return "", fmt.Errorf("unsupported install request status: %s", status)
+	}
+}
+
+func installRequestDisplayStatus(status string) string {
+	normalized := strings.ToLower(strings.TrimSpace(status))
+	if normalized == "" {
+		return "unknown"
+	}
+	return normalized
+}
+
+func resolveToolchainInstallRequestPath(root, requestPath string) (string, error) {
+	trimmed := strings.TrimSpace(requestPath)
+	if trimmed == "" {
+		return "", fmt.Errorf("install request path is required")
+	}
+	dir, err := filepath.Abs(toolchainInstallRequestDir(root))
+	if err != nil {
+		return "", fmt.Errorf("resolve install request directory: %w", err)
+	}
+	candidate := trimmed
+	if !filepath.IsAbs(candidate) {
+		candidate = filepath.Join(dir, candidate)
+	}
+	candidate, err = filepath.Abs(candidate)
+	if err != nil {
+		return "", fmt.Errorf("resolve install request path: %w", err)
+	}
+	rel, err := filepath.Rel(dir, candidate)
+	if err != nil {
+		return "", fmt.Errorf("resolve install request relative path: %w", err)
+	}
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("install request path must stay under %s", dir)
+	}
+	if filepath.Ext(candidate) != ".json" {
+		return "", fmt.Errorf("install request path must be a json file")
+	}
+	return candidate, nil
+}
+
+func resolveToolchainInstallDispatchPath(root, dispatchPath string) (string, error) {
+	trimmed := strings.TrimSpace(dispatchPath)
+	if trimmed == "" {
+		return "", fmt.Errorf("install dispatch path is required")
+	}
+	dir, err := filepath.Abs(toolchainInstallDispatchDir(root))
+	if err != nil {
+		return "", fmt.Errorf("resolve install dispatch directory: %w", err)
+	}
+	candidate := trimmed
+	if !filepath.IsAbs(candidate) {
+		candidate = filepath.Join(dir, candidate)
+	}
+	candidate, err = filepath.Abs(candidate)
+	if err != nil {
+		return "", fmt.Errorf("resolve install dispatch path: %w", err)
+	}
+	rel, err := filepath.Rel(dir, candidate)
+	if err != nil {
+		return "", fmt.Errorf("resolve install dispatch relative path: %w", err)
+	}
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("install dispatch path must stay under %s", dir)
+	}
+	if filepath.Ext(candidate) != ".json" {
+		return "", fmt.Errorf("install dispatch path must be a json file")
+	}
+	return candidate, nil
+}
+
+func resolveToolCompilePreviewReviewPath(root, reviewPath string) (string, error) {
+	trimmed := strings.TrimSpace(reviewPath)
+	if trimmed == "" {
+		return "", fmt.Errorf("compile preview review path is required")
+	}
+	dir, err := filepath.Abs(toolCompilePreviewReviewDir(root))
+	if err != nil {
+		return "", fmt.Errorf("resolve compile preview review directory: %w", err)
+	}
+	candidate := trimmed
+	if !filepath.IsAbs(candidate) {
+		candidate = filepath.Join(dir, candidate)
+	}
+	candidate, err = filepath.Abs(candidate)
+	if err != nil {
+		return "", fmt.Errorf("resolve compile preview review path: %w", err)
+	}
+	rel, err := filepath.Rel(dir, candidate)
+	if err != nil {
+		return "", fmt.Errorf("resolve compile preview review relative path: %w", err)
+	}
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("compile preview review path must stay under %s", dir)
+	}
+	if filepath.Ext(candidate) != ".json" {
+		return "", fmt.Errorf("compile preview review path must be a json file")
+	}
+	return candidate, nil
+}
+
+func resolveToolchainInstallExecutionPath(root, executionPath string) (string, error) {
+	trimmed := strings.TrimSpace(executionPath)
+	if trimmed == "" {
+		return "", fmt.Errorf("install execution path is required")
+	}
+	dir, err := filepath.Abs(toolchainInstallExecutionDir(root))
+	if err != nil {
+		return "", fmt.Errorf("resolve install execution directory: %w", err)
+	}
+	candidate := trimmed
+	if !filepath.IsAbs(candidate) {
+		candidate = filepath.Join(dir, candidate)
+	}
+	candidate, err = filepath.Abs(candidate)
+	if err != nil {
+		return "", fmt.Errorf("resolve install execution path: %w", err)
+	}
+	rel, err := filepath.Rel(dir, candidate)
+	if err != nil {
+		return "", fmt.Errorf("resolve install execution relative path: %w", err)
+	}
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("install execution path must stay under %s", dir)
+	}
+	if filepath.Ext(candidate) != ".json" {
+		return "", fmt.Errorf("install execution path must be a json file")
+	}
+	return candidate, nil
+}
+
+func resolveToolchainInstallRetryDispatchPath(root, dispatchPath string) (string, error) {
+	trimmed := strings.TrimSpace(dispatchPath)
+	if trimmed == "" {
+		return "", fmt.Errorf("install retry dispatch path is required")
+	}
+	dir, err := filepath.Abs(toolchainInstallRetryDispatchDir(root))
+	if err != nil {
+		return "", fmt.Errorf("resolve install retry dispatch directory: %w", err)
+	}
+	candidate := trimmed
+	if !filepath.IsAbs(candidate) {
+		candidate = filepath.Join(dir, candidate)
+	}
+	candidate, err = filepath.Abs(candidate)
+	if err != nil {
+		return "", fmt.Errorf("resolve install retry dispatch path: %w", err)
+	}
+	rel, err := filepath.Rel(dir, candidate)
+	if err != nil {
+		return "", fmt.Errorf("resolve install retry dispatch relative path: %w", err)
+	}
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("install retry dispatch path must stay under %s", dir)
+	}
+	if filepath.Ext(candidate) != ".json" {
+		return "", fmt.Errorf("install retry dispatch path must be a json file")
+	}
+	return candidate, nil
+}
+
+func resolveToolchainInstallRetryExecutionPath(root, executionPath string) (string, error) {
+	trimmed := strings.TrimSpace(executionPath)
+	if trimmed == "" {
+		return "", fmt.Errorf("install retry execution path is required")
+	}
+	dir, err := filepath.Abs(toolchainInstallRetryExecutionDir(root))
+	if err != nil {
+		return "", fmt.Errorf("resolve install retry execution directory: %w", err)
+	}
+	candidate := trimmed
+	if !filepath.IsAbs(candidate) {
+		candidate = filepath.Join(dir, candidate)
+	}
+	candidate, err = filepath.Abs(candidate)
+	if err != nil {
+		return "", fmt.Errorf("resolve install retry execution path: %w", err)
+	}
+	rel, err := filepath.Rel(dir, candidate)
+	if err != nil {
+		return "", fmt.Errorf("resolve install retry execution relative path: %w", err)
+	}
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("install retry execution path must stay under %s", dir)
+	}
+	if filepath.Ext(candidate) != ".json" {
+		return "", fmt.Errorf("install retry execution path must be a json file")
+	}
+	return candidate, nil
+}
+
+func toolchainInstallRequestDir(root string) string {
+	return filepath.Join(root, "toolchain", "install-requests")
+}
+
+func toolCompilePreviewReviewDir(root string) string {
+	return filepath.Join(root, "toolchain", "compile-preview-reviews")
+}
+
+func toolCompilePreviewReviewSelectionPath(root string) string {
+	return filepath.Join(root, "toolchain", "compile-preview-review-selection.json")
+}
+
+func toolchainInstallDispatchDir(root string) string {
+	return filepath.Join(root, "toolchain", "install-dispatches")
+}
+
+func toolchainInstallExecutionDir(root string) string {
+	return filepath.Join(root, "toolchain", "install-executions")
+}
+
+func toolchainInstallRetryDispatchDir(root string) string {
+	return filepath.Join(root, "toolchain", "install-retry-dispatches")
+}
+
+func toolchainInstallRetryExecutionDir(root string) string {
+	return filepath.Join(root, "toolchain", "install-retry-executions")
+}
+
+func safeInstallDispatchName(plan ToolchainInstallDispatchPlan) string {
+	parts := []string{"install-dispatch", plan.Summary.Line()}
+	for _, request := range plan.Ready {
+		parts = append(parts, request.Path, request.Status, request.Pack, request.Dependency)
+	}
+	for _, skipped := range plan.Skipped {
+		request := skipped.Request
+		parts = append(parts, request.Path, request.Status, request.Pack, request.Dependency, skipped.Reason)
+	}
+	return safeInstallRequestName(strings.Join(parts, "|"))
+}
+
+func safeToolCompilePreviewReviewName(review ToolCompilePreviewReview) string {
+	parts := []string{
+		"compile-preview-review",
+		string(review.Preview.Action),
+		fmt.Sprintf("nodes=%d warnings=%d", len(review.Preview.Nodes), len(review.Preview.Warnings)),
+	}
+	for _, warning := range review.Preview.Warnings {
+		parts = append(parts, warning)
+	}
+	for _, node := range review.Preview.Nodes {
+		parts = append(
+			parts,
+			node.ID,
+			node.ManifestName,
+			node.Capability,
+			node.Runner,
+			node.Parser,
+			strconv.FormatFloat(node.SelectionScore, 'g', -1, 64),
+			strings.Join(node.SelectionSignals, ","),
+			strings.Join(node.RunCommand, "\x00"),
+		)
+	}
+	return safeInstallRequestName(strings.Join(parts, "|"))
+}
+
+func safeInstallRetryDispatchName(plan ToolchainInstallRetryPlan) string {
+	parts := []string{
+		"install-retry-dispatch",
+		fmt.Sprintf("total=%d ready=%d skipped=%d", plan.Summary.Total, plan.Summary.Ready, plan.Summary.Skipped),
+	}
+	for _, candidate := range plan.Ready {
+		parts = append(parts, candidate.ExecutionPath, candidate.DispatchPath, candidate.RequestPath, candidate.Pack, candidate.Dependency, candidate.LastStatus, candidate.LastError)
+	}
+	for _, skipped := range plan.Skipped {
+		parts = append(parts, skipped.ExecutionPath, skipped.DispatchPath, skipped.RequestPath, skipped.Pack, skipped.Dependency, skipped.Status, skipped.Reason)
+	}
+	return safeInstallRequestName(strings.Join(parts, "|"))
+}
+
+func safeInstallRequestName(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	digest := hex.EncodeToString(sum[:])[:12]
+
+	var builder strings.Builder
+	for _, r := range strings.TrimSpace(value) {
+		switch {
+		case r >= 'a' && r <= 'z':
+			builder.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			builder.WriteRune(unicode.ToLower(r))
+		case r >= '0' && r <= '9', r == '.', r == '_', r == '-':
+			builder.WriteRune(r)
+		default:
+			builder.WriteRune('-')
+		}
+	}
+	slug := strings.Trim(builder.String(), "-._")
+	if slug == "" {
+		slug = "install-request"
+	}
+	if len(slug) > 80 {
+		slug = strings.Trim(slug[:80], "-._")
+	}
+	return slug + "-" + digest
+}

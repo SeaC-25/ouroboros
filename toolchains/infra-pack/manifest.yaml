@@ -1,0 +1,11 @@
+name: infra-pack
+version: "0.1.0"
+capabilities:
+  - infra.host_discovery
+  - infra.service_enumeration
+  - infra.identity_graph
+  - infra.path_hypothesis
+  - evidence.collection
+runner: native
+parser: infra_parser
+healthcheck: built_in
