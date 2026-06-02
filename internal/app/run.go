@@ -560,17 +560,17 @@ func runToolExecutionStage(ctx context.Context, root string, runID string, manif
 	outcomes, err := executeToolRequests(ctx, runnableRequests, concurrency, runner, options.PauseController, func(request ToolExecutionRequest, reason string) error {
 		return appendLifecycleEvent(toolWorkerWaitingEvent(runID, request, reason))
 	}, func(request ToolExecutionRequest) error {
-		if err := acquireWorkerLease(root, runID, request); err != nil {
+		if err := acquireWorkerLease(root, runID, request, options.RequireSafetyAuthorization); err != nil {
 			return err
 		}
 		if err := appendLifecycleEvent(toolWorkerStartedEvent(runID, request)); err != nil {
-			_ = completeWorkerLease(root, runID, request, ToolExecutionResult{Status: "failed", Transcript: err.Error()}, err)
+			_ = completeWorkerLease(root, runID, request, ToolExecutionResult{Status: "failed", Transcript: err.Error()}, err, options.RequireSafetyAuthorization)
 			return err
 		}
 		return nil
 	}, func(outcome toolExecutionOutcome) error {
 		result := toolExecutionResultForOutcome(outcome)
-		leaseErr := completeWorkerLease(root, runID, outcome.request, result, outcome.err)
+		leaseErr := completeWorkerLease(root, runID, outcome.request, result, outcome.err, options.RequireSafetyAuthorization)
 		if err := appendLifecycleEvent(toolExecutionEvent(runID, outcome.request, result)); err != nil {
 			if outcome.err != nil {
 				return errors.Join(fmt.Errorf("execute tool plan node %s: %w", outcome.request.Node.ID, outcome.err), fmt.Errorf("record failed tool execution: %w", err), leaseErr)

@@ -117,8 +117,14 @@ type WorkerLeaseReclaimExecutionResult struct {
 	Error          string `json:"error,omitempty"`
 }
 
-func acquireWorkerLease(root string, runID string, request ToolExecutionRequest) error {
-	now := time.Now().UTC().Format(time.RFC3339Nano)
+func acquireWorkerLease(root string, runID string, request ToolExecutionRequest, requireSafetyAuthorization bool) error {
+	now := time.Now().UTC()
+	if requireSafetyAuthorization {
+		if err := requireRuntimeWorkerSideEffectSafetyAuthorization(root, now); err != nil {
+			return err
+		}
+	}
+	timestamp := now.Format(time.RFC3339Nano)
 	lease := WorkerLeaseArtifact{
 		Version:                  1,
 		RunID:                    runID,
@@ -128,8 +134,8 @@ func acquireWorkerLease(root string, runID string, request ToolExecutionRequest)
 		Capability:               request.Node.Capability,
 		WorkerID:                 request.WorkerID,
 		Status:                   "active",
-		AcquiredAt:               now,
-		HeartbeatAt:              now,
+		AcquiredAt:               timestamp,
+		HeartbeatAt:              timestamp,
 		WorkerPoolMaxConcurrency: request.WorkerPoolMaxConcurrency,
 		PackMaxConcurrency:       request.PackMaxConcurrency,
 		ResourceCPUUnits:         request.ResourceCPUUnits,
@@ -138,7 +144,7 @@ func acquireWorkerLease(root string, runID string, request ToolExecutionRequest)
 	return createWorkerLeaseArtifact(root, lease)
 }
 
-func completeWorkerLease(root string, runID string, request ToolExecutionRequest, result ToolExecutionResult, runErr error) error {
+func completeWorkerLease(root string, runID string, request ToolExecutionRequest, result ToolExecutionResult, runErr error, requireSafetyAuthorization bool) error {
 	leasePath := workerLeasePath(root, runID, workerLeaseExecutionID(request))
 	data, err := os.ReadFile(leasePath)
 	if err != nil {
@@ -160,9 +166,15 @@ func completeWorkerLease(root string, runID string, request ToolExecutionRequest
 		lease.Error = strings.TrimSpace(result.Transcript)
 	}
 	lease.Status = status
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	lease.HeartbeatAt = now
-	lease.ReleasedAt = now
+	now := time.Now().UTC()
+	if requireSafetyAuthorization {
+		if err := requireRuntimeWorkerSideEffectSafetyAuthorization(root, now); err != nil {
+			return err
+		}
+	}
+	timestamp := now.Format(time.RFC3339Nano)
+	lease.HeartbeatAt = timestamp
+	lease.ReleasedAt = timestamp
 	lease.ResultExecutionID = strings.TrimSpace(result.ExecutionID)
 	lease.AttemptDir = strings.TrimSpace(result.AttemptDir)
 	return writeWorkerLeaseArtifact(root, lease)

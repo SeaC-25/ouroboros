@@ -271,6 +271,13 @@ execution:
 	if reports, err := filepath.Glob(filepath.Join(root, "reports", "*.md")); err != nil || len(reports) != 0 {
 		t.Fatalf("strict safety gate must not write reports, reports=%#v err=%v", reports, err)
 	}
+	leases, listErr := ListWorkerLeases(root)
+	if listErr != nil {
+		t.Fatalf("list worker leases after strict safety gate: %v", listErr)
+	}
+	if len(leases) != 0 {
+		t.Fatalf("strict safety gate must not write worker leases, got %#v", leases)
+	}
 }
 
 func TestProjectRunReportWritesReportForDeferredRun(t *testing.T) {
@@ -1739,6 +1746,149 @@ execution:
 	}
 }
 
+func TestRunWorkspaceRequireSafetyAuthorizationRechecksBeforeWorkerLeaseAcquire(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	writeRuntimeWorkerDisabledSafetyScope(t, root)
+	writeRuntimeWorkerCurrentSafetyAuthorization(t, root)
+	runner := &recordingToolExecutionRunner{}
+	authorizationRemoved := false
+
+	_, err := RunWorkspaceWithOptions(ctx, root, RunOptions{
+		RequireSafetyAuthorization: true,
+		ToolRunner:                 runner,
+		OnEvent: func(event eventlog.Event) error {
+			if authorizationRemoved || event.Type != eventlog.EventVerification {
+				return nil
+			}
+			payload := decodeWorkspaceSafetyPayloadForTest(t, event)
+			if payload.Kind != "workspace_safety" {
+				return nil
+			}
+			authorizationRemoved = true
+			return os.WriteFile(filepath.Join(root, "authorization.yaml"), []byte("version: 1\nsafety_bypasses: []\n"), 0o644)
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "worker runtime side effect requires current safety bypass authorization") {
+		t.Fatalf("expected strict safety authorization recheck before lease acquire, got %v", err)
+	}
+	if len(runner.requests) != 0 {
+		t.Fatalf("lease acquire safety failure must block before runner execution, got %#v", runner.requests)
+	}
+	leases, listErr := ListWorkerLeases(root)
+	if listErr != nil {
+		t.Fatalf("list worker leases after rejected acquire: %v", listErr)
+	}
+	if len(leases) != 0 {
+		t.Fatalf("rejected acquire must not write worker leases, got %#v", leases)
+	}
+}
+
+func TestRunWorkspaceRequireSafetyAuthorizationRechecksBeforeWorkerLeaseComplete(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	writeRuntimeWorkerDisabledSafetyScope(t, root)
+	writeRuntimeWorkerCurrentSafetyAuthorization(t, root)
+	runner := &authorizationRemovingToolExecutionRunner{root: root}
+
+	_, err := RunWorkspaceWithOptions(ctx, root, RunOptions{
+		RequireSafetyAuthorization: true,
+		ToolRunner:                 runner,
+	})
+	if err == nil || !strings.Contains(err.Error(), "worker runtime side effect requires current safety bypass authorization") {
+		t.Fatalf("expected strict safety authorization recheck before lease complete, got %v", err)
+	}
+	if len(runner.requests) == 0 {
+		t.Fatalf("expected runner to execute before lease completion recheck")
+	}
+	leases, listErr := ListWorkerLeases(root)
+	if listErr != nil {
+		t.Fatalf("list worker leases after rejected complete: %v", listErr)
+	}
+	if len(leases) == 0 {
+		t.Fatalf("expected active worker lease from successful acquire")
+	}
+	for _, lease := range leases {
+		if lease.Status != "active" || lease.ReleasedAt != "" {
+			t.Fatalf("rejected complete must leave lease active, got %#v", lease)
+		}
+	}
+}
+
+func TestRunWorkspaceDefaultSafetyAuditKeepsWorkerLeaseWritesWarningOnly(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	writeRuntimeWorkerDisabledSafetyScope(t, root)
+	runner := &recordingToolExecutionRunner{}
+
+	result, err := RunWorkspaceWithOptions(ctx, root, RunOptions{
+		ToolRunner:            runner,
+		DeferReportProjection: true,
+	})
+	if err != nil {
+		t.Fatalf("default run should remain warning-only for disabled safety boundary: %v", err)
+	}
+	if len(runner.requests) == 0 {
+		t.Fatalf("expected default warning-only run to execute tool requests")
+	}
+	leases, listErr := ListWorkerLeases(root)
+	if listErr != nil {
+		t.Fatalf("list worker leases: %v", listErr)
+	}
+	if len(leases) != len(runner.requests) {
+		t.Fatalf("expected default run lease writes, leases=%d requests=%d leases=%#v", len(leases), len(runner.requests), leases)
+	}
+	for _, lease := range leases {
+		if lease.RunID != result.RunID || lease.Status != "completed" || lease.ReleasedAt == "" {
+			t.Fatalf("expected completed warning-only lease for run %s, got %#v", result.RunID, lease)
+		}
+	}
+}
+
+func TestRunWorkspaceRequireSafetyAuthorizationAllowsWorkerLeaseWritesWithCurrentAuthorization(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	writeRuntimeWorkerDisabledSafetyScope(t, root)
+	writeRuntimeWorkerCurrentSafetyAuthorization(t, root)
+	runner := &recordingToolExecutionRunner{}
+
+	result, err := RunWorkspaceWithOptions(ctx, root, RunOptions{
+		RequireSafetyAuthorization: true,
+		ToolRunner:                 runner,
+		DeferReportProjection:      true,
+	})
+	if err != nil {
+		t.Fatalf("strict run with current authorization should write worker leases: %v", err)
+	}
+	if len(runner.requests) == 0 {
+		t.Fatalf("expected strict authorized run to execute tool requests")
+	}
+	leases, listErr := ListWorkerLeases(root)
+	if listErr != nil {
+		t.Fatalf("list worker leases: %v", listErr)
+	}
+	if len(leases) != len(runner.requests) {
+		t.Fatalf("expected one worker lease per strict authorized request, leases=%d requests=%d leases=%#v", len(leases), len(runner.requests), leases)
+	}
+	for _, lease := range leases {
+		if lease.RunID != result.RunID || lease.Status != "completed" || lease.ReleasedAt == "" {
+			t.Fatalf("expected completed strict authorized lease for run %s, got %#v", result.RunID, lease)
+		}
+	}
+}
+
 func TestRunWorkspaceMarksWorkerLeaseFailedOnRunnerError(t *testing.T) {
 	ctx := context.Background()
 	root := filepath.Join(t.TempDir(), "workspace")
@@ -1771,10 +1921,10 @@ func TestAcquireWorkerLeaseRejectsActiveCollision(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
 	request := workerLeaseTestRequest()
 
-	if err := acquireWorkerLease(root, "run-collision", request); err != nil {
+	if err := acquireWorkerLease(root, "run-collision", request, false); err != nil {
 		t.Fatalf("acquire worker lease: %v", err)
 	}
-	err := acquireWorkerLease(root, "run-collision", request)
+	err := acquireWorkerLease(root, "run-collision", request, false)
 	if err == nil || !strings.Contains(err.Error(), "active worker lease already exists") {
 		t.Fatalf("expected active lease collision error, got %v", err)
 	}
@@ -4853,6 +5003,26 @@ func (r *recordingToolExecutionRunner) Execute(ctx context.Context, request Tool
 		ExecutionID: "recorded-" + request.Node.ID,
 		Status:      "completed",
 		Transcript:  "recorded execution for " + request.Node.ManifestName,
+	}, nil
+}
+
+type authorizationRemovingToolExecutionRunner struct {
+	root     string
+	requests []ToolExecutionRequest
+}
+
+func (r *authorizationRemovingToolExecutionRunner) Execute(ctx context.Context, request ToolExecutionRequest) (ToolExecutionResult, error) {
+	if err := ctx.Err(); err != nil {
+		return ToolExecutionResult{}, err
+	}
+	r.requests = append(r.requests, request)
+	if err := os.WriteFile(filepath.Join(r.root, "authorization.yaml"), []byte("version: 1\nsafety_bypasses: []\n"), 0o644); err != nil {
+		return ToolExecutionResult{}, err
+	}
+	return ToolExecutionResult{
+		ExecutionID: "authorization-removed-" + request.Node.ID,
+		Status:      "completed",
+		Transcript:  "authorization removed before lease completion",
 	}, nil
 }
 
