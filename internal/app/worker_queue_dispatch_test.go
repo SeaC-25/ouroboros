@@ -1838,6 +1838,56 @@ func TestCreateRuntimeWorkerTransportDaemonControlRequestWritesPendingArtifact(t
 	}
 }
 
+func TestCreateRuntimeWorkerTransportDaemonControlRequestRequiresCurrentSafetyAuthorizationBeforeWriting(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	now := time.Date(2026, 6, 2, 16, 55, 0, 0, time.UTC)
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	writeRuntimeWorkerDisabledSafetyScope(t, root)
+
+	_, err := CreateRuntimeWorkerTransportDaemonControlRequest(root, "remote-web-1", RuntimeWorkerTransportDaemonControlRequest{
+		Action:      "stop",
+		Reason:      "operator requested maintenance",
+		RequestedBy: "alice",
+	}, RuntimeWorkerTransportDaemonControlRequestOptions{Now: now})
+	if err == nil || !strings.Contains(err.Error(), "worker runtime side effect requires current safety bypass authorization") {
+		t.Fatalf("expected strict safety authorization error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "missing required safety bypass authorization for scope.target_policy disabled") {
+		t.Fatalf("expected disabled target-policy authorization detail, got %v", err)
+	}
+	controls, err := ListRuntimeWorkerTransportDaemonControlRequests(root, "remote-web-1")
+	if err != nil {
+		t.Fatalf("list daemon control requests after blocked creation: %v", err)
+	}
+	if len(controls) != 0 {
+		t.Fatalf("blocked daemon control creation must not write artifacts, got %#v", controls)
+	}
+}
+
+func TestCreateRuntimeWorkerTransportDaemonControlRequestAllowsDisabledBoundariesWithCurrentSafetyAuthorization(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	now := time.Date(2026, 6, 2, 16, 57, 0, 0, time.UTC)
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	writeRuntimeWorkerDisabledSafetyScope(t, root)
+	writeRuntimeWorkerCurrentSafetyAuthorization(t, root)
+
+	control, err := CreateRuntimeWorkerTransportDaemonControlRequest(root, "remote-web-1", RuntimeWorkerTransportDaemonControlRequest{
+		Action:      "restart",
+		Reason:      "authorized restart",
+		RequestedBy: "alice",
+	}, RuntimeWorkerTransportDaemonControlRequestOptions{Now: now})
+	if err != nil {
+		t.Fatalf("create daemon control request with current safety authorization: %v", err)
+	}
+	if control.Status != "pending" || control.Action != "restart" || control.Path == "" {
+		t.Fatalf("expected pending authorized daemon control request, got %#v", control)
+	}
+}
+
 func TestListAndReadRuntimeWorkerTransportDaemonControlRequests(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
 	now := time.Date(2026, 5, 30, 18, 14, 0, 0, time.UTC)
@@ -1889,6 +1939,32 @@ func TestCreateRuntimeWorkerTransportDaemonControlRequestRejectsUnsupportedActio
 	}, RuntimeWorkerTransportDaemonControlRequestOptions{Now: time.Now().UTC()})
 	if err == nil || !strings.Contains(err.Error(), "unsupported worker transport daemon control action") {
 		t.Fatalf("expected unsupported action error, got %v", err)
+	}
+	controls, err := ListRuntimeWorkerTransportDaemonControlRequests(root, "remote-web-1")
+	if err != nil {
+		t.Fatalf("list daemon control requests: %v", err)
+	}
+	if len(controls) != 0 {
+		t.Fatalf("unsupported action must not write daemon control artifact, got %#v", controls)
+	}
+}
+
+func TestCreateRuntimeWorkerTransportDaemonControlRequestRejectsUnsupportedActionBeforeSafetyAuthorization(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	writeRuntimeWorkerDisabledSafetyScope(t, root)
+
+	_, err := CreateRuntimeWorkerTransportDaemonControlRequest(root, "remote-web-1", RuntimeWorkerTransportDaemonControlRequest{
+		Action: "kill",
+		Reason: "unsupported action should not persist",
+	}, RuntimeWorkerTransportDaemonControlRequestOptions{Now: time.Now().UTC()})
+	if err == nil || !strings.Contains(err.Error(), "unsupported worker transport daemon control action") {
+		t.Fatalf("expected unsupported action before safety authorization, got %v", err)
+	}
+	if strings.Contains(err.Error(), "worker runtime side effect requires current safety bypass authorization") {
+		t.Fatalf("unsupported action must not expose safety authorization details, got %v", err)
 	}
 	controls, err := ListRuntimeWorkerTransportDaemonControlRequests(root, "remote-web-1")
 	if err != nil {

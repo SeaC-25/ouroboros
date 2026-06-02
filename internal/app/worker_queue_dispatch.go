@@ -995,6 +995,9 @@ func CreateRuntimeWorkerTransportDaemonControlRequest(root, workerID string, req
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
+	if err := requireRuntimeWorkerSideEffectSafetyAuthorization(root, now); err != nil {
+		return RuntimeWorkerTransportDaemonControlRequest{}, err
+	}
 	control := RuntimeWorkerTransportDaemonControlRequest{
 		Version:     1,
 		Status:      "pending",

@@ -16875,6 +16875,80 @@ func TestRuntimeWorkerTransportDaemonControlCommandWritesAndListsRequests(t *tes
 	}
 }
 
+func TestRuntimeWorkerTransportDaemonControlCommandRequiresCurrentSafetyAuthorizationBeforeWriting(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	writeRuntimeWorkerHTTPDisabledSafetyScope(t, root)
+
+	var out bytes.Buffer
+	var stderr bytes.Buffer
+	cmd := newRootCommand(&out, &stderr)
+	cmd.SetArgs([]string{
+		"runtime", "worker-transport-daemon-control", root, "remote-web-1",
+		"--action", "stop",
+		"--reason", "operator requested maintenance",
+		"--requested-by", "alice",
+	})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "worker runtime side effect requires current safety bypass authorization") {
+		t.Fatalf("expected strict safety authorization error, got %v stdout=%q stderr=%q", err, out.String(), stderr.String())
+	}
+	if strings.Contains(out.String(), "worker-transport-daemon-control:") {
+		t.Fatalf("blocked daemon control creation must not print created artifact, got stdout=%q", out.String())
+	}
+	controls, err := app.ListRuntimeWorkerTransportDaemonControlRequests(root, "remote-web-1")
+	if err != nil {
+		t.Fatalf("list daemon controls after blocked CLI creation: %v", err)
+	}
+	if len(controls) != 0 {
+		t.Fatalf("blocked daemon control creation must not write artifacts, got %#v", controls)
+	}
+}
+
+func TestRuntimeWorkerTransportDaemonControlCommandAllowsDisabledBoundariesWithCurrentSafetyAuthorization(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	writeRuntimeWorkerHTTPDisabledSafetyScope(t, root)
+	writeRuntimeWorkerHTTPCurrentSafetyAuthorization(t, root)
+
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{
+		"runtime", "worker-transport-daemon-control", root, "remote-web-1",
+		"--action", "restart",
+		"--reason", "authorized restart",
+		"--requested-by", "alice",
+	})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("write authorized worker transport daemon control request: %v", err)
+	}
+	output := out.String()
+	for _, want := range []string{
+		"worker-transport-daemon-control:",
+		"worker=remote-web-1",
+		"status=pending",
+		"mode=metadata-only",
+		"action=restart",
+		"reason=authorized restart",
+		"requested_by=alice",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("expected authorized daemon control output to contain %q, got %q", want, output)
+		}
+	}
+	controls, err := app.ListRuntimeWorkerTransportDaemonControlRequests(root, "remote-web-1")
+	if err != nil {
+		t.Fatalf("list daemon controls after authorized CLI creation: %v", err)
+	}
+	if len(controls) != 1 || controls[0].Action != "restart" || controls[0].Status != "pending" {
+		t.Fatalf("expected one authorized pending daemon control, got %#v", controls)
+	}
+}
+
 func TestRuntimeWorkerTransportRunDaemonCommandStopsWhenControlEnabled(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
 	if err := app.InitWorkspace(root); err != nil {
