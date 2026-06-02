@@ -8290,6 +8290,103 @@ func TestToolchainCommandsInspectWorkspaceManifests(t *testing.T) {
 	}
 }
 
+func TestToolchainAuthoredToolCommandsValidateWriteListAndRead(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	specPath := filepath.Join(t.TempDir(), "authored-tool.yaml")
+	if err := os.WriteFile(specPath, []byte(validAuthoredToolSpecYAMLForCLITest()), 0o644); err != nil {
+		t.Fatalf("write authored spec: %v", err)
+	}
+
+	var validateOut bytes.Buffer
+	validateCmd := newRootCommand(&validateOut, new(bytes.Buffer))
+	validateCmd.SetArgs([]string{"toolchain", "authored-tool-validate", specPath})
+	if err := validateCmd.Execute(); err != nil {
+		t.Fatalf("validate authored tool: %v", err)
+	}
+	if !strings.Contains(validateOut.String(), "authored-tool: status=valid name=web-login-state-enumerator") {
+		t.Fatalf("expected validate output, got %q", validateOut.String())
+	}
+
+	var writeOut bytes.Buffer
+	writeCmd := newRootCommand(&writeOut, new(bytes.Buffer))
+	writeCmd.SetArgs([]string{"toolchain", "authored-tool-write", root, specPath})
+	if err := writeCmd.Execute(); err != nil {
+		t.Fatalf("write authored tool: %v", err)
+	}
+	if !strings.Contains(writeOut.String(), "authored-tool: status=written name=web-login-state-enumerator") {
+		t.Fatalf("expected write output, got %q", writeOut.String())
+	}
+
+	var listOut bytes.Buffer
+	listCmd := newRootCommand(&listOut, new(bytes.Buffer))
+	listCmd.SetArgs([]string{"toolchain", "authored-tools", root})
+	if err := listCmd.Execute(); err != nil {
+		t.Fatalf("list authored tools: %v", err)
+	}
+	if !strings.Contains(listOut.String(), "authored-tool: name=web-login-state-enumerator") {
+		t.Fatalf("expected list output, got %q", listOut.String())
+	}
+
+	var readOut bytes.Buffer
+	readCmd := newRootCommand(&readOut, new(bytes.Buffer))
+	readCmd.SetArgs([]string{"toolchain", "authored-tools", root, "web-login-state-enumerator"})
+	if err := readCmd.Execute(); err != nil {
+		t.Fatalf("read authored tool: %v", err)
+	}
+	for _, want := range []string{"authored-tool: name=web-login-state-enumerator", "parser=web_login_state_parser", "manifest="} {
+		if !strings.Contains(readOut.String(), want) {
+			t.Fatalf("expected read output to contain %q, got %q", want, readOut.String())
+		}
+	}
+}
+
+func TestToolchainAuthoredToolValidateRejectsRawScript(t *testing.T) {
+	specPath := filepath.Join(t.TempDir(), "bad-authored-tool.yaml")
+	if err := os.WriteFile(specPath, []byte(validAuthoredToolSpecYAMLForCLITest()+"raw_script: nmap -sV $TARGET\n"), 0o644); err != nil {
+		t.Fatalf("write authored spec: %v", err)
+	}
+
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{"toolchain", "authored-tool-validate", specPath})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "raw_script") {
+		t.Fatalf("expected raw script validation error, got %v output=%q", err, out.String())
+	}
+}
+
+func validAuthoredToolSpecYAMLForCLITest() string {
+	return `name: web-login-state-enumerator
+version: "0.1.0"
+capabilities:
+  - web.auth_state_tracking
+  - evidence.collection
+parser: web_login_state_parser
+inputs:
+  - name: target_url
+    type: url
+    required: true
+expected_evidence:
+  - type: http_observation
+    fields:
+      - status_code
+      - body_hash
+safety:
+  target_policy: enforce
+  isolation: process
+dependencies:
+  - name: httpx
+    kind: binary
+    optional: true
+    health_command: [httpx, -version]
+    install_hint: install managed httpx
+    install_command: [ouro-toolchain, install, httpx]
+`
+}
+
 func TestToolchainCompilePreviewCommandPrintsScoringMetadataOnly(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
 	if err := app.InitWorkspace(root); err != nil {

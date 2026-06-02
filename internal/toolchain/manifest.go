@@ -41,6 +41,9 @@ type Dependency struct {
 }
 
 func LoadManifests(root string) ([]Manifest, error) {
+	if err := requireManifestDirectory(root, "manifest root"); err != nil {
+		return nil, err
+	}
 	paths, err := filepath.Glob(filepath.Join(root, "*", "manifest.yaml"))
 	if err != nil {
 		return nil, fmt.Errorf("glob manifests: %w", err)
@@ -59,6 +62,9 @@ func LoadManifests(root string) ([]Manifest, error) {
 }
 
 func LoadManifest(path string) (Manifest, error) {
+	if err := rejectUnsafeManifestPath(path); err != nil {
+		return Manifest{}, err
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("read manifest %s: %w", path, err)
@@ -72,6 +78,43 @@ func LoadManifest(path string) (Manifest, error) {
 		return Manifest{}, fmt.Errorf("validate manifest %s: %w", path, err)
 	}
 	return manifest, nil
+}
+
+func rejectUnsafeManifestPath(path string) error {
+	if err := requireManifestDirectory(filepath.Dir(path), "manifest directory"); err != nil {
+		return err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("manifest file missing: %s", path)
+		}
+		return fmt.Errorf("inspect manifest file: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("manifest file must not be a symlink: %s", path)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("manifest file is a directory: %s", path)
+	}
+	return nil
+}
+
+func requireManifestDirectory(path string, label string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("%s missing: %s", label, path)
+		}
+		return fmt.Errorf("inspect %s: %w", label, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s must not be a symlink: %s", label, path)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s is not a directory: %s", label, path)
+	}
+	return nil
 }
 
 func ValidateManifest(manifest Manifest) error {

@@ -1,6 +1,15 @@
 # Ouroboros Analysis Progress
 
 ## 2026-06-02
+- Continued the native authoring work in isolated worktree `.worktrees/authored-tool-workspace`.
+- Added RED app tests for writing a model-authored native spec into `workspace/toolchain/<tool-name>/authored-tool.yaml` plus generated `manifest.yaml`, then listing and reading it back.
+- Added RED CLI tests for `ouro toolchain authored-tool-validate`, `authored-tool-write`, and `authored-tools <workspace> [name]`, including raw-script rejection.
+- Implemented `toolchain.LoadAuthoredToolSpec` and app-level `CreateAuthoredTool`, `ListAuthoredTools`, and `ReadAuthoredTool` APIs.
+- Authored tool writes now remain metadata-only, validate the structured spec before creating directories, reject `raw_script` / `run_command`, generate `runner: native` manifests, refuse existing tool directories, and constrain names to direct path-safe segments.
+- Tightened authored tool safety after review: write/list/read skip container runtime probing, read rejects derived manifest drift, and global manifest loading rejects symlinked tool directories or `manifest.yaml` files.
+- Added CLI commands to validate, write, list, and read authored native tools without executing tools or contacting targets.
+- Verified focused GREEN checks: `go test ./internal/app -run 'TestCreateAuthoredTool'`, `go test ./cmd/ouro -run 'TestToolchainAuthoredTool'`, and `go test ./internal/toolchain ./internal/app ./cmd/ouro`.
+- Wrote `docs/progress/milestone-15-authored-tool-workspace.md`; remaining gaps are managed binary/rule-bundle packaging, a real native executor for authored tools, and deeper parser bindings.
 - Started the appsec tool bundle/native authoring slice in isolated worktree `.worktrees/appsec-tool-bundle-authoring`.
 - Baseline `make test` passed after switching Go dependency download to `GOPROXY=https://goproxy.cn,direct`.
 - Added RED tests proving bundled manifests and initialized workspaces did not yet declare real appsec tool dependencies such as `nuclei`, `httpx`, `subfinder`, `ffuf`, `katana`, `nmap`, `naabu`, and `dnsx`.

@@ -44,6 +44,7 @@ type DoctorReport struct {
 
 type DoctorOptions struct {
 	RequireSafetyAuthorization bool
+	SkipContainerRuntimeCheck  bool
 	Now                        time.Time
 }
 
@@ -192,7 +193,7 @@ func DoctorWorkspaceWithOptions(root string, options DoctorOptions) (DoctorRepor
 			if options.RequireSafetyAuthorization {
 				report.Errors = append(report.Errors, scopeConfigSafetyAuthorizationErrors(config, authorization, authorizationFound, now)...)
 			}
-			if executionIsolationMode(config.Execution.Isolation) == "container" {
+			if executionIsolationMode(config.Execution.Isolation) == "container" && !options.SkipContainerRuntimeCheck {
 				if err := CheckContainerRuntime(config.Execution.Container); err != nil {
 					report.Errors = append(report.Errors, fmt.Sprintf("container runtime unavailable: %v", err))
 				}

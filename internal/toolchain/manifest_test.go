@@ -200,6 +200,43 @@ healthcheck: built_in
 	}
 }
 
+func TestLoadManifestRejectsSymlinkedManifestFile(t *testing.T) {
+	dir := t.TempDir()
+	outsideDir := t.TempDir()
+	outsideManifest := filepath.Join(outsideDir, "manifest.yaml")
+	if err := os.WriteFile(outsideManifest, []byte(validManifestYAMLForSymlinkTest()), 0o644); err != nil {
+		t.Fatalf("write outside manifest: %v", err)
+	}
+	link := filepath.Join(dir, "manifest.yaml")
+	if err := os.Symlink(outsideManifest, link); err != nil {
+		t.Fatalf("symlink manifest: %v", err)
+	}
+
+	_, err := LoadManifest(link)
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("expected symlink rejection, got %v", err)
+	}
+}
+
+func TestLoadManifestsRejectsSymlinkedToolDirectory(t *testing.T) {
+	root := t.TempDir()
+	outsidePack := filepath.Join(t.TempDir(), "outside-pack")
+	if err := os.MkdirAll(outsidePack, 0o755); err != nil {
+		t.Fatalf("create outside pack: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(outsidePack, "manifest.yaml"), []byte(validManifestYAMLForSymlinkTest()), 0o644); err != nil {
+		t.Fatalf("write outside manifest: %v", err)
+	}
+	if err := os.Symlink(outsidePack, filepath.Join(root, "linked-pack")); err != nil {
+		t.Fatalf("symlink pack: %v", err)
+	}
+
+	_, err := LoadManifests(root)
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("expected symlinked tool directory rejection, got %v", err)
+	}
+}
+
 func TestLoadManifestParsesDependencies(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "manifest.yaml")
 	data := `name: web-api-pack
@@ -401,6 +438,17 @@ func TestValidateManifestRejectsNegativeRunTimeoutMS(t *testing.T) {
 	if !strings.Contains(err.Error(), "run_timeout_ms") {
 		t.Fatalf("expected run_timeout_ms validation error, got %v", err)
 	}
+}
+
+func validManifestYAMLForSymlinkTest() string {
+	return `name: web-api-pack
+version: "0.1.0"
+capabilities:
+  - web.discovery
+runner: native
+parser: web_parser
+healthcheck: built_in
+`
 }
 
 func assertToolDependencies(t *testing.T, manifest Manifest, names []string) {

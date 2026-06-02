@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -22,6 +23,7 @@ import (
 	"github.com/ouroboros/ouroboros/internal/evidence"
 	"github.com/ouroboros/ouroboros/internal/frontier"
 	"github.com/ouroboros/ouroboros/internal/toolchain"
+	"gopkg.in/yaml.v3"
 )
 
 type ToolchainStatus struct {
@@ -33,6 +35,17 @@ type ToolchainStatus struct {
 	Health          toolchain.HealthReport
 	Dependencies    []toolchain.DependencyReport
 	InstallPlan     []toolchain.DependencyInstallStep
+}
+
+type AuthoredToolArtifact struct {
+	Status       string   `json:"status"`
+	Name         string   `json:"name"`
+	Version      string   `json:"version"`
+	Parser       string   `json:"parser"`
+	Capabilities []string `json:"capabilities"`
+	Dir          string   `json:"dir"`
+	SpecPath     string   `json:"spec_path"`
+	ManifestPath string   `json:"manifest_path"`
 }
 
 type ToolCompilePreviewOptions struct {
@@ -2187,6 +2200,281 @@ func InspectToolchains(root string) ([]ToolchainStatus, error) {
 		})
 	}
 	return statuses, nil
+}
+
+func CreateAuthoredTool(root string, spec toolchain.AuthoredToolSpec) (AuthoredToolArtifact, error) {
+	artifact, manifest, err := prepareAuthoredToolArtifact(root, spec, "written")
+	if err != nil {
+		return AuthoredToolArtifact{}, err
+	}
+	if err := rejectExistingAuthoredToolDir(artifact.Dir); err != nil {
+		return AuthoredToolArtifact{}, err
+	}
+
+	specData, err := yaml.Marshal(spec)
+	if err != nil {
+		return AuthoredToolArtifact{}, fmt.Errorf("encode authored tool spec: %w", err)
+	}
+	manifestData, err := yaml.Marshal(manifest)
+	if err != nil {
+		return AuthoredToolArtifact{}, fmt.Errorf("encode authored tool manifest: %w", err)
+	}
+
+	if err := os.Mkdir(artifact.Dir, 0o755); err != nil {
+		return AuthoredToolArtifact{}, fmt.Errorf("create authored tool directory: %w", err)
+	}
+	published := false
+	defer func() {
+		if !published {
+			_ = os.RemoveAll(artifact.Dir)
+		}
+	}()
+	if err := requireAuthoredToolDirectory(artifact.Dir, "authored tool directory"); err != nil {
+		return AuthoredToolArtifact{}, err
+	}
+	if err := writeAuthoredToolArtifactFile(artifact.SpecPath, specData, "authored tool spec"); err != nil {
+		return AuthoredToolArtifact{}, err
+	}
+	if err := writeAuthoredToolArtifactFile(artifact.ManifestPath, manifestData, "authored tool manifest"); err != nil {
+		return AuthoredToolArtifact{}, err
+	}
+	published = true
+	return artifact, nil
+}
+
+func ListAuthoredTools(root string) ([]AuthoredToolArtifact, error) {
+	if err := requireAuthoredToolWorkspace(root); err != nil {
+		return nil, err
+	}
+	dir, err := authoredToolchainRoot(root)
+	if err != nil {
+		return nil, err
+	}
+	if err := requireAuthoredToolDirectory(dir, "toolchain directory"); err != nil {
+		return nil, err
+	}
+	paths, err := filepath.Glob(filepath.Join(dir, "*", "authored-tool.yaml"))
+	if err != nil {
+		return nil, fmt.Errorf("glob authored tools: %w", err)
+	}
+	sort.Strings(paths)
+	artifacts := make([]AuthoredToolArtifact, 0, len(paths))
+	for _, path := range paths {
+		artifact, err := readAuthoredToolFromDir(filepath.Dir(path), "available")
+		if err != nil {
+			return nil, err
+		}
+		artifacts = append(artifacts, artifact)
+	}
+	return artifacts, nil
+}
+
+func ReadAuthoredTool(root, name string) (AuthoredToolArtifact, error) {
+	if err := requireAuthoredToolWorkspace(root); err != nil {
+		return AuthoredToolArtifact{}, err
+	}
+	dir, err := authoredToolDir(root, name)
+	if err != nil {
+		return AuthoredToolArtifact{}, err
+	}
+	return readAuthoredToolFromDir(dir, "available")
+}
+
+func prepareAuthoredToolArtifact(root string, spec toolchain.AuthoredToolSpec, status string) (AuthoredToolArtifact, toolchain.Manifest, error) {
+	if err := requireAuthoredToolWorkspace(root); err != nil {
+		return AuthoredToolArtifact{}, toolchain.Manifest{}, err
+	}
+	manifest, err := toolchain.AuthoredToolToManifest(spec)
+	if err != nil {
+		return AuthoredToolArtifact{}, toolchain.Manifest{}, err
+	}
+	dir, err := authoredToolDir(root, manifest.Name)
+	if err != nil {
+		return AuthoredToolArtifact{}, toolchain.Manifest{}, err
+	}
+	return authoredToolArtifactFromManifest(status, dir, manifest), manifest, nil
+}
+
+func readAuthoredToolFromDir(dir string, status string) (AuthoredToolArtifact, error) {
+	if err := requireAuthoredToolDirectory(dir, "authored tool directory"); err != nil {
+		return AuthoredToolArtifact{}, err
+	}
+	specPath := filepath.Join(dir, "authored-tool.yaml")
+	if err := rejectUnsafeAuthoredToolFile(specPath, "authored tool spec"); err != nil {
+		return AuthoredToolArtifact{}, err
+	}
+	spec, err := toolchain.LoadAuthoredToolSpec(specPath)
+	if err != nil {
+		return AuthoredToolArtifact{}, err
+	}
+	manifestPath := filepath.Join(dir, "manifest.yaml")
+	if err := rejectUnsafeAuthoredToolFile(manifestPath, "authored tool manifest"); err != nil {
+		return AuthoredToolArtifact{}, err
+	}
+	manifest, err := toolchain.LoadManifest(manifestPath)
+	if err != nil {
+		return AuthoredToolArtifact{}, err
+	}
+	expected, err := toolchain.AuthoredToolToManifest(spec)
+	if err != nil {
+		return AuthoredToolArtifact{}, err
+	}
+	actual := manifest
+	actual.Path = ""
+	if !reflect.DeepEqual(expected, actual) {
+		return AuthoredToolArtifact{}, fmt.Errorf("authored tool manifest %s does not match authored spec", manifestPath)
+	}
+	return authoredToolArtifactFromManifest(status, dir, manifest), nil
+}
+
+func authoredToolArtifactFromManifest(status string, dir string, manifest toolchain.Manifest) AuthoredToolArtifact {
+	return AuthoredToolArtifact{
+		Status:       status,
+		Name:         manifest.Name,
+		Version:      manifest.Version,
+		Parser:       manifest.Parser,
+		Capabilities: append([]string(nil), manifest.Capabilities...),
+		Dir:          dir,
+		SpecPath:     filepath.Join(dir, "authored-tool.yaml"),
+		ManifestPath: filepath.Join(dir, "manifest.yaml"),
+	}
+}
+
+func authoredToolDir(root, name string) (string, error) {
+	safeName, err := validateAuthoredToolName(name)
+	if err != nil {
+		return "", err
+	}
+	dir, err := authoredToolchainRoot(root)
+	if err != nil {
+		return "", err
+	}
+	candidate := filepath.Join(dir, safeName)
+	rel, err := filepath.Rel(dir, candidate)
+	if err != nil {
+		return "", fmt.Errorf("resolve authored tool relative path: %w", err)
+	}
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) || strings.Contains(rel, string(os.PathSeparator)) {
+		return "", fmt.Errorf("authored tool path must stay directly under %s", dir)
+	}
+	return candidate, nil
+}
+
+func authoredToolchainRoot(root string) (string, error) {
+	dir, err := filepath.Abs(filepath.Join(root, "toolchain"))
+	if err != nil {
+		return "", fmt.Errorf("resolve toolchain directory: %w", err)
+	}
+	return dir, nil
+}
+
+func requireAuthoredToolWorkspace(root string) error {
+	doctor, err := DoctorWorkspaceWithOptions(root, DoctorOptions{SkipContainerRuntimeCheck: true})
+	if err != nil {
+		return err
+	}
+	if !doctor.Ready {
+		return fmt.Errorf("workspace is not ready: %v", doctor.Errors)
+	}
+	return nil
+}
+
+func validateAuthoredToolName(name string) (string, error) {
+	trimmed := strings.TrimSpace(name)
+	switch {
+	case trimmed == "":
+		return "", fmt.Errorf("authored tool name is required")
+	case trimmed != name:
+		return "", fmt.Errorf("authored tool name must not contain surrounding whitespace")
+	case trimmed == "." || trimmed == "..":
+		return "", fmt.Errorf("authored tool name is unsafe: %s", name)
+	case filepath.IsAbs(trimmed):
+		return "", fmt.Errorf("authored tool name must be a direct path segment: %s", name)
+	case strings.Contains(trimmed, "/") || strings.Contains(trimmed, "\\"):
+		return "", fmt.Errorf("authored tool name must be a direct path segment: %s", name)
+	}
+	for _, r := range trimmed {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '.', r == '_', r == '-':
+		default:
+			return "", fmt.Errorf("authored tool name contains unsupported character %q", r)
+		}
+	}
+	return trimmed, nil
+}
+
+func rejectExistingAuthoredToolDir(dir string) error {
+	parent := filepath.Dir(dir)
+	if err := requireAuthoredToolDirectory(parent, "toolchain directory"); err != nil {
+		return err
+	}
+	info, err := os.Lstat(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("inspect authored tool directory: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("authored tool directory must not be a symlink: %s", dir)
+	}
+	return fmt.Errorf("authored tool directory already exists: %s", dir)
+}
+
+func requireAuthoredToolDirectory(path string, label string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("%s missing: %s", label, path)
+		}
+		return fmt.Errorf("inspect %s: %w", label, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s must not be a symlink: %s", label, path)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s is not a directory: %s", label, path)
+	}
+	return nil
+}
+
+func rejectUnsafeAuthoredToolFile(path string, label string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("inspect %s: %w", label, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s must not be a symlink: %s", label, path)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("write %s: path is a directory: %s", label, path)
+	}
+	return nil
+}
+
+func writeAuthoredToolArtifactFile(path string, data []byte, label string) error {
+	if err := rejectUnsafeAuthoredToolFile(path, label); err != nil {
+		return err
+	}
+	data = append(append([]byte(nil), data...), '\n')
+	tmpPath := path + ".tmp"
+	if err := rejectUnsafeAuthoredToolFile(tmpPath, label+" temp file"); err != nil {
+		return err
+	}
+	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", label, err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("publish %s: %w", label, err)
+	}
+	return nil
 }
 
 func CreateToolchainInstallRequest(root, pack, dependency string) (ToolchainInstallRequest, error) {

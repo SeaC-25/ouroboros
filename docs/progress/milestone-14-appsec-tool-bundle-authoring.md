@@ -18,7 +18,7 @@
 ## Missing
 - Third-party binaries and nuclei template/rule bundles are not yet vendored into the release artifact.
 - The `ouro-toolchain install ...` command referenced by install metadata is still a controlled installer contract, not a completed bundled installer implementation.
-- Authored native tool specs can be validated and converted to manifests, but there is not yet a workspace writer CLI or a true native executor for model-authored tools.
+- Authored native tool specs can be validated and converted to manifests; workspace write/list/read is tracked in Milestone 15. A true native executor for model-authored tools is still missing.
 - Parser bindings for real tool output formats such as Nmap XML and JSONL from `nuclei`/`httpx` are still thin.
 - Worker `--use-request-command` execution still needs the same target-boundary and isolation guarantees as the local command runner before it can safely carry appsec command payloads.
 
@@ -41,7 +41,7 @@
   - `GOPROXY=https://goproxy.cn,direct go test ./internal/toolchain ./internal/app ./cmd/ouro`
 
 ## Next Step
-- Add workspace-confined authored tool write/list/read CLI commands so a model-produced native spec can become an auditable workspace tool artifact.
+- Integrate persisted authored native manifests into the runtime compiler/executor path once native execution contracts, parser bindings, and safety gates are ready.
 - Implement the managed installer/bundle layer for declared tools without using target-contacting install commands; keep installer command shapes allowlisted.
 - Extend parser bindings and runtime target-kind checks before any new native appsec executor contacts scoped targets.
 

@@ -23,6 +23,7 @@ import (
 	"github.com/ouroboros/ouroboros/internal/compiler"
 	"github.com/ouroboros/ouroboros/internal/eventlog"
 	"github.com/ouroboros/ouroboros/internal/frontier"
+	"github.com/ouroboros/ouroboros/internal/toolchain"
 	"github.com/ouroboros/ouroboros/internal/tui"
 	"github.com/spf13/cobra"
 )
@@ -5342,6 +5343,9 @@ func newToolchainCommand(out io.Writer) *cobra.Command {
 	}
 	cmd.AddCommand(newToolchainListCommand(out))
 	cmd.AddCommand(newToolchainHealthCommand(out))
+	cmd.AddCommand(newToolchainAuthoredToolValidateCommand(out))
+	cmd.AddCommand(newToolchainAuthoredToolWriteCommand(out))
+	cmd.AddCommand(newToolchainAuthoredToolsCommand(out))
 	cmd.AddCommand(newToolchainCompilePreviewCommand(out))
 	cmd.AddCommand(newToolchainCompilePreviewReviewCommand(out))
 	cmd.AddCommand(newToolchainCompilePreviewReviewAnnotateCommand(out))
@@ -10401,6 +10405,111 @@ func newToolchainHealthCommand(out io.Writer) *cobra.Command {
 			return nil
 		},
 	}
+}
+
+func newToolchainAuthoredToolValidateCommand(out io.Writer) *cobra.Command {
+	return &cobra.Command{
+		Use:   "authored-tool-validate <spec-file>",
+		Short: "Validate authored native tool metadata",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			spec, err := toolchain.LoadAuthoredToolSpec(args[0])
+			if err != nil {
+				return err
+			}
+			if err := toolchain.ValidateAuthoredToolSpec(spec); err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(
+				out,
+				"authored-tool: status=valid name=%s version=%s parser=%s capabilities=%d dependencies=%d\n",
+				strings.TrimSpace(spec.Name),
+				strings.TrimSpace(spec.Version),
+				strings.TrimSpace(spec.Parser),
+				len(spec.Capabilities),
+				len(spec.Dependencies),
+			)
+			return err
+		},
+	}
+}
+
+func newToolchainAuthoredToolWriteCommand(out io.Writer) *cobra.Command {
+	return &cobra.Command{
+		Use:   "authored-tool-write <workspace> <spec-file>",
+		Short: "Write authored native tool metadata into a workspace",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			spec, err := toolchain.LoadAuthoredToolSpec(args[1])
+			if err != nil {
+				return err
+			}
+			if err := toolchain.ValidateAuthoredToolSpec(spec); err != nil {
+				return err
+			}
+			artifact, err := app.CreateAuthoredTool(args[0], spec)
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(
+				out,
+				"authored-tool: status=written name=%s version=%s parser=%s spec=%s manifest=%s\n",
+				artifact.Name,
+				artifact.Version,
+				artifact.Parser,
+				artifact.SpecPath,
+				artifact.ManifestPath,
+			)
+			return err
+		},
+	}
+}
+
+func newToolchainAuthoredToolsCommand(out io.Writer) *cobra.Command {
+	return &cobra.Command{
+		Use:   "authored-tools <workspace> [name]",
+		Short: "List or inspect authored native tool metadata",
+		Args:  cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 2 {
+				artifact, err := app.ReadAuthoredTool(args[0], args[1])
+				if err != nil {
+					return err
+				}
+				return printAuthoredToolArtifact(out, artifact)
+			}
+			artifacts, err := app.ListAuthoredTools(args[0])
+			if err != nil {
+				return err
+			}
+			sort.SliceStable(artifacts, func(i, j int) bool {
+				if artifacts[i].Name == artifacts[j].Name {
+					return artifacts[i].ManifestPath < artifacts[j].ManifestPath
+				}
+				return artifacts[i].Name < artifacts[j].Name
+			})
+			for _, artifact := range artifacts {
+				if err := printAuthoredToolArtifact(out, artifact); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	}
+}
+
+func printAuthoredToolArtifact(out io.Writer, artifact app.AuthoredToolArtifact) error {
+	_, err := fmt.Fprintf(
+		out,
+		"authored-tool: name=%s version=%s parser=%s capabilities=%d spec=%s manifest=%s\n",
+		artifact.Name,
+		artifact.Version,
+		artifact.Parser,
+		len(artifact.Capabilities),
+		artifact.SpecPath,
+		artifact.ManifestPath,
+	)
+	return err
 }
 
 func newToolchainCompilePreviewCommand(out io.Writer) *cobra.Command {

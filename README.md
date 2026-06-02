@@ -12,7 +12,7 @@ Ouroboros is a TUI-first penetration testing IDE and compiler for authorized sec
 - Native Go CLI under `cmd/ouro/` with first-party packages under `internal/`.
 - Bubble Tea TUI surfaces toolchain health, agent runtime, replay timelines, evidence graph state, and read-only inspector details.
 - Built-in toolchain manifests now expose optional managed dependency metadata for common Web/API, Infra/Internal, and artifact/app analysis tools such as `nuclei`, `httpx`, `subfinder`, `ffuf`, `katana`, `nmap`, `naabu`, `dnsx`, `apktool`, `jadx`, and `mobsfscan`.
-- Model-authored tools must be structured native specs with declared inputs, expected evidence, parser, dependencies, and safety controls; raw scripts and command-runner payloads are rejected by the authored-tool validator.
+- Model-authored tools must be structured native specs with declared inputs, expected evidence, parser, dependencies, and safety controls; raw scripts and command-runner payloads are rejected, and validated specs can be written as workspace-confined native tool artifacts.
 - Runtime workflows favor metadata-only planning first, then explicit default-off gates for dispatch, execution, retry, lease recovery automation, and maintenance.
 - Safety bypasses stay visible and auditable through `authorization.yaml`, `ouro doctor --require-safety-authorization`, `ouro run --require-safety-authorization`, selected runtime-worker side-effect gates, and `make doctor-strict`.
 
@@ -53,6 +53,9 @@ make doctor-strict
 ```bash
 GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro init ./workspace
 GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro doctor ./workspace
+GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro toolchain authored-tool-validate ./authored-tool.yaml
+GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro toolchain authored-tool-write ./workspace ./authored-tool.yaml
+GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro toolchain authored-tools ./workspace
 GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro toolchain compile-preview-signals ./workspace --write --max-plan-nodes 2 --domain-priority infra_internal=5
 GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro toolchain compile-preview-signals-from-replay ./workspace <run-id> --write
 GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro toolchain compile-preview ./workspace --domain-priority infra_internal=5 --max-plan-nodes 2

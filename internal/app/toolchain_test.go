@@ -47,6 +47,177 @@ func TestInspectToolchainsReportsWorkspaceManifestsAndHealth(t *testing.T) {
 	}
 }
 
+func TestCreateAuthoredToolWritesSpecAndManifestInsideWorkspace(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	spec := validAuthoredToolSpecForAppTest()
+
+	authored, err := CreateAuthoredTool(root, spec)
+	if err != nil {
+		t.Fatalf("create authored tool: %v", err)
+	}
+	if authored.Name != spec.Name || authored.Status != "written" {
+		t.Fatalf("unexpected authored tool result: %#v", authored)
+	}
+	if authored.Dir != filepath.Join(root, "toolchain", spec.Name) {
+		t.Fatalf("expected authored tool dir under workspace toolchain, got %#v", authored)
+	}
+	if authored.SpecPath != filepath.Join(authored.Dir, "authored-tool.yaml") || authored.ManifestPath != filepath.Join(authored.Dir, "manifest.yaml") {
+		t.Fatalf("unexpected authored tool paths: %#v", authored)
+	}
+	if _, err := os.Stat(authored.SpecPath); err != nil {
+		t.Fatalf("expected authored spec artifact: %v", err)
+	}
+	manifest, err := toolchain.LoadManifest(authored.ManifestPath)
+	if err != nil {
+		t.Fatalf("load authored manifest: %v", err)
+	}
+	if manifest.Name != spec.Name || manifest.Runner != "native" || len(manifest.RunCommand) != 0 {
+		t.Fatalf("expected native manifest from authored spec, got %#v", manifest)
+	}
+
+	tools, err := ListAuthoredTools(root)
+	if err != nil {
+		t.Fatalf("list authored tools: %v", err)
+	}
+	if len(tools) != 1 || tools[0].Name != spec.Name || tools[0].SpecPath != authored.SpecPath {
+		t.Fatalf("expected listed authored tool, got %#v", tools)
+	}
+	read, err := ReadAuthoredTool(root, spec.Name)
+	if err != nil {
+		t.Fatalf("read authored tool: %v", err)
+	}
+	if read.Name != spec.Name || read.ManifestPath != authored.ManifestPath {
+		t.Fatalf("unexpected read authored tool: %#v", read)
+	}
+}
+
+func TestCreateAuthoredToolRejectsRawScriptWithoutWriting(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	spec := validAuthoredToolSpecForAppTest()
+	spec.RawScript = "nmap -sV $TARGET"
+
+	_, err := CreateAuthoredTool(root, spec)
+	if err == nil || !strings.Contains(err.Error(), "raw_script") {
+		t.Fatalf("expected raw script validation error, got %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(root, "toolchain", spec.Name)); !os.IsNotExist(statErr) {
+		t.Fatalf("invalid authored spec must not create tool directory, stat err=%v", statErr)
+	}
+}
+
+func TestAuthoredToolMetadataPathsDoNotRunContainerRuntimeDoctor(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	engineDir := t.TempDir()
+	engine := filepath.Join(engineDir, "fake-container-engine")
+	marker := filepath.Join(engineDir, "container-runtime-was-called")
+	engineScript := `#!/bin/sh
+touch "` + marker + `"
+printf 'container runtime should not be inspected during authored tool metadata paths\n' >&2
+exit 1
+`
+	if err := os.WriteFile(engine, []byte(engineScript), 0o755); err != nil {
+		t.Fatalf("write fake engine: %v", err)
+	}
+	scope := `version: 1
+scope:
+  target_policy: enforce
+  targets: []
+  exclusions: []
+execution:
+  isolation: container
+  container:
+    engine: ` + engine + `
+    image: ouro-worker:test
+`
+	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
+		t.Fatalf("write container scope: %v", err)
+	}
+
+	spec := validAuthoredToolSpecForAppTest()
+	if _, err := CreateAuthoredTool(root, spec); err != nil {
+		t.Fatalf("create authored tool should not run container doctor checks: %v", err)
+	}
+	if _, err := ListAuthoredTools(root); err != nil {
+		t.Fatalf("list authored tools should not run container doctor checks: %v", err)
+	}
+	if _, err := ReadAuthoredTool(root, spec.Name); err != nil {
+		t.Fatalf("read authored tool should not run container doctor checks: %v", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("authored metadata paths must not inspect container runtime, marker stat err=%v", err)
+	}
+}
+
+func TestReadAuthoredToolRejectsDerivedManifestDrift(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	spec := validAuthoredToolSpecForAppTest()
+	authored, err := CreateAuthoredTool(root, spec)
+	if err != nil {
+		t.Fatalf("create authored tool: %v", err)
+	}
+	driftedManifest := `name: ` + spec.Name + `
+version: "0.1.0"
+capabilities:
+  - web.auth_state_tracking
+runner: native
+run_command:
+  - sh
+  - -c
+  - echo drift
+parser: drifted_parser
+healthcheck: built_in
+`
+	if err := os.WriteFile(authored.ManifestPath, []byte(driftedManifest), 0o644); err != nil {
+		t.Fatalf("write drifted manifest: %v", err)
+	}
+
+	_, err = ReadAuthoredTool(root, spec.Name)
+	if err == nil || !strings.Contains(err.Error(), "does not match authored spec") {
+		t.Fatalf("expected derived manifest drift error, got %v", err)
+	}
+}
+
+func validAuthoredToolSpecForAppTest() toolchain.AuthoredToolSpec {
+	return toolchain.AuthoredToolSpec{
+		Name:         "web-login-state-enumerator",
+		Version:      "0.1.0",
+		Capabilities: []string{"web.auth_state_tracking", "evidence.collection"},
+		Parser:       "web_login_state_parser",
+		Inputs: []toolchain.AuthoredToolInput{
+			{Name: "target_url", Type: "url", Required: true},
+		},
+		ExpectedEvidence: []toolchain.AuthoredToolEvidence{
+			{Type: "http_observation", Fields: []string{"status_code", "body_hash"}},
+		},
+		Safety: toolchain.AuthoredToolSafety{
+			TargetPolicy: "enforce",
+			Isolation:    "process",
+		},
+		Dependencies: []toolchain.Dependency{
+			{
+				Name:           "httpx",
+				Kind:           "binary",
+				Optional:       true,
+				HealthCommand:  []string{"httpx", "-version"},
+				InstallHint:    "install managed httpx",
+				InstallCommand: []string{"ouro-toolchain", "install", "httpx"},
+			},
+		},
+	}
+}
+
 func TestPreviewToolCompilePlanScoresCandidatesWithoutExecutingCommands(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
 	if err := InitWorkspace(root); err != nil {

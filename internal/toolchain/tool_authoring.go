@@ -3,7 +3,10 @@ package toolchain
 import (
 	"errors"
 	"fmt"
+	"os"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 type AuthoredToolSpec struct {
@@ -36,6 +39,18 @@ type AuthoredToolSafety struct {
 	Isolation                 string `yaml:"isolation" json:"isolation"`
 	AllowTargetPolicyDisabled bool   `yaml:"allow_target_policy_disabled,omitempty" json:"allow_target_policy_disabled,omitempty"`
 	AllowIsolationDisabled    bool   `yaml:"allow_isolation_disabled,omitempty" json:"allow_isolation_disabled,omitempty"`
+}
+
+func LoadAuthoredToolSpec(path string) (AuthoredToolSpec, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return AuthoredToolSpec{}, fmt.Errorf("read authored tool spec %s: %w", path, err)
+	}
+	var spec AuthoredToolSpec
+	if err := yaml.Unmarshal(data, &spec); err != nil {
+		return AuthoredToolSpec{}, fmt.Errorf("parse authored tool spec %s: %w", path, err)
+	}
+	return spec, nil
 }
 
 func ValidateAuthoredToolSpec(spec AuthoredToolSpec) error {

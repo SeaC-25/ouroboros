@@ -63,6 +63,9 @@ GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro replay ./workspace <run-id> 
 GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro replay ./workspace <run-id> --interactive
 GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro toolchain list ./workspace
 GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro toolchain health ./workspace
+GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro toolchain authored-tool-validate ./authored-tool.yaml
+GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro toolchain authored-tool-write ./workspace ./authored-tool.yaml
+GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro toolchain authored-tools ./workspace
 ```
 
 `make release` writes a local tarball and `SHA256SUMS` under `dist/`. The release script respects `VERSION`, `DIST_DIR`, `GOOS`, `GOARCH`, and `GOPROXY`; it builds one target tuple and does not publish artifacts.
@@ -240,6 +243,15 @@ dependencies:
 When a `container_image` dependency also declares a `health_command`, the first non-empty output line must include the declared `image_digest`. This lets a workspace use a fake or real container runtime inspect command in tests and production health checks; a digest mismatch marks the dependency failed.
 
 `ouro toolchain health <workspace>` prints the pack health row, dependency rows, remote latest digest/source metadata, and deterministic `install:` plan rows for missing or failed dependencies that declare install metadata, so missing required tools and available updates are visible before a run starts without triggering automatic installation. Run/replay events carry the same install-plan rows, and the TUI Toolchain Health tab renders them as remediation hints.
+
+Model-authored native tools use a structured spec, not shell snippets. `ouro toolchain authored-tool-validate <spec-file>` reads YAML, rejects `raw_script`, `run_command`, and non-native runners, and validates declared capabilities, parser, inputs, expected evidence, dependencies, and safety metadata. `ouro toolchain authored-tool-write <workspace> <spec-file>` persists a valid spec as:
+
+```text
+workspace/toolchain/<tool-name>/authored-tool.yaml
+workspace/toolchain/<tool-name>/manifest.yaml
+```
+
+The generated `manifest.yaml` uses `runner: native`, is loadable by the existing manifest loader, and contains no command array. Tool names must be direct path-safe segments; writes refuse traversal, symlinked toolchain paths, and existing tool directories. Read/list re-derive the manifest from `authored-tool.yaml` and reject drift, so a tampered manifest cannot silently change parser, runner, commands, capabilities, or dependencies. `ouro toolchain authored-tools <workspace> [name]` lists or reads those artifacts without executing tools, probing container runtimes, or contacting targets.
 
 `ouro toolchain install-plan <workspace>` prints only the non-executing remediation plan rows. It is intended for operators and future TUI dispatchers that need to inspect or copy the proposed command arrays without running them.
 
