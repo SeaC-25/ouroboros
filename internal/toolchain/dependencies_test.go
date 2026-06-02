@@ -34,6 +34,68 @@ func TestCheckDependenciesReportsReadyBinaryDependency(t *testing.T) {
 	}
 }
 
+func TestCheckDependenciesDoesNotExecuteOptionalHealthCommand(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "executed")
+	probe := filepath.Join(dir, "optional-probe")
+	if err := os.WriteFile(probe, []byte("#!/bin/sh\ntouch "+marker+"\nsleep 2\n"), 0o755); err != nil {
+		t.Fatalf("write dependency probe: %v", err)
+	}
+	manifest := validManifest()
+	manifest.Dependencies = []Dependency{
+		{
+			Name:          "optional-probe",
+			Kind:          "binary",
+			Optional:      true,
+			HealthCommand: []string{probe, "--version"},
+		},
+	}
+
+	reports := CheckDependencies(manifest, DefaultDependencyRunner{Timeout: 10})
+
+	if len(reports) != 1 {
+		t.Fatalf("expected one dependency report, got %#v", reports)
+	}
+	report := reports[0]
+	if report.State != HealthReady || report.Required {
+		t.Fatalf("expected ready optional dependency without executing probe, got %#v", report)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("optional dependency health command should not execute, marker stat err=%v", err)
+	}
+}
+
+func TestCheckDependenciesDoesNotExecuteOptionalRuleBundleHealthCommand(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "executed")
+	probe := filepath.Join(dir, "optional-rule-probe")
+	if err := os.WriteFile(probe, []byte("#!/bin/sh\ntouch "+marker+"\nsleep 2\n"), 0o755); err != nil {
+		t.Fatalf("write dependency probe: %v", err)
+	}
+	manifest := validManifest()
+	manifest.Dependencies = []Dependency{
+		{
+			Name:          "nuclei-templates",
+			Kind:          "rule_bundle",
+			Optional:      true,
+			HealthCommand: []string{probe, "--version"},
+		},
+	}
+
+	reports := CheckDependencies(manifest, DefaultDependencyRunner{Timeout: 10})
+
+	if len(reports) != 1 {
+		t.Fatalf("expected one dependency report, got %#v", reports)
+	}
+	report := reports[0]
+	if report.State != HealthReady || report.Required {
+		t.Fatalf("expected ready optional rule bundle without executing probe, got %#v", report)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("optional rule bundle health command should not execute, marker stat err=%v", err)
+	}
+}
+
 func TestCheckDependenciesReportsMissingRequiredBinaryDependency(t *testing.T) {
 	manifest := validManifest()
 	manifest.Dependencies = []Dependency{

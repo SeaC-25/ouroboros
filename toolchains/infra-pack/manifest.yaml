@@ -9,3 +9,53 @@ capabilities:
 runner: native
 parser: infra_parser
 healthcheck: built_in
+dependencies:
+  - name: nmap
+    kind: binary
+    optional: true
+    source: nmap/nmap
+    health_command: [nmap, --version]
+    install_hint: install the managed nmap bundle or an approved nmap package
+    install_command: [ouro-toolchain, install, nmap]
+  - name: naabu
+    kind: binary
+    optional: true
+    source: projectdiscovery/naabu
+    health_command: [naabu, -version]
+    install_hint: install the managed naabu bundle or an approved ProjectDiscovery naabu package
+    install_command: [ouro-toolchain, install, naabu]
+  - name: dnsx
+    kind: binary
+    optional: true
+    source: projectdiscovery/dnsx
+    health_command: [dnsx, -version]
+    install_hint: install the managed dnsx bundle or an approved ProjectDiscovery dnsx package
+    install_command: [ouro-toolchain, install, dnsx]
+  - name: amass
+    kind: binary
+    optional: true
+    source: owasp-amass/amass
+    health_command: [amass, -version]
+    install_hint: install the managed amass bundle or an approved OWASP Amass package
+    install_command: [ouro-toolchain, install, amass]
+  - name: dnsrecon
+    kind: binary
+    optional: true
+    source: darkoperator/dnsrecon
+    health_command: [dnsrecon, --version]
+    install_hint: install the managed dnsrecon bundle or an approved dnsrecon package
+    install_command: [ouro-toolchain, install, dnsrecon]
+  - name: testssl.sh
+    kind: binary
+    optional: true
+    source: drwetter/testssl.sh
+    health_command: [testssl.sh, --version]
+    install_hint: install the managed testssl.sh bundle or an approved testssl.sh package
+    install_command: [ouro-toolchain, install, testssl.sh]
+  - name: sslscan
+    kind: binary
+    optional: true
+    source: rbsec/sslscan
+    health_command: [sslscan, --version]
+    install_hint: install the managed sslscan bundle or an approved sslscan package
+    install_command: [ouro-toolchain, install, sslscan]

@@ -34,6 +34,12 @@ func TestInitWorkspaceCreatesProviderConfigAndToolchainManifests(t *testing.T) {
 	if len(manifests) != 3 {
 		t.Fatalf("expected three workspace manifests, got %d", len(manifests))
 	}
+	byName := map[string]toolchain.Manifest{}
+	for _, manifest := range manifests {
+		byName[manifest.Name] = manifest
+	}
+	assertWorkspaceToolDependencies(t, byName["web-api-pack"], []string{"nuclei", "nuclei-templates", "httpx", "subfinder", "ffuf", "katana"})
+	assertWorkspaceToolDependencies(t, byName["infra-pack"], []string{"nmap", "naabu", "dnsx"})
 }
 
 func TestDoctorWorkspaceRejectsMissingProviderConfigAndToolchainManifest(t *testing.T) {
@@ -59,6 +65,26 @@ func TestDoctorWorkspaceRejectsMissingProviderConfigAndToolchainManifest(t *test
 	for _, want := range []string{"providers.yaml", "ctf-pack"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("expected %q in doctor errors, got %q", want, joined)
+		}
+	}
+}
+
+func assertWorkspaceToolDependencies(t *testing.T, manifest toolchain.Manifest, names []string) {
+	t.Helper()
+	if manifest.Name == "" {
+		t.Fatalf("expected workspace manifest to be present")
+	}
+	byName := map[string]toolchain.Dependency{}
+	for _, dependency := range manifest.Dependencies {
+		byName[dependency.Name] = dependency
+	}
+	for _, name := range names {
+		dependency, ok := byName[name]
+		if !ok {
+			t.Fatalf("expected %s dependency in %s workspace manifest, got %#v", name, manifest.Name, manifest.Dependencies)
+		}
+		if dependency.InstallHint == "" || len(dependency.InstallCommand) == 0 {
+			t.Fatalf("expected install metadata for %s, got %#v", name, dependency)
 		}
 	}
 }

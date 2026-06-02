@@ -5,14 +5,14 @@
 - `cmd/ouro/`: Cobra CLI entrypoint for `init`, `doctor`, `run`, `replay`, and toolchain commands.
 - `internal/app/`: workspace initialization, doctor validation, provider config, and production run orchestration.
 - `internal/domain/`: Domain Pack SDK plus Web/API, Infra/Internal, and CTF/Lab packs.
-- `internal/toolchain/`: native toolchain manifest loading, health checks, and corpus helpers.
+- `internal/toolchain/`: native toolchain manifest loading, appsec tool catalog metadata, authored native tool validation, health checks, and corpus helpers.
 - `internal/compiler/`: semantic action to toolchain plan compilation and parser binding.
 - `internal/eventlog/`: SQLite event log and replay snapshot projection.
 - `internal/evidence/`, `internal/blackboard/`, `internal/frontier/`: core state, graph, coverage, and breadth/depth primitives.
 - `internal/swarm/`, `internal/modelruntime/`, `internal/patterns/`: agent contracts, timeline lanes, model runtime telemetry, and strategy patterns.
 - `internal/tui/`: Bubble Tea TUI shell, panels, graph stack, runtime tabs, and replay projection.
 - `internal/report/`: Evidence Graph to report projection and Markdown rendering.
-- `toolchains/`: bundled toolchain manifests.
+- `toolchains/`: bundled toolchain manifests with optional managed dependency metadata for appsec and artifact-analysis tools.
 - `configs/patterns/`: built-in strategy pattern YAML files.
 - `docs/progress/`: milestone progress records. Add or update one before marking a milestone complete.
 - `model/`: immutable upstream reference archives. Do not modify these files.

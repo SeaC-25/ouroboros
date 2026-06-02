@@ -9,3 +9,60 @@ capabilities:
 runner: native
 parser: ctf_parser
 healthcheck: built_in
+dependencies:
+  - name: apktool
+    kind: binary
+    optional: true
+    source: iBotPeaches/Apktool
+    health_command: [apktool, --version]
+    install_hint: install the managed apktool bundle or an approved apktool package
+    install_command: [ouro-toolchain, install, apktool]
+  - name: jadx
+    kind: binary
+    optional: true
+    source: skylot/jadx
+    health_command: [jadx, --version]
+    install_hint: install the managed jadx bundle or an approved jadx package
+    install_command: [ouro-toolchain, install, jadx]
+  - name: mobsfscan
+    kind: binary
+    optional: true
+    source: MobSF/mobsfscan
+    health_command: [mobsfscan, --version]
+    install_hint: install the managed mobsfscan bundle or an approved mobsfscan package
+    install_command: [ouro-toolchain, install, mobsfscan]
+  - name: semgrep
+    kind: binary
+    optional: true
+    source: semgrep/semgrep
+    health_command: [semgrep, --version]
+    install_hint: install the managed semgrep bundle or an approved semgrep package
+    install_command: [ouro-toolchain, install, semgrep]
+  - name: gitleaks
+    kind: binary
+    optional: true
+    source: gitleaks/gitleaks
+    health_command: [gitleaks, version]
+    install_hint: install the managed gitleaks bundle or an approved gitleaks package
+    install_command: [ouro-toolchain, install, gitleaks]
+  - name: trufflehog
+    kind: binary
+    optional: true
+    source: trufflesecurity/trufflehog
+    health_command: [trufflehog, --version]
+    install_hint: install the managed trufflehog bundle or an approved trufflehog package
+    install_command: [ouro-toolchain, install, trufflehog]
+  - name: binwalk
+    kind: binary
+    optional: true
+    source: ReFirmLabs/binwalk
+    health_command: [binwalk, --version]
+    install_hint: install the managed binwalk bundle or an approved binwalk package
+    install_command: [ouro-toolchain, install, binwalk]
+  - name: exiftool
+    kind: binary
+    optional: true
+    source: exiftool/exiftool
+    health_command: [exiftool, -ver]
+    install_hint: install the managed exiftool bundle or an approved exiftool package
+    install_command: [ouro-toolchain, install, exiftool]

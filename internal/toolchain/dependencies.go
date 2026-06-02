@@ -206,11 +206,45 @@ func ApplyDependencyHealth(health HealthReport, dependencies []DependencyReport)
 }
 
 func (r DefaultDependencyRunner) CheckDependency(dependency Dependency) (DependencyResult, error) {
+	if dependency.Optional {
+		return r.checkOptionalDependency(dependency)
+	}
 	switch dependencyKind(dependency) {
 	case "binary":
 		return r.checkBinary(dependency)
 	case "container_image":
 		return r.checkContainerImage(dependency)
+	case "rule_bundle":
+		return r.checkRuleBundle(dependency)
+	default:
+		return DependencyResult{}, fmt.Errorf("unsupported dependency kind: %s", dependency.Kind)
+	}
+}
+
+func (r DefaultDependencyRunner) checkOptionalDependency(dependency Dependency) (DependencyResult, error) {
+	switch dependencyKind(dependency) {
+	case "binary", "rule_bundle":
+		command := strings.TrimSpace(dependency.Name)
+		if len(dependency.HealthCommand) > 0 {
+			command = strings.TrimSpace(dependency.HealthCommand[0])
+		}
+		if _, err := exec.LookPath(command); err != nil {
+			if errors.Is(err, exec.ErrNotFound) || errors.Is(err, os.ErrNotExist) {
+				return DependencyResult{Missing: true, Message: err.Error()}, nil
+			}
+			return DependencyResult{}, err
+		}
+		return DependencyResult{
+			InstalledVersion: firstNonEmptyValue(dependency.Version, "present"),
+			LatestVersion:    strings.TrimSpace(dependency.LatestVersion),
+			Message:          "optional dependency present",
+		}, nil
+	case "container_image":
+		return DependencyResult{
+			InstalledVersion: firstNonEmptyValue(dependency.Version, dependency.ImageDigest, "declared"),
+			LatestVersion:    strings.TrimSpace(dependency.LatestVersion),
+			Message:          "optional container image dependency declared",
+		}, nil
 	default:
 		return DependencyResult{}, fmt.Errorf("unsupported dependency kind: %s", dependency.Kind)
 	}
@@ -260,6 +294,25 @@ func (r DefaultDependencyRunner) checkContainerImage(dependency Dependency) (Dep
 		return result, err
 	}
 	return verifyContainerImageDigest(dependency, result)
+}
+
+func (r DefaultDependencyRunner) checkRuleBundle(dependency Dependency) (DependencyResult, error) {
+	if len(dependency.HealthCommand) == 0 {
+		return DependencyResult{
+			InstalledVersion: firstNonEmptyValue(dependency.Version, "declared"),
+			LatestVersion:    strings.TrimSpace(dependency.LatestVersion),
+			Message:          "rule bundle dependency declared",
+		}, nil
+	}
+	command := strings.TrimSpace(dependency.HealthCommand[0])
+	path, err := exec.LookPath(command)
+	if err != nil {
+		if errors.Is(err, exec.ErrNotFound) || errors.Is(err, os.ErrNotExist) {
+			return DependencyResult{Missing: true, Message: err.Error()}, nil
+		}
+		return DependencyResult{}, err
+	}
+	return r.runDependencyHealthCommand(path, dependency.HealthCommand[1:])
 }
 
 func (r DefaultDependencyRunner) runDependencyHealthCommand(path string, args []string) (DependencyResult, error) {

@@ -11,6 +11,8 @@ Ouroboros is a TUI-first penetration testing IDE and compiler for authorized sec
 - Goal-driven architecture with domain packs for Web/API, Infra/Internal, and CTF/Lab work.
 - Native Go CLI under `cmd/ouro/` with first-party packages under `internal/`.
 - Bubble Tea TUI surfaces toolchain health, agent runtime, replay timelines, evidence graph state, and read-only inspector details.
+- Built-in toolchain manifests now expose optional managed dependency metadata for common Web/API, Infra/Internal, and artifact/app analysis tools such as `nuclei`, `httpx`, `subfinder`, `ffuf`, `katana`, `nmap`, `naabu`, `dnsx`, `apktool`, `jadx`, and `mobsfscan`.
+- Model-authored tools must be structured native specs with declared inputs, expected evidence, parser, dependencies, and safety controls; raw scripts and command-runner payloads are rejected by the authored-tool validator.
 - Runtime workflows favor metadata-only planning first, then explicit default-off gates for dispatch, execution, retry, lease recovery automation, and maintenance.
 - Safety bypasses stay visible and auditable through `authorization.yaml`, `ouro doctor --require-safety-authorization`, `ouro run --require-safety-authorization`, selected runtime-worker side-effect gates, and `make doctor-strict`.
 
@@ -36,6 +38,8 @@ Result-callback HTTP is not counted separately; `NewRuntimeWorkerQueueDispatchRe
 When `scope.target_policy: enforce` is active, command-runner argument checks cover standalone target literals plus embedded `key=value` and comma-list forms such as `--url=https://...`, `targets=a,b`, `--host=...`, and `--challenge=...`. `scope.target_policy: disabled` remains the explicit authorized off path for false-positive target-boundary cases.
 
 Those settings are intentionally closeable. Return them to the stricter defaults when testing no longer needs the bypass, and use the strict doctor gate before production or CI-style runs.
+
+Toolchain install dispatch and retry execution also use the strict safety-authorization preflight before running installer commands. Missing or expired authorization under disabled boundaries blocks installer execution instead of treating the bypass as a warning-only state.
 
 ## Common Commands
 

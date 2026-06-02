@@ -10024,6 +10024,16 @@ execution:
 	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
 		t.Fatalf("write scope: %v", err)
 	}
+	authorization := `version: 1
+safety_bypasses:
+  - control: scope.target_policy
+    mode: disabled
+    authorized_by: operator
+    reason: approved install execution safety bypass
+`
+	if err := os.WriteFile(filepath.Join(root, "authorization.yaml"), []byte(authorization), 0o644); err != nil {
+		t.Fatalf("write authorization: %v", err)
+	}
 	manifest := `name: web-api-pack
 version: "0.1.0"
 capabilities:
@@ -10063,7 +10073,7 @@ dependencies:
 	output := out.String()
 	for _, want := range []string{
 		"warning: scope.target_policy is disabled",
-		"warning: missing safety bypass authorization",
+		"warning: scope.target_policy disabled authorized by operator",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("expected warning %q in output, got %q", want, output)

@@ -31,6 +31,76 @@ func TestLoadManifestsFromToolchainPacks(t *testing.T) {
 	}
 }
 
+func TestBuiltInAppSecToolDependenciesAreDeclared(t *testing.T) {
+	manifests, err := LoadManifests(filepath.Join("..", "..", "toolchains"))
+	if err != nil {
+		t.Fatalf("load manifests: %v", err)
+	}
+
+	byName := map[string]Manifest{}
+	for _, manifest := range manifests {
+		byName[manifest.Name] = manifest
+	}
+
+	assertToolDependencies(t, byName["web-api-pack"], []string{
+		"nuclei",
+		"nuclei-templates",
+		"httpx",
+		"subfinder",
+		"ffuf",
+		"katana",
+		"gau",
+		"waybackurls",
+		"dalfox",
+		"arjun",
+		"sqlmap",
+	})
+	assertToolDependencies(t, byName["infra-pack"], []string{
+		"nmap",
+		"naabu",
+		"dnsx",
+		"amass",
+		"dnsrecon",
+		"testssl.sh",
+		"sslscan",
+	})
+	assertToolDependencies(t, byName["ctf-pack"], []string{
+		"apktool",
+		"jadx",
+		"mobsfscan",
+		"semgrep",
+	})
+}
+
+func TestBuiltInAppSecToolCatalogIncludesCoreTools(t *testing.T) {
+	catalog := BuiltInAppSecTools()
+	byName := map[string]BuiltInTool{}
+	for _, tool := range catalog {
+		byName[tool.Name] = tool
+	}
+	for name, pack := range map[string]string{
+		"nuclei":    "web-api-pack",
+		"httpx":     "web-api-pack",
+		"subfinder": "web-api-pack",
+		"ffuf":      "web-api-pack",
+		"katana":    "web-api-pack",
+		"nmap":      "infra-pack",
+		"naabu":     "infra-pack",
+		"dnsx":      "infra-pack",
+	} {
+		tool, ok := byName[name]
+		if !ok {
+			t.Fatalf("expected catalog tool %s in %#v", name, catalog)
+		}
+		if tool.Pack != pack {
+			t.Fatalf("expected %s pack %s, got %#v", name, pack, tool)
+		}
+		if tool.Category == "" || len(tool.Capabilities) == 0 {
+			t.Fatalf("expected catalog metadata for %s, got %#v", name, tool)
+		}
+	}
+}
+
 func TestValidateManifestRejectsMissingCapability(t *testing.T) {
 	manifest := Manifest{
 		Name:        "bad-pack",
@@ -330,5 +400,37 @@ func TestValidateManifestRejectsNegativeRunTimeoutMS(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "run_timeout_ms") {
 		t.Fatalf("expected run_timeout_ms validation error, got %v", err)
+	}
+}
+
+func assertToolDependencies(t *testing.T, manifest Manifest, names []string) {
+	t.Helper()
+	if manifest.Name == "" {
+		t.Fatalf("expected manifest to be present")
+	}
+	byName := map[string]Dependency{}
+	for _, dependency := range manifest.Dependencies {
+		byName[dependency.Name] = dependency
+	}
+	for _, name := range names {
+		dependency, ok := byName[name]
+		if !ok {
+			t.Fatalf("expected %s dependency in %s, got %#v", name, manifest.Name, manifest.Dependencies)
+		}
+		if dependency.Kind == "" {
+			t.Fatalf("expected %s dependency kind", name)
+		}
+		if len(dependency.HealthCommand) == 0 {
+			t.Fatalf("expected %s health command", name)
+		}
+		if dependency.InstallHint == "" {
+			t.Fatalf("expected %s install hint", name)
+		}
+		if len(dependency.InstallCommand) == 0 {
+			t.Fatalf("expected %s install command", name)
+		}
+		if len(dependency.InstallCommand) < 3 || dependency.InstallCommand[0] != "ouro-toolchain" || dependency.InstallCommand[1] != "install" || dependency.InstallCommand[2] != name {
+			t.Fatalf("expected controlled installer command for %s, got %#v", name, dependency.InstallCommand)
+		}
 	}
 }

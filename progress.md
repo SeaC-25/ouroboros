@@ -1,5 +1,18 @@
 # Ouroboros Analysis Progress
 
+## 2026-06-02
+- Started the appsec tool bundle/native authoring slice in isolated worktree `.worktrees/appsec-tool-bundle-authoring`.
+- Baseline `make test` passed after switching Go dependency download to `GOPROXY=https://goproxy.cn,direct`.
+- Added RED tests proving bundled manifests and initialized workspaces did not yet declare real appsec tool dependencies such as `nuclei`, `httpx`, `subfinder`, `ffuf`, `katana`, `nmap`, `naabu`, and `dnsx`.
+- Added RED tests proving model-authored native tool spec APIs did not yet exist.
+- Added `toolchain.BuiltInAppSecTools` catalog metadata for Web/API, Infra/Internal, and artifact/app analysis tools.
+- Updated bundled toolchain manifests and workspace initialization templates with optional dependency metadata, health commands, install hints, and deterministic install command metadata for core appsec tools.
+- Added `rule_bundle` dependency kind for `nuclei-templates`.
+- Added `AuthoredToolSpec`, `ValidateAuthoredToolSpec`, and `AuthoredToolToManifest` so model-generated tools must be structured native specs rather than raw scripts or `run_command` payloads.
+- Fixed an optional dependency health regression by preventing optional dependencies from executing third-party health commands during default run bootstrap; optional binaries/rule bundles now use lightweight presence checks so interactive/pause paths remain responsive.
+- Tightened toolchain install dispatch and retry execution so disabled target-boundary or isolation modes require current safety-bypass authorization before installer commands can run.
+- Wrote `docs/progress/milestone-14-appsec-tool-bundle-authoring.md` and recorded that binary/rule-bundle packaging plus authored-tool workspace writer/executor remain pending.
+
 ## 2026-05-29
 - Started phased analysis for the three archives under `model/`.
 - Confirmed source is packaged as zip archives, not expanded directories.

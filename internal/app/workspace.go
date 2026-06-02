@@ -548,6 +548,85 @@ capabilities:
 runner: native
 parser: web_api_parser
 healthcheck: built_in
+dependencies:
+  - name: nuclei
+    kind: binary
+    optional: true
+    source: projectdiscovery/nuclei
+    health_command: [nuclei, -version]
+    install_hint: install the managed nuclei bundle or an approved ProjectDiscovery nuclei package
+    install_command: [ouro-toolchain, install, nuclei]
+  - name: nuclei-templates
+    kind: rule_bundle
+    optional: true
+    source: projectdiscovery/nuclei-templates
+    depends_on: [nuclei]
+    health_command: [nuclei, -version]
+    install_hint: install the managed nuclei-templates bundle before template scanning
+    install_command: [ouro-toolchain, install, nuclei-templates]
+  - name: httpx
+    kind: binary
+    optional: true
+    source: projectdiscovery/httpx
+    health_command: [httpx, -version]
+    install_hint: install the managed httpx bundle or an approved ProjectDiscovery httpx package
+    install_command: [ouro-toolchain, install, httpx]
+  - name: subfinder
+    kind: binary
+    optional: true
+    source: projectdiscovery/subfinder
+    health_command: [subfinder, -version]
+    install_hint: install the managed subfinder bundle or an approved ProjectDiscovery subfinder package
+    install_command: [ouro-toolchain, install, subfinder]
+  - name: ffuf
+    kind: binary
+    optional: true
+    source: ffuf/ffuf
+    health_command: [ffuf, -V]
+    install_hint: install the managed ffuf bundle or an approved ffuf package
+    install_command: [ouro-toolchain, install, ffuf]
+  - name: katana
+    kind: binary
+    optional: true
+    source: projectdiscovery/katana
+    health_command: [katana, -version]
+    install_hint: install the managed katana bundle or an approved ProjectDiscovery katana package
+    install_command: [ouro-toolchain, install, katana]
+  - name: gau
+    kind: binary
+    optional: true
+    source: lc/gau
+    health_command: [gau, --version]
+    install_hint: install the managed gau bundle or an approved gau package
+    install_command: [ouro-toolchain, install, gau]
+  - name: waybackurls
+    kind: binary
+    optional: true
+    source: tomnomnom/waybackurls
+    health_command: [waybackurls, -h]
+    install_hint: install the managed waybackurls bundle or an approved waybackurls package
+    install_command: [ouro-toolchain, install, waybackurls]
+  - name: dalfox
+    kind: binary
+    optional: true
+    source: hahwul/dalfox
+    health_command: [dalfox, version]
+    install_hint: install the managed dalfox bundle or an approved dalfox package
+    install_command: [ouro-toolchain, install, dalfox]
+  - name: arjun
+    kind: binary
+    optional: true
+    source: s0md3v/Arjun
+    health_command: [arjun, --version]
+    install_hint: install the managed arjun bundle or an approved Arjun package
+    install_command: [ouro-toolchain, install, arjun]
+  - name: sqlmap
+    kind: binary
+    optional: true
+    source: sqlmapproject/sqlmap
+    health_command: [sqlmap, --version]
+    install_hint: install the managed sqlmap bundle or an approved sqlmap package
+    install_command: [ouro-toolchain, install, sqlmap]
 `,
 	"infra-pack": `name: infra-pack
 version: "0.1.0"
@@ -560,6 +639,56 @@ capabilities:
 runner: native
 parser: infra_parser
 healthcheck: built_in
+dependencies:
+  - name: nmap
+    kind: binary
+    optional: true
+    source: nmap/nmap
+    health_command: [nmap, --version]
+    install_hint: install the managed nmap bundle or an approved nmap package
+    install_command: [ouro-toolchain, install, nmap]
+  - name: naabu
+    kind: binary
+    optional: true
+    source: projectdiscovery/naabu
+    health_command: [naabu, -version]
+    install_hint: install the managed naabu bundle or an approved ProjectDiscovery naabu package
+    install_command: [ouro-toolchain, install, naabu]
+  - name: dnsx
+    kind: binary
+    optional: true
+    source: projectdiscovery/dnsx
+    health_command: [dnsx, -version]
+    install_hint: install the managed dnsx bundle or an approved ProjectDiscovery dnsx package
+    install_command: [ouro-toolchain, install, dnsx]
+  - name: amass
+    kind: binary
+    optional: true
+    source: owasp-amass/amass
+    health_command: [amass, -version]
+    install_hint: install the managed amass bundle or an approved OWASP Amass package
+    install_command: [ouro-toolchain, install, amass]
+  - name: dnsrecon
+    kind: binary
+    optional: true
+    source: darkoperator/dnsrecon
+    health_command: [dnsrecon, --version]
+    install_hint: install the managed dnsrecon bundle or an approved dnsrecon package
+    install_command: [ouro-toolchain, install, dnsrecon]
+  - name: testssl.sh
+    kind: binary
+    optional: true
+    source: drwetter/testssl.sh
+    health_command: [testssl.sh, --version]
+    install_hint: install the managed testssl.sh bundle or an approved testssl.sh package
+    install_command: [ouro-toolchain, install, testssl.sh]
+  - name: sslscan
+    kind: binary
+    optional: true
+    source: rbsec/sslscan
+    health_command: [sslscan, --version]
+    install_hint: install the managed sslscan bundle or an approved sslscan package
+    install_command: [ouro-toolchain, install, sslscan]
 `,
 	"ctf-pack": `name: ctf-pack
 version: "0.1.0"
@@ -572,5 +701,62 @@ capabilities:
 runner: native
 parser: ctf_parser
 healthcheck: built_in
+dependencies:
+  - name: apktool
+    kind: binary
+    optional: true
+    source: iBotPeaches/Apktool
+    health_command: [apktool, --version]
+    install_hint: install the managed apktool bundle or an approved apktool package
+    install_command: [ouro-toolchain, install, apktool]
+  - name: jadx
+    kind: binary
+    optional: true
+    source: skylot/jadx
+    health_command: [jadx, --version]
+    install_hint: install the managed jadx bundle or an approved jadx package
+    install_command: [ouro-toolchain, install, jadx]
+  - name: mobsfscan
+    kind: binary
+    optional: true
+    source: MobSF/mobsfscan
+    health_command: [mobsfscan, --version]
+    install_hint: install the managed mobsfscan bundle or an approved mobsfscan package
+    install_command: [ouro-toolchain, install, mobsfscan]
+  - name: semgrep
+    kind: binary
+    optional: true
+    source: semgrep/semgrep
+    health_command: [semgrep, --version]
+    install_hint: install the managed semgrep bundle or an approved semgrep package
+    install_command: [ouro-toolchain, install, semgrep]
+  - name: gitleaks
+    kind: binary
+    optional: true
+    source: gitleaks/gitleaks
+    health_command: [gitleaks, version]
+    install_hint: install the managed gitleaks bundle or an approved gitleaks package
+    install_command: [ouro-toolchain, install, gitleaks]
+  - name: trufflehog
+    kind: binary
+    optional: true
+    source: trufflesecurity/trufflehog
+    health_command: [trufflehog, --version]
+    install_hint: install the managed trufflehog bundle or an approved trufflehog package
+    install_command: [ouro-toolchain, install, trufflehog]
+  - name: binwalk
+    kind: binary
+    optional: true
+    source: ReFirmLabs/binwalk
+    health_command: [binwalk, --version]
+    install_hint: install the managed binwalk bundle or an approved binwalk package
+    install_command: [ouro-toolchain, install, binwalk]
+  - name: exiftool
+    kind: binary
+    optional: true
+    source: exiftool/exiftool
+    health_command: [exiftool, -ver]
+    install_hint: install the managed exiftool bundle or an approved exiftool package
+    install_command: [ouro-toolchain, install, exiftool]
 `,
 }

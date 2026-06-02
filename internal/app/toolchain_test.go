@@ -1816,6 +1816,69 @@ dependencies:
 	}
 }
 
+func TestExecuteToolchainInstallDispatchRequiresSafetyAuthorizationForDisabledBoundary(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	scope := `version: 1
+scope:
+  target_policy: disabled
+  targets: []
+  exclusions: []
+execution:
+  isolation: process
+`
+	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
+		t.Fatalf("write scope: %v", err)
+	}
+	marker := filepath.Join(t.TempDir(), "installer-ran")
+	manifest := `name: web-api-pack
+version: "0.1.0"
+capabilities:
+  - web.discovery
+runner: native
+parser: web_api_parser
+healthcheck: built_in
+dependencies:
+  - name: missing-httpx
+    kind: binary
+    install_command:
+      - sh
+      - -c
+      - touch ` + marker + `
+`
+	if err := os.WriteFile(filepath.Join(root, "toolchain", "web-api-pack", "manifest.yaml"), []byte(manifest), 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	request, err := CreateToolchainInstallRequest(root, "web-api-pack", "missing-httpx")
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+	if _, err := UpdateToolchainInstallRequestStatus(root, request.Path, "approved"); err != nil {
+		t.Fatalf("approve request: %v", err)
+	}
+	dispatch, err := CreateToolchainInstallDispatch(root)
+	if err != nil {
+		t.Fatalf("create dispatch: %v", err)
+	}
+
+	_, err = ExecuteToolchainInstallDispatch(root, dispatch.Path, ToolchainInstallDispatchExecutionOptions{Execute: true})
+	if err == nil || !strings.Contains(err.Error(), "missing required safety bypass authorization for scope.target_policy disabled") {
+		t.Fatalf("expected missing safety authorization error, got %v", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("missing safety authorization must not execute install command, marker stat err=%v", err)
+	}
+	paths, err := filepath.Glob(filepath.Join(root, "toolchain", "install-executions", "*.json"))
+	if err != nil {
+		t.Fatalf("glob install executions: %v", err)
+	}
+	if len(paths) != 0 {
+		t.Fatalf("expected no execution artifact without safety authorization, got %#v", paths)
+	}
+}
+
 func TestExecuteToolchainInstallDispatchRunsReadyCommandsAndWritesAuditArtifact(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
 	if err := InitWorkspace(root); err != nil {
@@ -1916,6 +1979,16 @@ execution:
 	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
 		t.Fatalf("write scope: %v", err)
 	}
+	authorization := `version: 1
+safety_bypasses:
+  - control: scope.target_policy
+    mode: disabled
+    authorized_by: operator
+    reason: approved install execution safety bypass
+`
+	if err := os.WriteFile(filepath.Join(root, "authorization.yaml"), []byte(authorization), 0o644); err != nil {
+		t.Fatalf("write authorization: %v", err)
+	}
 	marker := filepath.Join(t.TempDir(), "installer-ran")
 	manifest := `name: web-api-pack
 version: "0.1.0"
@@ -1952,7 +2025,7 @@ dependencies:
 		t.Fatalf("execute dispatch: %v", err)
 	}
 	joined := strings.Join(execution.Warnings, "\n")
-	if !strings.Contains(joined, "scope.target_policy is disabled") || !strings.Contains(joined, "missing safety bypass authorization") {
+	if !strings.Contains(joined, "scope.target_policy is disabled") || !strings.Contains(joined, "scope.target_policy disabled authorized by operator") {
 		t.Fatalf("expected safety warnings in execution artifact, got %#v", execution.Warnings)
 	}
 	data, err := os.ReadFile(execution.Path)
@@ -2320,6 +2393,63 @@ func TestExecuteToolchainInstallRetryDispatchRequiresExplicitExecute(t *testing.
 	}
 }
 
+func TestExecuteToolchainInstallRetryDispatchRequiresSafetyAuthorizationForDisabledBoundary(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	scope := `version: 1
+scope:
+  target_policy: disabled
+  targets: []
+  exclusions: []
+execution:
+  isolation: process
+`
+	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
+		t.Fatalf("write scope: %v", err)
+	}
+	request := writeInstallRequestFixture(t, root, ToolchainInstallRequest{
+		Status:     "approved",
+		Pack:       "web-api-pack",
+		Dependency: "missing-httpx",
+		Command:    []string{"sh", "-c", "true"},
+	})
+	marker := filepath.Join(t.TempDir(), "retry-ran")
+	writeInstallExecutionFixture(t, root, "failed-execution.json", ToolchainInstallDispatchExecution{
+		Status:       "failed",
+		Mode:         "execute",
+		DispatchPath: filepath.Join(root, "toolchain", "install-dispatches", "dispatch.json"),
+		Results: []ToolchainInstallDispatchExecutionResult{{
+			RequestPath: request.Path,
+			Pack:        "web-api-pack",
+			Dependency:  "missing-httpx",
+			Command:     []string{"sh", "-c", "touch " + marker},
+			Status:      "failed",
+			Error:       "exit status 7",
+		}},
+	})
+	dispatch, err := CreateToolchainInstallRetryDispatch(root)
+	if err != nil {
+		t.Fatalf("create retry dispatch: %v", err)
+	}
+
+	_, err = ExecuteToolchainInstallRetryDispatch(root, dispatch.Path, ToolchainInstallRetryDispatchExecutionOptions{Execute: true})
+	if err == nil || !strings.Contains(err.Error(), "missing required safety bypass authorization for scope.target_policy disabled") {
+		t.Fatalf("expected missing safety authorization error, got %v", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("missing safety authorization must not execute retry command, marker stat err=%v", err)
+	}
+	paths, err := filepath.Glob(filepath.Join(root, "toolchain", "install-retry-executions", "*.json"))
+	if err != nil {
+		t.Fatalf("glob retry executions: %v", err)
+	}
+	if len(paths) != 0 {
+		t.Fatalf("expected no retry execution artifact without safety authorization, got %#v", paths)
+	}
+}
+
 func TestExecuteToolchainInstallRetryDispatchRunsReadyCommandsAndWritesAuditArtifact(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
 	if err := InitWorkspace(root); err != nil {
@@ -2410,6 +2540,16 @@ execution:
 	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
 		t.Fatalf("write scope: %v", err)
 	}
+	authorization := `version: 1
+safety_bypasses:
+  - control: scope.target_policy
+    mode: disabled
+    authorized_by: operator
+    reason: approved retry execution safety bypass
+`
+	if err := os.WriteFile(filepath.Join(root, "authorization.yaml"), []byte(authorization), 0o644); err != nil {
+		t.Fatalf("write authorization: %v", err)
+	}
 	request := writeInstallRequestFixture(t, root, ToolchainInstallRequest{
 		Status:     "approved",
 		Pack:       "web-api-pack",
@@ -2439,7 +2579,7 @@ execution:
 		t.Fatalf("execute retry dispatch: %v", err)
 	}
 	joined := strings.Join(execution.Warnings, "\n")
-	if !strings.Contains(joined, "scope.target_policy is disabled") || !strings.Contains(joined, "missing safety bypass authorization") {
+	if !strings.Contains(joined, "scope.target_policy is disabled") || !strings.Contains(joined, "scope.target_policy disabled authorized by operator") {
 		t.Fatalf("expected safety warnings in retry execution artifact, got %#v", execution.Warnings)
 	}
 }

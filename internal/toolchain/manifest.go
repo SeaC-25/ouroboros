@@ -133,7 +133,7 @@ func ValidateManifest(manifest Manifest) error {
 			dependencyNames[dependencyName] = i
 		}
 		switch dependencyKind(dependency) {
-		case "binary", "container_image":
+		case "binary", "container_image", "rule_bundle":
 		default:
 			errs = append(errs, fmt.Errorf("dependency %d kind is unsupported: %s", i, dependency.Kind))
 		}

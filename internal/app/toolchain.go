@@ -565,7 +565,7 @@ func CreateToolCompilePreviewReview(root string, options ToolCompilePreviewOptio
 }
 
 func ListToolCompilePreviewReviews(root string) ([]ToolCompilePreviewReview, error) {
-	doctor, err := DoctorWorkspace(root)
+	doctor, err := DoctorWorkspaceWithOptions(root, DoctorOptions{RequireSafetyAuthorization: true})
 	if err != nil {
 		return nil, err
 	}
@@ -589,7 +589,7 @@ func ListToolCompilePreviewReviews(root string) ([]ToolCompilePreviewReview, err
 }
 
 func ReadToolCompilePreviewReview(root, reviewPath string) (ToolCompilePreviewReview, error) {
-	doctor, err := DoctorWorkspace(root)
+	doctor, err := DoctorWorkspaceWithOptions(root, DoctorOptions{RequireSafetyAuthorization: true})
 	if err != nil {
 		return ToolCompilePreviewReview{}, err
 	}
@@ -608,7 +608,7 @@ func AnnotateToolCompilePreviewReview(root, reviewPath string, options ToolCompi
 	if err != nil {
 		return ToolCompilePreviewReview{}, err
 	}
-	doctor, err := DoctorWorkspace(root)
+	doctor, err := DoctorWorkspaceWithOptions(root, DoctorOptions{RequireSafetyAuthorization: true})
 	if err != nil {
 		return ToolCompilePreviewReview{}, err
 	}
@@ -748,7 +748,7 @@ func toolCompilePreviewReviewSelectionIsCleared(selection ToolCompilePreviewRevi
 }
 
 func ReadToolCompilePreviewReviewSelection(root string) (ToolCompilePreviewReviewSelection, bool, error) {
-	doctor, err := DoctorWorkspace(root)
+	doctor, err := DoctorWorkspaceWithOptions(root, DoctorOptions{RequireSafetyAuthorization: true})
 	if err != nil {
 		return ToolCompilePreviewReviewSelection{}, false, err
 	}
@@ -1551,7 +1551,7 @@ func ExecuteToolchainInstallRetryDispatch(root, dispatchPath string, options Too
 	if !options.Execute {
 		return ToolchainInstallRetryDispatchExecution{}, fmt.Errorf("install retry dispatch execution requires explicit execute")
 	}
-	doctor, err := DoctorWorkspace(root)
+	doctor, err := DoctorWorkspaceWithOptions(root, DoctorOptions{RequireSafetyAuthorization: true})
 	if err != nil {
 		return ToolchainInstallRetryDispatchExecution{}, err
 	}
@@ -1826,7 +1826,7 @@ func ExecuteToolchainInstallDispatch(root, dispatchPath string, options Toolchai
 	if !options.Execute {
 		return ToolchainInstallDispatchExecution{}, fmt.Errorf("install dispatch execution requires explicit execute")
 	}
-	doctor, err := DoctorWorkspace(root)
+	doctor, err := DoctorWorkspaceWithOptions(root, DoctorOptions{RequireSafetyAuthorization: true})
 	if err != nil {
 		return ToolchainInstallDispatchExecution{}, err
 	}
