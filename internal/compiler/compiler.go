@@ -65,6 +65,7 @@ func (Compiler) Compile(request CompileRequest) (PlanGraph, error) {
 			RunCommand:       append([]string(nil), candidate.manifest.RunCommand...),
 			RunTimeoutMS:     candidate.manifest.RunTimeoutMS,
 			Parser:           candidate.manifest.Parser,
+			Dependencies:     append([]toolchain.Dependency(nil), candidate.manifest.Dependencies...),
 			InputNodeIDs:     append([]string(nil), inputNodeIDs...),
 			ExpectedEvidence: append([]evidence.NodeType(nil), expectedEvidence...),
 			SelectionScore:   candidate.selectionScore,

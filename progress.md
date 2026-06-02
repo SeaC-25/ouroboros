@@ -1,6 +1,13 @@
 # Ouroboros Analysis Progress
 
 ## 2026-06-02
+- Continued native managed runner integration in isolated worktree `.worktrees/native-managed-runner`.
+- Added RED app tests proving `runner: native` did not execute an installed workspace managed binary and that exclusion handling had to block before payload execution.
+- Extended compiler plan nodes to carry manifest dependency metadata so native execution can resolve a single binary dependency without guessing across multi-tool packs.
+- Implemented native managed runner dispatch that first resolves `workspace/toolchain/bin/<manifest-name>`, then a single binary dependency, and delegates to the existing command runner instead of creating a direct exec path.
+- Command execution now prefers workspace toolchain binaries, injects `OURO_TOOLCHAIN_BIN` and `OURO_TOOLCHAIN_RULES`, and prepends `workspace/toolchain/bin` to PATH while keeping rule bundles out of PATH.
+- Verified managed native execution records completed tool events with attempt directories and that excluded scope targets fail before payload execution; container-mode native managed execution and typed adapters remain pending.
+- Updated README/development docs and wrote `docs/progress/milestone-18-native-managed-runner.md`; remaining gaps are real release payloads, container-safe managed execution, authored adapter contracts, tool-specific argv generation, and parser bindings.
 - Continued release-level managed bundle distribution in isolated worktree `.worktrees/release-tool-bundles`.
 - Added RED app tests for release managed bundle install planning, explicit `--execute` copy-and-link execution, no payload execution, rule-bundle directory digest enforcement, and symlink payload rejection.
 - Added RED CLI tests for `ouro toolchain release-managed-install-plan` and `release-managed-install --execute`.

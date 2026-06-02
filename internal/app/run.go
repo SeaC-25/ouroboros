@@ -1543,6 +1543,19 @@ func (defaultToolExecutionRunner) Execute(ctx context.Context, request ToolExecu
 	if len(request.Node.RunCommand) > 0 || strings.TrimSpace(request.Node.Runner) == "command" {
 		return commandToolExecutionRunner{}.Execute(ctx, request)
 	}
+	if strings.TrimSpace(request.Node.Runner) == "native" {
+		nativeCommand, ok, err := nativeManagedRunCommand(request)
+		if err != nil {
+			result := nativeManagedToolExecutionResult(request)
+			result.Transcript = err.Error()
+			return result, err
+		}
+		if ok {
+			nativeRequest := request
+			nativeRequest.Node.RunCommand = nativeCommand
+			return commandToolExecutionRunner{}.Execute(ctx, nativeRequest)
+		}
+	}
 	return offlineToolExecutionRunner{}.Execute(ctx, request)
 }
 
@@ -1583,7 +1596,7 @@ func (commandToolExecutionRunner) Execute(ctx context.Context, request ToolExecu
 		return executeContainerRunCommand(ctx, request, result, runCommand)
 	}
 	command := strings.TrimSpace(runCommand[0])
-	resolved, err := exec.LookPath(command)
+	resolved, err := resolveRunCommandExecutable(command, request)
 	if err != nil {
 		result.Transcript = err.Error()
 		return result, fmt.Errorf("resolve run command %s: %w", command, err)
@@ -1622,6 +1635,137 @@ func (commandToolExecutionRunner) Execute(ctx context.Context, request ToolExecu
 	}
 	result.Status = "completed"
 	return result, nil
+}
+
+func nativeManagedRunCommand(request ToolExecutionRequest) ([]string, bool, error) {
+	if executionIsolationMode(request.IsolationMode) == "container" {
+		return nil, false, nil
+	}
+	candidates := nativeManagedToolCandidates(request)
+	for _, candidate := range candidates {
+		if _, ok, err := workspaceToolchainExecutable(request.WorkspaceRoot, candidate); err != nil {
+			return nil, true, err
+		} else if ok {
+			command := []string{candidate}
+			if target, ok := scopedTargetForNode(request.Node, request.ScopeTargets); ok {
+				command = append(command, target.Value)
+			}
+			return command, true, nil
+		}
+	}
+	return nil, false, nil
+}
+
+func nativeManagedToolCandidates(request ToolExecutionRequest) []string {
+	candidates := []string{}
+	if name := strings.TrimSpace(request.Node.ManifestName); name != "" {
+		candidates = append(candidates, name)
+	}
+	if dependency := singleNativeBinaryDependency(request.Node.Dependencies); dependency != "" && !containsStringValue(candidates, dependency) {
+		candidates = append(candidates, dependency)
+	}
+	return candidates
+}
+
+func singleNativeBinaryDependency(dependencies []toolchain.Dependency) string {
+	binaryDependencies := []string{}
+	for _, dependency := range dependencies {
+		if dependencyKindForManagedInstall(dependency) != "binary" {
+			continue
+		}
+		name := strings.TrimSpace(dependency.Name)
+		if name == "" {
+			continue
+		}
+		binaryDependencies = append(binaryDependencies, name)
+	}
+	if len(binaryDependencies) != 1 {
+		return ""
+	}
+	return binaryDependencies[0]
+}
+
+func containsStringValue(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func nativeManagedToolExecutionResult(request ToolExecutionRequest) ToolExecutionResult {
+	executionID := "native-" + safeExecutionID(request.Node.ID)
+	return ToolExecutionResult{
+		ExecutionID: executionID,
+		Status:      "failed",
+		AttemptDir:  filepath.Join(request.WorkspaceRoot, "attempts", request.RunID, executionID),
+	}
+}
+
+func resolveRunCommandExecutable(command string, request ToolExecutionRequest) (string, error) {
+	if resolved, ok, err := workspaceToolchainExecutable(request.WorkspaceRoot, command); err != nil || ok {
+		return resolved, err
+	}
+	return exec.LookPath(command)
+}
+
+func workspaceToolchainExecutable(root string, command string) (string, bool, error) {
+	name, err := validateAuthoredToolName(command)
+	if err != nil {
+		return "", false, nil
+	}
+	candidate := filepath.Join(root, "toolchain", "bin", name)
+	info, err := os.Lstat(candidate)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("inspect workspace toolchain binary: %w", err)
+	}
+	if info.IsDir() {
+		return "", true, fmt.Errorf("workspace toolchain binary is a directory: %s", candidate)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		resolved, err := filepath.EvalSymlinks(candidate)
+		if err != nil {
+			return "", true, fmt.Errorf("resolve workspace toolchain binary symlink: %w", err)
+		}
+		if err := requireWorkspaceManagedBundleTarget(root, resolved); err != nil {
+			return "", true, err
+		}
+		return resolved, true, nil
+	}
+	if !info.Mode().IsRegular() {
+		return "", true, fmt.Errorf("workspace toolchain binary must be a regular file or managed symlink: %s", candidate)
+	}
+	return candidate, true, nil
+}
+
+func requireWorkspaceManagedBundleTarget(root string, target string) error {
+	managedRoot, err := filepath.Abs(filepath.Join(root, "toolchain", "managed-bundles"))
+	if err != nil {
+		return fmt.Errorf("resolve managed bundle root: %w", err)
+	}
+	resolvedTarget, err := filepath.Abs(target)
+	if err != nil {
+		return fmt.Errorf("resolve workspace toolchain binary target: %w", err)
+	}
+	rel, err := filepath.Rel(managedRoot, resolvedTarget)
+	if err != nil {
+		return fmt.Errorf("resolve workspace toolchain binary target relative path: %w", err)
+	}
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+		return fmt.Errorf("workspace toolchain binary target must stay under %s", managedRoot)
+	}
+	info, err := os.Stat(resolvedTarget)
+	if err != nil {
+		return fmt.Errorf("inspect workspace toolchain binary target: %w", err)
+	}
+	if info.IsDir() || !info.Mode().IsRegular() {
+		return fmt.Errorf("workspace toolchain binary target must be a regular file: %s", resolvedTarget)
+	}
+	return nil
 }
 
 func executeContainerRunCommand(ctx context.Context, request ToolExecutionRequest, result ToolExecutionResult, runCommand []string) (ToolExecutionResult, error) {
@@ -2134,7 +2278,10 @@ func commandContextEnvironment(request ToolExecutionRequest, attemptDir string, 
 }
 
 func commandContextEnvironmentFor(request ToolExecutionRequest, workspaceRoot string, attemptDir string, executionID string) []string {
+	toolchainBin := filepath.Join(workspaceRoot, "toolchain", "bin")
+	toolchainRules := filepath.Join(workspaceRoot, "toolchain", "rules")
 	env := []string{
+		"PATH=" + prependPathValue(toolchainBin, os.Getenv("PATH")),
 		"OURO_WORKSPACE=" + workspaceRoot,
 		"OURO_RUN_ID=" + request.RunID,
 		"OURO_EXECUTION_ID=" + executionID,
@@ -2142,6 +2289,8 @@ func commandContextEnvironmentFor(request ToolExecutionRequest, workspaceRoot st
 		"OURO_ACTION=" + string(request.Node.Action),
 		"OURO_CAPABILITY=" + request.Node.Capability,
 		"OURO_TOOL=" + request.Node.ManifestName,
+		"OURO_TOOLCHAIN_BIN=" + toolchainBin,
+		"OURO_TOOLCHAIN_RULES=" + toolchainRules,
 	}
 	if target, ok := scopedTargetForNode(request.Node, request.ScopeTargets); ok {
 		env = append(env,
@@ -2150,6 +2299,19 @@ func commandContextEnvironmentFor(request ToolExecutionRequest, workspaceRoot st
 		)
 	}
 	return env
+}
+
+func prependPathValue(first string, rest string) string {
+	first = strings.TrimSpace(first)
+	rest = strings.TrimSpace(rest)
+	switch {
+	case first == "":
+		return rest
+	case rest == "":
+		return first
+	default:
+		return first + string(os.PathListSeparator) + rest
+	}
 }
 
 func commandWorkingDirectory(request ToolExecutionRequest, attemptDir string) string {

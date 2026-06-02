@@ -2916,6 +2916,206 @@ healthcheck: built_in
 	t.Fatalf("expected command-backed web.discovery execution event")
 }
 
+func TestRunWorkspaceExecutesNativeManagedBundleFromWorkspaceToolchainBin(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	scope := `version: 1
+scope:
+  target_policy: enforce
+  targets:
+    - kind: url
+      value: https://app.example
+  exclusions: []
+execution:
+  isolation: process
+`
+	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
+		t.Fatalf("write scope: %v", err)
+	}
+	writeNativeManagedWebAPIPackManifestForRunTest(t, root)
+	marker := filepath.Join(t.TempDir(), "managed-native-ran")
+	writeManagedBundleFixture(t, root, "httpx", "binary", "1.3.0", "#!/usr/bin/env sh\nprintf 'managed-native-output target=%s bin=%s rules=%s tool=%s workspace=%s\\n' \"$1\" \"$OURO_TOOLCHAIN_BIN\" \"$OURO_TOOLCHAIN_RULES\" \"$OURO_TOOL\" \"$OURO_WORKSPACE\"\ntouch "+marker+"\n")
+	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "httpx", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed httpx bundle: %v", err)
+	}
+
+	result, err := RunWorkspace(ctx, root)
+	if err != nil {
+		t.Fatalf("run workspace: %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("expected native managed payload to run: %v", err)
+	}
+	store, err := eventlog.OpenSQLite(filepath.Join(root, "replay", "events.db"))
+	if err != nil {
+		t.Fatalf("open event log: %v", err)
+	}
+	defer store.Close()
+	events, err := store.Replay(ctx, result.RunID)
+	if err != nil {
+		t.Fatalf("replay events: %v", err)
+	}
+
+	for _, event := range events {
+		if event.Type != eventlog.EventTool {
+			continue
+		}
+		var payload struct {
+			Tool            string `json:"tool"`
+			Capability      string `json:"capability"`
+			Runner          string `json:"runner"`
+			ExecutionStatus string `json:"execution_status"`
+			Transcript      string `json:"transcript"`
+			AttemptDir      string `json:"attempt_dir"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatalf("decode tool payload: %v", err)
+		}
+		if payload.Tool != "web-api-pack" || payload.Capability != "web.discovery" {
+			continue
+		}
+		if payload.Runner != "native" || payload.ExecutionStatus != "completed" {
+			t.Fatalf("expected native managed execution to complete, got %#v", payload)
+		}
+		for _, want := range []string{
+			"managed-native-output",
+			"target=https://app.example",
+			"bin=" + filepath.Join(root, "toolchain", "bin"),
+			"rules=" + filepath.Join(root, "toolchain", "rules"),
+			"tool=web-api-pack",
+			"workspace=" + root,
+		} {
+			if !strings.Contains(payload.Transcript, want) {
+				t.Fatalf("expected native managed transcript to contain %q, got %#v", want, payload)
+			}
+		}
+		if strings.Contains(payload.Transcript, "offline tool execution boundary") {
+			t.Fatalf("native managed execution must not use offline runner, got %#v", payload)
+		}
+		if !strings.HasPrefix(payload.AttemptDir, filepath.Join(root, "attempts", result.RunID)) {
+			t.Fatalf("expected attempt dir inside workspace attempts, got %#v", payload)
+		}
+		return
+	}
+	t.Fatalf("expected native managed web.discovery execution event, got %#v", events)
+}
+
+func TestRunWorkspaceNativeManagedBundleRejectsExcludedScopeBeforeExecution(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	scope := `version: 1
+scope:
+  target_policy: enforce
+  targets:
+    - kind: url
+      value: https://app.example
+  exclusions:
+    - https://app.example
+execution:
+  isolation: process
+`
+	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
+		t.Fatalf("write scope: %v", err)
+	}
+	writeNativeManagedWebAPIPackManifestForRunTest(t, root)
+	marker := filepath.Join(t.TempDir(), "excluded-native-ran")
+	writeManagedBundleFixture(t, root, "httpx", "binary", "1.3.0", "#!/usr/bin/env sh\nprintf 'should-not-run\\n'\ntouch "+marker+"\n")
+	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "httpx", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed httpx bundle: %v", err)
+	}
+	observed := []eventlog.Event{}
+
+	_, err := RunWorkspaceWithOptions(ctx, root, RunOptions{
+		OnEvent: func(event eventlog.Event) error {
+			observed = append(observed, event)
+			return nil
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "excluded") {
+		t.Fatalf("expected excluded native managed execution failure, got %v", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("excluded native managed payload must not run, marker stat err=%v", err)
+	}
+	if len(observed) == 0 {
+		t.Fatalf("expected persisted events before excluded native managed failure")
+	}
+	store, err := eventlog.OpenSQLite(filepath.Join(root, "replay", "events.db"))
+	if err != nil {
+		t.Fatalf("open event log: %v", err)
+	}
+	defer store.Close()
+	events, err := store.Replay(ctx, observed[0].RunID)
+	if err != nil {
+		t.Fatalf("replay events: %v", err)
+	}
+	for _, event := range events {
+		if event.Type == eventlog.EventAttempt {
+			var payload struct {
+				Kind    string `json:"kind"`
+				StageID string `json:"stage_id"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatalf("decode stage payload: %v", err)
+			}
+			if payload.Kind == "stage" && payload.StageID == "report-projection" {
+				t.Fatalf("report projection must not start after excluded native managed execution")
+			}
+		}
+		if event.Type != eventlog.EventTool {
+			continue
+		}
+		var payload struct {
+			Tool            string `json:"tool"`
+			Capability      string `json:"capability"`
+			ExecutionStatus string `json:"execution_status"`
+			Transcript      string `json:"transcript"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatalf("decode tool payload: %v", err)
+		}
+		if payload.Tool == "web-api-pack" && payload.Capability == "web.discovery" && payload.ExecutionStatus == "failed" {
+			if !strings.Contains(payload.Transcript, "excluded") {
+				t.Fatalf("expected exclusion transcript, got %#v", payload)
+			}
+			if strings.Contains(payload.Transcript, "should-not-run") {
+				t.Fatalf("excluded native managed command must not execute, got %#v", payload)
+			}
+			return
+		}
+	}
+	t.Fatalf("expected durable failed native managed tool event for excluded target, got %#v", events)
+}
+
+func writeNativeManagedWebAPIPackManifestForRunTest(t *testing.T, root string) {
+	t.Helper()
+	manifest := `name: web-api-pack
+version: "0.1.0"
+capabilities:
+  - web.discovery
+runner: native
+parser: web_api_parser
+healthcheck: built_in
+dependencies:
+  - name: httpx
+    kind: binary
+    optional: true
+    source: projectdiscovery/httpx
+    health_command: [httpx, -version]
+    install_hint: install managed httpx bundle
+    install_command: [ouro-toolchain, install, httpx]
+`
+	if err := os.WriteFile(filepath.Join(root, "toolchain", "web-api-pack", "manifest.yaml"), []byte(manifest), 0o644); err != nil {
+		t.Fatalf("write native managed web-api manifest: %v", err)
+	}
+}
+
 func TestRunWorkspaceExpandsRunCommandTargetFromScope(t *testing.T) {
 	ctx := context.Background()
 	root := filepath.Join(t.TempDir(), "workspace")
