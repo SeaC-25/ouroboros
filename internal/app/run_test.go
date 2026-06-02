@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -42,6 +43,28 @@ func TestInitWorkspaceCreatesProviderConfigAndToolchainManifests(t *testing.T) {
 	assertWorkspaceToolDependencies(t, byName["infra-pack"], []string{"nmap", "naabu", "dnsx"})
 }
 
+func TestInitWorkspaceToolchainManifestsMatchBundledManifests(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+
+	bundled, err := toolchain.LoadManifests(filepath.Join("..", "..", "toolchains"))
+	if err != nil {
+		t.Fatalf("load bundled manifests: %v", err)
+	}
+	workspace, err := toolchain.LoadManifests(filepath.Join(root, "toolchain"))
+	if err != nil {
+		t.Fatalf("load workspace manifests: %v", err)
+	}
+
+	bundledByName := manifestsByNameWithoutPath(bundled)
+	workspaceByName := manifestsByNameWithoutPath(workspace)
+	if !reflect.DeepEqual(bundledByName, workspaceByName) {
+		t.Fatalf("expected workspace manifests to match bundled manifests\nbundled=%#v\nworkspace=%#v", bundledByName, workspaceByName)
+	}
+}
+
 func TestDoctorWorkspaceRejectsMissingProviderConfigAndToolchainManifest(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
 	if err := InitWorkspace(root); err != nil {
@@ -67,6 +90,15 @@ func TestDoctorWorkspaceRejectsMissingProviderConfigAndToolchainManifest(t *test
 			t.Fatalf("expected %q in doctor errors, got %q", want, joined)
 		}
 	}
+}
+
+func manifestsByNameWithoutPath(manifests []toolchain.Manifest) map[string]toolchain.Manifest {
+	byName := map[string]toolchain.Manifest{}
+	for _, manifest := range manifests {
+		manifest.Path = ""
+		byName[manifest.Name] = manifest
+	}
+	return byName
 }
 
 func assertWorkspaceToolDependencies(t *testing.T, manifest toolchain.Manifest, names []string) {

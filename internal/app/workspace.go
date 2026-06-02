@@ -699,6 +699,7 @@ capabilities:
   - ctf.fast_hypothesis
   - ctf.candidate_verification
   - ctf.result_proof
+  - evidence.collection
 runner: native
 parser: ctf_parser
 healthcheck: built_in

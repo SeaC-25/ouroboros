@@ -1,6 +1,13 @@
 # Ouroboros Analysis Progress
 
 ## 2026-06-02
+- Continued toolchain integration work in isolated worktree `.worktrees/tool-level-registry`.
+- Added RED tests requiring built-in appsec tools to declare tool-level contracts with manifest dependency, dependency kind, target kind, adapter id, operation id, and parser id.
+- Upgraded `toolchain.BuiltInAppSecTools()` so all executable Web/API, Infra/Internal, and APK/mobile/artifact dependencies map to registered adapter/parser contracts; `nuclei-templates` remains a rule-bundle support contract for `nuclei`.
+- Extended the authored adapter/parser registry for catalog-only tools including `gau`, `waybackurls`, `dalfox`, `arjun`, `sqlmap`, `amass`, and `dnsrecon`.
+- Added manifest/catalog drift tests and fixed `ctf-pack` by adding `evidence.collection` to both bundled and initialized workspace manifests.
+- Added an app-layer test proving `InitWorkspace` writes manifests that semantically match bundled root manifests.
+- Wrote `docs/progress/milestone-21-tool-level-catalog-contracts.md`; remaining gaps are compiler tool-level plans, registered argv builders, parser dispatch, and real bundled payloads.
 - Continued authored tool execution-contract work in isolated worktree `.worktrees/typed-adapter-registry`.
 - Added RED tests proving model-authored specs did not yet have a typed adapter/parser registry and CLI registry discovery command.
 - Implemented `DefaultAuthoredToolRegistry` with the `managed_binary` adapter, high-value Web/API, Infra/Internal, and APK/mobile/artifact operations, required input contracts, supported parser ids, and dependency names.
