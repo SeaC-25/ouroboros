@@ -36,6 +36,13 @@ type PlanNode struct {
 	Action           SemanticAction
 	Capability       string
 	ManifestName     string
+	ToolID           string `json:"tool_id,omitempty"`
+	AdapterID        string `json:"adapter_id,omitempty"`
+	Operation        string `json:"operation,omitempty"`
+	ParserID         string `json:"parser_id,omitempty"`
+	TargetKind       string `json:"target_kind,omitempty"`
+	DependencyName   string `json:"dependency_name,omitempty"`
+	DependencyKind   string `json:"dependency_kind,omitempty"`
 	Runner           string
 	RunCommand       []string
 	RunTimeoutMS     int

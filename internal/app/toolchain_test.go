@@ -281,13 +281,15 @@ healthcheck: built_in
 	if len(preview.Nodes) != 2 {
 		t.Fatalf("expected budget to keep two nodes, got %#v", preview.Nodes)
 	}
-	if preview.Nodes[0].ManifestName != "infra-pack" || preview.Nodes[0].SelectionScore <= preview.Nodes[1].SelectionScore {
-		t.Fatalf("expected infra to rank first by scoring signals, got %#v", preview.Nodes)
+	for _, node := range preview.Nodes {
+		if node.ManifestName != "infra-pack" || node.Capability != "infra.host_discovery" || node.ToolID == "" {
+			t.Fatalf("expected budgeted tool-level infra nodes, got %#v", preview.Nodes)
+		}
 	}
 	if !containsString(preview.Nodes[0].SelectionSignals, "domain:infra_internal=5") {
 		t.Fatalf("expected domain scoring signal, got %#v", preview.Nodes[0].SelectionSignals)
 	}
-	if len(preview.Warnings) != 1 || !strings.Contains(preview.Warnings[0], "budget max_plan_nodes=2 truncated 3 candidates") {
+	if len(preview.Warnings) != 1 || !strings.Contains(preview.Warnings[0], "budget max_plan_nodes=2 truncated 7 candidates") {
 		t.Fatalf("expected budget warning, got %#v", preview.Warnings)
 	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
@@ -346,8 +348,8 @@ healthcheck: built_in
 		t.Fatalf("expected persisted budget to keep one node, got %#v", preview.Nodes)
 	}
 	node := preview.Nodes[0]
-	if node.ManifestName != "infra-pack" || node.Capability != "infra.host_discovery" {
-		t.Fatalf("expected persisted signals to rank infra first, got %#v", node)
+	if node.ManifestName != "infra-pack" || node.Capability != "infra.host_discovery" || node.ToolID == "" {
+		t.Fatalf("expected persisted signals to rank a tool-level infra node first, got %#v", node)
 	}
 	for _, want := range []string{
 		"domain:infra_internal=3",
@@ -358,7 +360,7 @@ healthcheck: built_in
 			t.Fatalf("expected persisted signal %q in %#v", want, node.SelectionSignals)
 		}
 	}
-	if len(preview.Warnings) != 1 || !strings.Contains(preview.Warnings[0], "budget max_plan_nodes=1 truncated 3 candidates") {
+	if len(preview.Warnings) != 1 || !strings.Contains(preview.Warnings[0], "budget max_plan_nodes=1 truncated 7 candidates") {
 		t.Fatalf("expected persisted budget warning, got %#v", preview.Warnings)
 	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
@@ -916,7 +918,7 @@ healthcheck: built_in
 	if dryRun.Status != "dry-run" || dryRun.Mode != "metadata-only" || dryRun.RunID != run.RunID {
 		t.Fatalf("expected dry-run metadata-only derivation, got %#v", dryRun)
 	}
-	if dryRun.Summary.ToolExecutions != 3 || dryRun.Summary.Successes != 1 || dryRun.Summary.Failures != 1 || dryRun.Summary.Ignored != 1 {
+	if dryRun.Summary.ToolExecutions != 7 || dryRun.Summary.Successes != 5 || dryRun.Summary.Failures != 1 || dryRun.Summary.Ignored != 1 {
 		t.Fatalf("unexpected derivation summary: %#v", dryRun.Summary)
 	}
 	if len(dryRun.Signals.HistoricalStats) != 2 {
@@ -926,7 +928,7 @@ healthcheck: built_in
 	for _, stat := range dryRun.Signals.HistoricalStats {
 		history[stat.ManifestName+"/"+stat.Capability] = stat
 	}
-	if history["infra-pack/infra.host_discovery"].Successes != 1 {
+	if history["infra-pack/infra.host_discovery"].Successes != 5 {
 		t.Fatalf("expected infra success history, got %#v", history)
 	}
 	if history["web-api-pack/web.discovery"].Failures != 1 {

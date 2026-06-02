@@ -172,9 +172,8 @@ healthcheck: built_in
 	}
 	view := resized.View()
 	for _, want := range []string{
-		"compile preview: action=discover_assets mode=metadata-only nodes=3 warnings=0",
-		"compile candidate: discover_assets:01 web-api-pack web.discovery runner=command parser=web_api_parser score=0 signals=-",
-		"command=[\"sh\",\"-c\",\"touch ",
+		"compile preview: action=discover_assets mode=metadata-only nodes=7 warnings=0",
+		"compile candidate: discover_assets:01 manifest=web-api-pack tool=pack adapter=none operation=none capability=web.discovery",
 	} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("expected TUI compile preview view to contain %q:\n%s", want, view)
@@ -1469,7 +1468,7 @@ healthcheck: built_in
 		"compile-preview review artifact: status=dry-run mode=metadata-only action=discover_assets nodes=1 warnings=1 current=false decision=accepted reviewer=operator",
 		"reason=authorized preview",
 		"compile-preview review node: discover_assets:01",
-		"manifest=web-api-pack capability=web.discovery",
+		"manifest=web-api-pack tool=pack adapter=none operation=none capability=web.discovery",
 	} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("expected TUI compile-preview review row %q:\n%s", want, view)
@@ -1552,7 +1551,7 @@ func TestNewTUIModelForWorkspaceShowsCompilePreviewReviewComparison(t *testing.T
 		"compile-preview review comparison: mode=metadata-only",
 		"node_delta=1 warning_delta=0 added=1 removed=0",
 		"score_changed=1 signal_changed=1",
-		"compile-preview review comparison node: change=added manifest=ctf-pack capability=ctf.challenge_discovery",
+		"compile-preview review comparison node: change=added manifest=ctf-pack tool=pack adapter=none operation=none capability=ctf.challenge_discovery",
 	} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("expected TUI compile-preview review comparison row %q:\n%s", want, view)
@@ -2095,14 +2094,14 @@ func TestNewTUIModelForWorkspaceShowsWorkerLeaseArtifacts(t *testing.T) {
 	}
 
 	model := NewTUIModelForWorkspace(root).SelectRuntimeTab(tui.RuntimeTabAgentRuntime)
-	resized, cmd := model.Update(tea.WindowSizeMsg{Width: 260, Height: 42})
+	resized, cmd := model.Update(tea.WindowSizeMsg{Width: 260, Height: 90})
 	if cmd != nil {
 		t.Fatalf("expected resize update to be synchronous")
 	}
 	model = resized.(tui.Model)
 	view := model.View()
 	for _, want := range []string{
-		"worker leases: total=3 active=0 stale=0 completed=3 failed=0",
+		"worker leases: total=8 active=0 stale=0 completed=8 failed=0",
 		"worker lease web-api-pack web.discovery completed worker=local",
 	} {
 		if !strings.Contains(view, want) {
@@ -5102,7 +5101,7 @@ func TestNewTUIModelForWorkspaceExecutesWorkerLeaseResultReconciliationAfterDoub
 	if len(leases) != 1 || leases[0].Status != "completed" || leases[0].ResultExecutionID == "" {
 		t.Fatalf("expected worker lease released to dispatch result, got %#v", leases)
 	}
-	resized, cmd := confirmed.Update(tea.WindowSizeMsg{Width: 420, Height: 90})
+	resized, cmd := confirmed.Update(tea.WindowSizeMsg{Width: 420, Height: 180})
 	if cmd != nil {
 		t.Fatalf("expected confirmed reconciliation resize to be synchronous")
 	}
@@ -5319,7 +5318,7 @@ func TestNewTUIModelForWorkspaceCancelsRuntimeWorkerQueueClaimAfterDoubleConfirm
 	if len(dispatches) != 0 {
 		t.Fatalf("queue claim cancel shortcut must not dispatch, got %#v", dispatches)
 	}
-	resized, cmd := confirmed.Update(tea.WindowSizeMsg{Width: 420, Height: 90})
+	resized, cmd := confirmed.Update(tea.WindowSizeMsg{Width: 420, Height: 180})
 	if cmd != nil {
 		t.Fatalf("expected confirmed queue claim cancel resize to be synchronous")
 	}
@@ -5519,14 +5518,20 @@ func TestNewTUIModelForWorkspaceShowsRuntimeWorkerPlacementPlan(t *testing.T) {
 	}
 	model = resized.(tui.Model)
 	view := model.View()
-	if !strings.Contains(view, "worker placements: ready=1") {
+	if !strings.Contains(view, "worker placements: ready=2 skipped=6") {
 		t.Fatalf("expected live placement plan summary, got:\n%s", view)
 	}
 	if !strings.Contains(view, "worker placement web-api-pack web.discovery: ready") || !strings.Contains(view, "placement: remote-web-1/") {
 		t.Fatalf("expected ready worker placement row, got:\n%s", view)
 	}
-	if !strings.Contains(view, "worker placement artifacts: total=1") || !strings.Contains(view, "worker placement artifact:") {
-		t.Fatalf("expected persisted placement artifact rows, got:\n%s", view)
+	artifactModel := model.SelectRuntimeRowMatching(tui.RuntimeTabAgentRuntime, "worker placement artifact:", "")
+	artifactResized, cmd := artifactModel.Update(tea.WindowSizeMsg{Width: 260, Height: 90})
+	if cmd != nil {
+		t.Fatalf("expected artifact resize update to be synchronous")
+	}
+	artifactView := artifactResized.View()
+	if !strings.Contains(artifactView, "worker placement artifacts: total=1") || !strings.Contains(artifactView, "worker placement artifact:") {
+		t.Fatalf("expected persisted placement artifact rows, got:\n%s", artifactView)
 	}
 }
 
@@ -5596,8 +5601,8 @@ func TestNewTUIModelForWorkspaceClaimsRuntimeWorkerPlacementAfterDoubleConfirm(t
 	if err != nil {
 		t.Fatalf("list claims after second x: %v", err)
 	}
-	if len(claims) != 1 || claims[0].Status != "claimed" || claims[0].WorkerID != "remote-web-1" {
-		t.Fatalf("expected one queue claim from placement, got %#v", claims)
+	if len(claims) != 2 || claims[0].Status != "claimed" || claims[1].Status != "claimed" || claims[0].WorkerID != "remote-web-1" || claims[1].WorkerID != "remote-web-1" {
+		t.Fatalf("expected two queue claims from tool-level placement, got %#v", claims)
 	}
 	dispatches, err := ListRuntimeWorkerQueueDispatchExecutions(root)
 	if err != nil {
@@ -5612,9 +5617,9 @@ func TestNewTUIModelForWorkspaceClaimsRuntimeWorkerPlacementAfterDoubleConfirm(t
 	}
 	view := resized.View()
 	for _, want := range []string{
-		"action output: queue claim created",
+		"action output: queue claims created",
 		"execution status: claimed",
-		"worker queue claim artifact:",
+		"worker placement claim executions: total=2 claimed=2 skipped=0 failed=0",
 	} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("expected confirmed placement claim view %q:\n%s", want, view)
@@ -5712,8 +5717,8 @@ func TestNewTUIModelForWorkspaceShowsRuntimeWorkerOrchestrationArtifactDetails(t
 	for _, want := range []string{
 		"worker orchestrations: total=1",
 		"worker orchestration artifact:",
-		"placement_ready=1",
-		"placement_skipped=2",
+		"placement_ready=2",
+		"placement_skipped=6",
 	} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("expected worker orchestration view %q:\n%s", want, view)
@@ -5746,8 +5751,8 @@ func TestNewTUIModelForWorkspaceShowsRuntimeWorkerOrchestrationArtifactDetails(t
 		"artifact path:",
 		"state: dry-run",
 		"execution mode: metadata-only",
-		"ready: 1",
-		"skipped: 2",
+		"ready: 2",
+		"skipped: 6",
 		"mode: read-only",
 	} {
 		if !strings.Contains(detailView, want) {
@@ -6033,8 +6038,6 @@ func TestNewTUIModelForWorkspaceDispatchesRuntimeWorkerPlacementAfterDoubleConfi
 	for _, want := range []string{
 		"action output: queue dispatch created",
 		"execution status: dispatched",
-		"worker placement dispatch execution artifact:",
-		"worker queue dispatch execution artifact:",
 	} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("expected confirmed placement dispatch view %q:\n%s", want, view)
@@ -6045,12 +6048,13 @@ func TestNewTUIModelForWorkspaceDispatchesRuntimeWorkerPlacementAfterDoubleConfi
 func TestNewTUIModelForWorkspaceDispatchesRuntimeWorkerPlacementBatchAfterDoubleConfirm(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
 	plan := createPlacementDispatchBatchPlanFixtureAt(t, root, "metadata-only", time.Now().UTC().Add(-2*time.Minute))
-	if plan.ReadyCount != 3 {
-		t.Fatalf("expected three ready placement dispatch candidates, got %#v", plan)
+	if plan.ReadyCount != 8 {
+		t.Fatalf("expected eight ready placement dispatch candidates, got %#v", plan)
 	}
 
-	model := NewTUIModelForWorkspace(root).SelectRuntimeTab(tui.RuntimeTabAgentRuntime)
-	model = selectRuntimeRowContaining(t, model, "> worker placement dispatch artifact:")
+	model := NewTUIModelForWorkspace(root).
+		SelectRuntimeTab(tui.RuntimeTabAgentRuntime).
+		SelectRuntimeRowMatching(tui.RuntimeTabAgentRuntime, "worker placement dispatch artifact:", plan.Path)
 	armed, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
 	if cmd != nil {
 		t.Fatalf("first x should only arm placement dispatch batch confirmation")
@@ -6078,14 +6082,14 @@ func TestNewTUIModelForWorkspaceDispatchesRuntimeWorkerPlacementBatchAfterDouble
 	if err != nil {
 		t.Fatalf("list dispatches after second x: %v", err)
 	}
-	if len(dispatches) != 3 {
-		t.Fatalf("expected three metadata-only queue dispatches, got %#v", dispatches)
+	if len(dispatches) != 8 {
+		t.Fatalf("expected eight metadata-only queue dispatches, got %#v", dispatches)
 	}
 	batches, err := ListRuntimeWorkerPlacementDispatchBatches(root)
 	if err != nil {
 		t.Fatalf("list placement dispatch batches: %v", err)
 	}
-	if len(batches) != 1 || batches[0].DispatchedCount != 3 {
+	if len(batches) != 1 || batches[0].DispatchedCount != 8 {
 		t.Fatalf("expected one placement dispatch batch audit, got %#v", batches)
 	}
 	resized, cmd := confirmed.Update(tea.WindowSizeMsg{Width: 420, Height: 90})
@@ -8634,7 +8638,7 @@ dependencies:
 
 func selectRuntimeRowContaining(t *testing.T, model tui.Model, marker string) tui.Model {
 	t.Helper()
-	for i := 0; i < 80; i++ {
+	for i := 0; i < 1000; i++ {
 		resized, cmd := model.Update(tea.WindowSizeMsg{Width: 1600, Height: 90})
 		if cmd != nil {
 			t.Fatalf("expected row selection resize to be synchronous")

@@ -18,6 +18,7 @@ type CompileRequest struct {
 	Action           SemanticAction
 	Evidence         EvidenceSlice
 	Manifests        []toolchain.Manifest
+	ToolCatalog      []toolchain.BuiltInTool
 	Budget           CompileBudget
 	DomainPriorities []DomainPriority
 	FrontierScores   []CandidateFrontierScore
@@ -38,7 +39,11 @@ func (Compiler) Compile(request CompileRequest) (PlanGraph, error) {
 	}
 
 	inputNodeIDs := evidenceInputNodeIDs(request.Evidence.Nodes)
-	candidates, err := matchCapabilities(request.Manifests, capabilities)
+	toolCatalog := request.ToolCatalog
+	if toolCatalog == nil {
+		toolCatalog = toolchain.BuiltInAppSecTools()
+	}
+	candidates, err := matchCapabilities(request.Manifests, toolCatalog, capabilities)
 	if err != nil {
 		return PlanGraph{}, err
 	}
@@ -61,11 +66,18 @@ func (Compiler) Compile(request CompileRequest) (PlanGraph, error) {
 			Action:           request.Action,
 			Capability:       candidate.capability,
 			ManifestName:     candidate.manifest.Name,
+			ToolID:           candidate.tool.Name,
+			AdapterID:        candidate.tool.AdapterID,
+			Operation:        candidate.tool.Operation,
+			ParserID:         candidate.parser,
+			TargetKind:       candidate.tool.TargetKind,
+			DependencyName:   candidate.tool.Dependency,
+			DependencyKind:   candidate.tool.DependencyKind,
 			Runner:           candidate.manifest.Runner,
 			RunCommand:       append([]string(nil), candidate.manifest.RunCommand...),
 			RunTimeoutMS:     candidate.manifest.RunTimeoutMS,
-			Parser:           candidate.manifest.Parser,
-			Dependencies:     append([]toolchain.Dependency(nil), candidate.manifest.Dependencies...),
+			Parser:           candidate.parser,
+			Dependencies:     append([]toolchain.Dependency(nil), candidate.dependencies...),
 			InputNodeIDs:     append([]string(nil), inputNodeIDs...),
 			ExpectedEvidence: append([]evidence.NodeType(nil), expectedEvidence...),
 			SelectionScore:   candidate.selectionScore,
@@ -85,20 +97,29 @@ type capabilityCandidate struct {
 	priority         int
 	capability       string
 	manifest         toolchain.Manifest
+	tool             toolchain.BuiltInTool
+	parser           string
+	dependencies     []toolchain.Dependency
 	selectionScore   float64
 	selectionSignals []string
 }
 
-func matchCapabilities(manifests []toolchain.Manifest, wanted []string) ([]capabilityCandidate, error) {
+func matchCapabilities(manifests []toolchain.Manifest, catalog []toolchain.BuiltInTool, wanted []string) ([]capabilityCandidate, error) {
 	wantedPriority := make(map[string]int, len(wanted))
 	for priority, capability := range wanted {
 		wantedPriority[capability] = priority
 	}
 
+	catalogByPack := toolCatalogByPack(catalog)
 	var candidates []capabilityCandidate
 	for _, manifest := range manifests {
 		if err := toolchain.ValidateManifest(manifest); err != nil {
 			return nil, fmt.Errorf("validate manifest %s: %w", manifest.Name, err)
+		}
+		toolCandidates := matchToolCapabilities(manifest, catalogByPack[manifest.Name], wantedPriority)
+		if len(toolCandidates) > 0 {
+			candidates = append(candidates, toolCandidates...)
+			continue
 		}
 		seen := map[string]bool{}
 		for _, capability := range manifest.Capabilities {
@@ -109,9 +130,11 @@ func matchCapabilities(manifests []toolchain.Manifest, wanted []string) ([]capab
 			}
 			seen[normalized] = true
 			candidates = append(candidates, capabilityCandidate{
-				priority:   priority,
-				capability: normalized,
-				manifest:   manifest,
+				priority:     priority,
+				capability:   normalized,
+				manifest:     manifest,
+				parser:       strings.TrimSpace(manifest.Parser),
+				dependencies: append([]toolchain.Dependency(nil), manifest.Dependencies...),
 			})
 		}
 	}
@@ -123,9 +146,108 @@ func matchCapabilities(manifests []toolchain.Manifest, wanted []string) ([]capab
 		if candidates[i].manifest.Name != candidates[j].manifest.Name {
 			return candidates[i].manifest.Name < candidates[j].manifest.Name
 		}
+		if candidates[i].tool.Name != candidates[j].tool.Name {
+			return candidates[i].tool.Name < candidates[j].tool.Name
+		}
 		return candidates[i].capability < candidates[j].capability
 	})
 	return candidates, nil
+}
+
+func matchToolCapabilities(manifest toolchain.Manifest, tools []toolchain.BuiltInTool, wantedPriority map[string]int) []capabilityCandidate {
+	if len(tools) == 0 || len(manifest.Dependencies) == 0 {
+		return nil
+	}
+	if len(manifest.Dependencies) < 2 {
+		return nil
+	}
+	dependenciesByName := dependenciesByName(manifest.Dependencies)
+	seen := map[string]bool{}
+	var candidates []capabilityCandidate
+	for _, tool := range tools {
+		if strings.TrimSpace(tool.DependencyKind) == "rule_bundle" {
+			continue
+		}
+		if strings.TrimSpace(tool.Dependency) == "" || dependenciesByName[tool.Dependency].Name == "" {
+			continue
+		}
+		for _, capability := range tool.Capabilities {
+			normalized := strings.TrimSpace(capability)
+			priority, ok := wantedPriority[normalized]
+			if !ok {
+				continue
+			}
+			key := strings.TrimSpace(tool.Name) + "\x00" + normalized
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			candidates = append(candidates, capabilityCandidate{
+				priority:     priority,
+				capability:   normalized,
+				manifest:     manifest,
+				tool:         tool,
+				parser:       toolPlanParser(tool, manifest),
+				dependencies: toolPlanDependencies(tool, tools, dependenciesByName),
+			})
+		}
+	}
+	return candidates
+}
+
+func toolCatalogByPack(catalog []toolchain.BuiltInTool) map[string][]toolchain.BuiltInTool {
+	byPack := map[string][]toolchain.BuiltInTool{}
+	for _, tool := range catalog {
+		pack := strings.TrimSpace(tool.Pack)
+		if pack == "" {
+			continue
+		}
+		byPack[pack] = append(byPack[pack], tool)
+	}
+	return byPack
+}
+
+func dependenciesByName(dependencies []toolchain.Dependency) map[string]toolchain.Dependency {
+	byName := map[string]toolchain.Dependency{}
+	for _, dependency := range dependencies {
+		name := strings.TrimSpace(dependency.Name)
+		if name == "" {
+			continue
+		}
+		byName[name] = dependency
+	}
+	return byName
+}
+
+func toolPlanParser(tool toolchain.BuiltInTool, manifest toolchain.Manifest) string {
+	if parser := strings.TrimSpace(tool.Parser); parser != "" {
+		return parser
+	}
+	return strings.TrimSpace(manifest.Parser)
+}
+
+func toolPlanDependencies(tool toolchain.BuiltInTool, catalog []toolchain.BuiltInTool, dependenciesByName map[string]toolchain.Dependency) []toolchain.Dependency {
+	var dependencies []toolchain.Dependency
+	seen := map[string]bool{}
+	if dependency := dependenciesByName[strings.TrimSpace(tool.Dependency)]; dependency.Name != "" {
+		dependencies = append(dependencies, dependency)
+		seen[dependency.Name] = true
+	}
+	for _, candidate := range catalog {
+		if strings.TrimSpace(candidate.DependencyKind) != "rule_bundle" {
+			continue
+		}
+		if strings.TrimSpace(candidate.RuleBundleFor) != strings.TrimSpace(tool.Name) {
+			continue
+		}
+		dependency := dependenciesByName[strings.TrimSpace(candidate.Dependency)]
+		if dependency.Name == "" || seen[dependency.Name] {
+			continue
+		}
+		dependencies = append(dependencies, dependency)
+		seen[dependency.Name] = true
+	}
+	return dependencies
 }
 
 func rankCapabilityCandidates(candidates []capabilityCandidate, request CompileRequest) []capabilityCandidate {
@@ -165,6 +287,9 @@ func rankCapabilityCandidates(candidates []capabilityCandidate, request CompileR
 		}
 		if ranked[i].manifest.Name != ranked[j].manifest.Name {
 			return ranked[i].manifest.Name < ranked[j].manifest.Name
+		}
+		if ranked[i].tool.Name != ranked[j].tool.Name {
+			return ranked[i].tool.Name < ranked[j].tool.Name
 		}
 		return ranked[i].capability < ranked[j].capability
 	})

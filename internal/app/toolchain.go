@@ -200,6 +200,13 @@ type ToolCompilePreviewReviewComparisonStats struct {
 type ToolCompilePreviewReviewNodeDiff struct {
 	Change           string   `json:"change"`
 	ManifestName     string   `json:"manifest_name"`
+	ToolID           string   `json:"tool_id,omitempty"`
+	AdapterID        string   `json:"adapter_id,omitempty"`
+	Operation        string   `json:"operation,omitempty"`
+	ParserID         string   `json:"parser_id,omitempty"`
+	TargetKind       string   `json:"target_kind,omitempty"`
+	DependencyName   string   `json:"dependency_name,omitempty"`
+	DependencyKind   string   `json:"dependency_kind,omitempty"`
 	Capability       string   `json:"capability"`
 	BaseID           string   `json:"base_id,omitempty"`
 	CandidateID      string   `json:"candidate_id,omitempty"`
@@ -922,6 +929,13 @@ func compareToolCompilePreviewReviewValues(base, candidate ToolCompilePreviewRev
 			comparison.NodeDiffs = append(comparison.NodeDiffs, ToolCompilePreviewReviewNodeDiff{
 				Change:         "added",
 				ManifestName:   node.ManifestName,
+				ToolID:         node.ToolID,
+				AdapterID:      node.AdapterID,
+				Operation:      node.Operation,
+				ParserID:       node.ParserID,
+				TargetKind:     node.TargetKind,
+				DependencyName: node.DependencyName,
+				DependencyKind: node.DependencyKind,
 				Capability:     node.Capability,
 				CandidateID:    node.ID,
 				BaseIndex:      -1,
@@ -955,6 +969,13 @@ func compareToolCompilePreviewReviewValues(base, candidate ToolCompilePreviewRev
 		comparison.NodeDiffs = append(comparison.NodeDiffs, ToolCompilePreviewReviewNodeDiff{
 			Change:           strings.Join(changes, ","),
 			ManifestName:     node.ManifestName,
+			ToolID:           node.ToolID,
+			AdapterID:        node.AdapterID,
+			Operation:        node.Operation,
+			ParserID:         node.ParserID,
+			TargetKind:       node.TargetKind,
+			DependencyName:   node.DependencyName,
+			DependencyKind:   node.DependencyKind,
 			Capability:       node.Capability,
 			BaseID:           baseNode.ID,
 			CandidateID:      node.ID,
@@ -975,6 +996,13 @@ func compareToolCompilePreviewReviewValues(base, candidate ToolCompilePreviewRev
 		comparison.NodeDiffs = append(comparison.NodeDiffs, ToolCompilePreviewReviewNodeDiff{
 			Change:         "removed",
 			ManifestName:   node.ManifestName,
+			ToolID:         node.ToolID,
+			AdapterID:      node.AdapterID,
+			Operation:      node.Operation,
+			ParserID:       node.ParserID,
+			TargetKind:     node.TargetKind,
+			DependencyName: node.DependencyName,
+			DependencyKind: node.DependencyKind,
 			Capability:     node.Capability,
 			BaseID:         node.ID,
 			BaseIndex:      index,
@@ -997,6 +1025,13 @@ func compilePreviewReviewDecision(review ToolCompilePreviewReview) string {
 func compilePreviewReviewNodeKey(node compiler.PlanNode) string {
 	return strings.Join([]string{
 		strings.TrimSpace(node.ManifestName),
+		strings.TrimSpace(node.ToolID),
+		strings.TrimSpace(node.AdapterID),
+		strings.TrimSpace(node.Operation),
+		strings.TrimSpace(node.ParserID),
+		strings.TrimSpace(node.TargetKind),
+		strings.TrimSpace(node.DependencyName),
+		strings.TrimSpace(node.DependencyKind),
 		strings.TrimSpace(node.Capability),
 		strings.TrimSpace(node.Runner),
 		strings.TrimSpace(node.Parser),
@@ -3492,6 +3527,13 @@ func safeToolCompilePreviewReviewName(review ToolCompilePreviewReview) string {
 			parts,
 			node.ID,
 			node.ManifestName,
+			node.ToolID,
+			node.AdapterID,
+			node.Operation,
+			node.ParserID,
+			node.TargetKind,
+			node.DependencyName,
+			node.DependencyKind,
 			node.Capability,
 			node.Runner,
 			node.Parser,

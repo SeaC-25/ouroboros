@@ -977,6 +977,9 @@ func runtimeWorkerPlacementDispatchBatchCount(batch *RuntimeWorkerPlacementDispa
 
 func sortRuntimeWorkerPlacementCandidates(candidates []RuntimeWorkerPlacementCandidate) {
 	sort.SliceStable(candidates, func(i int, j int) bool {
+		if runtimeWorkerPlacementCandidateStatusRank(candidates[i].Status) != runtimeWorkerPlacementCandidateStatusRank(candidates[j].Status) {
+			return runtimeWorkerPlacementCandidateStatusRank(candidates[i].Status) < runtimeWorkerPlacementCandidateStatusRank(candidates[j].Status)
+		}
 		if candidates[i].Tool != candidates[j].Tool {
 			return candidates[i].Tool < candidates[j].Tool
 		}
@@ -991,6 +994,17 @@ func sortRuntimeWorkerPlacementCandidates(candidates []RuntimeWorkerPlacementCan
 		}
 		return candidates[i].Reason < candidates[j].Reason
 	})
+}
+
+func runtimeWorkerPlacementCandidateStatusRank(status string) int {
+	switch strings.TrimSpace(status) {
+	case "ready":
+		return 0
+	case "skipped":
+		return 1
+	default:
+		return 2
+	}
 }
 
 func sortRuntimeWorkerPlacementDispatchCandidates(candidates []RuntimeWorkerPlacementDispatchCandidate) {

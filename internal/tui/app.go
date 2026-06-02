@@ -213,6 +213,13 @@ func (m Model) MoveRuntimeSelection(delta int) Model {
 	return m
 }
 
+func (m Model) SelectRuntimeRowMatching(tab RuntimeTab, prefix string, contains string) Model {
+	stack := m.graphStack
+	stack.RuntimeTabs = stack.RuntimeTabs.SelectFirstRowMatching(tab, prefix, contains)
+	m.graphStack = stack
+	return m
+}
+
 func (m Model) WithRuntimeControlRow(row string) Model {
 	row = strings.TrimSpace(row)
 	if row == "" {

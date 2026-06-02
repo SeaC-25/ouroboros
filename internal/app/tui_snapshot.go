@@ -823,6 +823,65 @@ func tuiRuntimeActionExecutor(root string) tui.RuntimeActionExecutor {
 			return result, nil
 		}
 		if kind == "worker-placement-artifact" {
+			if runtimeActionReadyCount(action) > 1 {
+				plan, readErr := ReadRuntimeWorkerPlacementPlan(root, dispatchPath)
+				rows := []string{}
+				var executions []RuntimeWorkerPlacementClaimExecution
+				var claims []RuntimeWorkerQueueClaim
+				var firstErr error
+				now := time.Now().UTC()
+				for _, candidate := range plan.Candidates {
+					if strings.TrimSpace(candidate.Status) != "ready" {
+						continue
+					}
+					execution, err := ExecuteRuntimeWorkerPlacementClaim(root, dispatchPath, RuntimeWorkerPlacementClaimExecutionOptions{
+						Execute:              true,
+						CandidateExecutionID: candidate.ExecutionID,
+						WorkerID:             candidate.WorkerID,
+						Now:                  now,
+					})
+					if err != nil && firstErr == nil {
+						firstErr = err
+					}
+					executions = append(executions, execution)
+					if strings.TrimSpace(execution.ClaimPath) == "" {
+						continue
+					}
+					if claim, claimErr := ReadRuntimeWorkerQueueClaim(root, execution.ClaimPath); claimErr == nil {
+						claims = append(claims, claim)
+					}
+				}
+				if len(executions) > 0 {
+					rows = append(rows, runtimeWorkerPlacementClaimExecutionRows(executions)...)
+				}
+				if len(claims) > 0 {
+					rows = append(rows, runtimeWorkerQueueClaimRows(claims)...)
+				}
+				output := "queue claims created"
+				if firstErr != nil {
+					output = compactRuntimeRowValue(firstErr.Error())
+				}
+				result := tui.RuntimeActionExecutionResult{
+					Status:      "claimed",
+					Path:        dispatchPath,
+					Output:      output,
+					RuntimeRows: rows,
+				}
+				if readErr != nil {
+					result.Status = "failed"
+					result.Output = compactRuntimeRowValue(readErr.Error())
+					return result, readErr
+				}
+				if firstErr != nil {
+					result.Status = "failed"
+					return result, firstErr
+				}
+				if len(claims) == 0 {
+					result.Status = "skipped"
+					result.Output = "no ready placement candidates"
+				}
+				return result, nil
+			}
 			execution, err := ExecuteRuntimeWorkerPlacementClaim(root, dispatchPath, RuntimeWorkerPlacementClaimExecutionOptions{Execute: true})
 			rows := runtimeWorkerPlacementClaimExecutionRows([]RuntimeWorkerPlacementClaimExecution{execution})
 			if strings.TrimSpace(execution.ClaimPath) != "" {
@@ -1968,12 +2027,19 @@ func compilePreviewReviewRuntimeRowsWithSelection(reviews []ToolCompilePreviewRe
 		}
 		for _, node := range review.Preview.Nodes {
 			rows = append(rows, fmt.Sprintf(
-				"compile-preview review node: %s manifest=%s capability=%s runner=%s parser=%s score=%s signals=%s command=%s",
+				"compile-preview review node: %s manifest=%s tool=%s adapter=%s operation=%s capability=%s target=%s dependency=%s dependency_kind=%s runner=%s parser=%s parser_id=%s score=%s signals=%s command=%s",
 				node.ID,
 				installRequestDisplayValue(node.ManifestName, "unknown"),
+				installRequestDisplayValue(node.ToolID, "pack"),
+				installRequestDisplayValue(node.AdapterID, "none"),
+				installRequestDisplayValue(node.Operation, "none"),
 				installRequestDisplayValue(node.Capability, "unknown"),
+				installRequestDisplayValue(node.TargetKind, "unknown"),
+				installRequestDisplayValue(node.DependencyName, "none"),
+				installRequestDisplayValue(node.DependencyKind, "none"),
 				installRequestDisplayValue(node.Runner, "unknown"),
 				installRequestDisplayValue(node.Parser, "unknown"),
+				installRequestDisplayValue(node.ParserID, "unknown"),
 				strconv.FormatFloat(node.SelectionScore, 'g', -1, 64),
 				compilePreviewSignalsDisplay(node.SelectionSignals),
 				compilePreviewCommandJSON(node.RunCommand),
@@ -2001,10 +2067,17 @@ func compilePreviewReviewComparisonRuntimeRows(comparison ToolCompilePreviewRevi
 	)}
 	for _, diff := range comparison.NodeDiffs {
 		rows = append(rows, fmt.Sprintf(
-			"compile-preview review comparison node: change=%s manifest=%s capability=%s base_index=%d candidate_index=%d base_score=%s candidate_score=%s base_signals=%s candidate_signals=%s",
+			"compile-preview review comparison node: change=%s manifest=%s tool=%s adapter=%s operation=%s capability=%s target=%s dependency=%s dependency_kind=%s parser_id=%s base_index=%d candidate_index=%d base_score=%s candidate_score=%s base_signals=%s candidate_signals=%s",
 			installRequestDisplayValue(diff.Change, "unknown"),
 			installRequestDisplayValue(diff.ManifestName, "unknown"),
+			installRequestDisplayValue(diff.ToolID, "pack"),
+			installRequestDisplayValue(diff.AdapterID, "none"),
+			installRequestDisplayValue(diff.Operation, "none"),
 			installRequestDisplayValue(diff.Capability, "unknown"),
+			installRequestDisplayValue(diff.TargetKind, "unknown"),
+			installRequestDisplayValue(diff.DependencyName, "none"),
+			installRequestDisplayValue(diff.DependencyKind, "none"),
+			installRequestDisplayValue(diff.ParserID, "unknown"),
 			diff.BaseIndex,
 			diff.CandidateIndex,
 			strconv.FormatFloat(diff.BaseScore, 'g', -1, 64),
@@ -2038,12 +2111,19 @@ func compilePreviewRuntimeRows(preview ToolCompilePreview) []string {
 	}
 	for _, node := range preview.Nodes {
 		rows = append(rows, fmt.Sprintf(
-			"compile candidate: %s %s %s runner=%s parser=%s score=%s signals=%s command=%s",
+			"compile candidate: %s manifest=%s tool=%s adapter=%s operation=%s capability=%s target=%s dependency=%s dependency_kind=%s runner=%s parser=%s parser_id=%s score=%s signals=%s command=%s",
 			node.ID,
 			installRequestDisplayValue(node.ManifestName, "unknown"),
+			installRequestDisplayValue(node.ToolID, "pack"),
+			installRequestDisplayValue(node.AdapterID, "none"),
+			installRequestDisplayValue(node.Operation, "none"),
 			installRequestDisplayValue(node.Capability, "unknown"),
+			installRequestDisplayValue(node.TargetKind, "unknown"),
+			installRequestDisplayValue(node.DependencyName, "none"),
+			installRequestDisplayValue(node.DependencyKind, "none"),
 			installRequestDisplayValue(node.Runner, "unknown"),
 			installRequestDisplayValue(node.Parser, "unknown"),
+			installRequestDisplayValue(node.ParserID, "unknown"),
 			strconv.FormatFloat(node.SelectionScore, 'g', -1, 64),
 			compilePreviewSignalsDisplay(node.SelectionSignals),
 			compilePreviewCommandJSON(node.RunCommand),

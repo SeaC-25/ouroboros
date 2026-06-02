@@ -48,27 +48,29 @@ func TestPlanRuntimeWorkerPlacementsBuildsMetadataOnlyCandidates(t *testing.T) {
 		t.Fatalf("plan runtime worker placements: %v", err)
 	}
 
-	if plan.Status != "dry-run" || plan.Mode != "metadata-only" || plan.ReadyCount != 1 || plan.SkippedCount != 2 {
+	if plan.Status != "dry-run" || plan.Mode != "metadata-only" || plan.ReadyCount != 2 || plan.SkippedCount != 6 {
 		t.Fatalf("unexpected placement plan summary: %#v", plan)
 	}
 	if plan.Path != "" {
 		t.Fatalf("planning should not persist an artifact path, got %s", plan.Path)
 	}
-	if len(plan.Candidates) != 3 {
+	if len(plan.Candidates) != 8 {
 		t.Fatalf("expected one candidate per compiled tool request, got %#v", plan.Candidates)
 	}
-	ready := placementCandidateByCapability(plan.Candidates, "web.discovery")
-	if ready.Status != "ready" || ready.WorkerID != "remote-web-1" || ready.WorkerMode != "remote" || ready.WorkerEndpoint == "" {
-		t.Fatalf("expected ready web placement on remote worker, got %#v", ready)
+	for _, toolID := range []string{"httpx", "subfinder"} {
+		ready := placementCandidateByToolID(plan.Candidates, toolID)
+		if ready.Status != "ready" || ready.WorkerID != "remote-web-1" || ready.WorkerMode != "remote" || ready.WorkerEndpoint == "" {
+			t.Fatalf("expected ready web placement on remote worker for %s, got %#v", toolID, ready)
+		}
+		if ready.ToolPlan.Action != "discover_assets" || ready.ToolPlan.ManifestName != "web-api-pack" || ready.ToolPlan.ToolID != toolID {
+			t.Fatalf("expected carried tool-plan metadata for %s, got %#v", toolID, ready.ToolPlan)
+		}
 	}
-	if ready.ToolPlan.Action != "discover_assets" || ready.ToolPlan.ManifestName != "web-api-pack" {
-		t.Fatalf("expected carried tool-plan metadata, got %#v", ready.ToolPlan)
-	}
-	stale := placementCandidateByCapability(plan.Candidates, "infra.host_discovery")
+	stale := placementCandidateByToolID(plan.Candidates, "nmap")
 	if stale.Status != "skipped" || stale.Reason != "worker-stale" || stale.WorkerID != "remote-infra-stale" {
 		t.Fatalf("expected stale infra skip, got %#v", stale)
 	}
-	offline := placementCandidateByCapability(plan.Candidates, "ctf.challenge_classification")
+	offline := placementCandidateByParser(plan.Candidates, "ctf_parser")
 	if offline.Status != "skipped" || offline.Reason != "worker-offline" || offline.WorkerID != "remote-ctf-offline" {
 		t.Fatalf("expected offline ctf skip, got %#v", offline)
 	}
@@ -577,8 +579,8 @@ func TestExecuteRuntimeWorkerPlacementDispatchBatchDispatchesAllReadyCandidates(
 	if batch.Status != "completed" || batch.Mode != "metadata-only" || batch.TransportMode != "metadata-only" {
 		t.Fatalf("unexpected batch summary: %#v", batch)
 	}
-	if batch.DispatchedCount != 3 || batch.SkippedCount != 0 || batch.FailedCount != 0 || len(batch.Executions) != 3 {
-		t.Fatalf("expected three dispatched executions, got %#v", batch)
+	if batch.DispatchedCount != 8 || batch.SkippedCount != 0 || batch.FailedCount != 0 || len(batch.Executions) != 8 {
+		t.Fatalf("expected eight dispatched executions, got %#v", batch)
 	}
 	if batch.Path == "" || !strings.Contains(batch.Path, filepath.Join("runtime", "worker-placement-dispatch-batches")) {
 		t.Fatalf("expected batch audit path, got %s", batch.Path)
@@ -587,28 +589,28 @@ func TestExecuteRuntimeWorkerPlacementDispatchBatchDispatchesAllReadyCandidates(
 	if err != nil {
 		t.Fatalf("list queue dispatches: %v", err)
 	}
-	if len(dispatches) != 3 {
-		t.Fatalf("expected three queue dispatch executions, got %#v", dispatches)
+	if len(dispatches) != 8 {
+		t.Fatalf("expected eight queue dispatch executions, got %#v", dispatches)
 	}
 	executions, err := ListRuntimeWorkerPlacementDispatchExecutions(root)
 	if err != nil {
 		t.Fatalf("list placement dispatch executions: %v", err)
 	}
-	if len(executions) != 3 {
-		t.Fatalf("expected three placement dispatch executions, got %#v", executions)
+	if len(executions) != 8 {
+		t.Fatalf("expected eight placement dispatch executions, got %#v", executions)
 	}
 	batches, err := ListRuntimeWorkerPlacementDispatchBatches(root)
 	if err != nil {
 		t.Fatalf("list placement dispatch batches: %v", err)
 	}
-	if len(batches) != 1 || batches[0].Path != batch.Path || batches[0].DispatchedCount != 3 {
+	if len(batches) != 1 || batches[0].Path != batch.Path || batches[0].DispatchedCount != 8 {
 		t.Fatalf("expected listed batch audit, got %#v", batches)
 	}
 	read, err := ReadRuntimeWorkerPlacementDispatchBatch(root, filepath.Base(batch.Path))
 	if err != nil {
 		t.Fatalf("read placement dispatch batch: %v", err)
 	}
-	if read.Path != batch.Path || len(read.Executions) != 3 {
+	if read.Path != batch.Path || len(read.Executions) != 8 {
 		t.Fatalf("expected inspected batch audit, got %#v", read)
 	}
 }
@@ -631,8 +633,8 @@ func TestExecuteRuntimeWorkerPlacementDispatchBatchSkipsNoLongerReadyClaims(t *t
 	if err != nil {
 		t.Fatalf("execute placement dispatch batch: %v", err)
 	}
-	if batch.Status != "completed" || batch.DispatchedCount != 2 || batch.SkippedCount != 1 || batch.FailedCount != 0 {
-		t.Fatalf("expected two dispatches and one skip, got %#v", batch)
+	if batch.Status != "completed" || batch.DispatchedCount != 7 || batch.SkippedCount != 1 || batch.FailedCount != 0 {
+		t.Fatalf("expected seven dispatches and one skip, got %#v", batch)
 	}
 	sawSkip := false
 	for _, execution := range batch.Executions {
@@ -647,8 +649,8 @@ func TestExecuteRuntimeWorkerPlacementDispatchBatchSkipsNoLongerReadyClaims(t *t
 	if err != nil {
 		t.Fatalf("list queue dispatches: %v", err)
 	}
-	if len(dispatches) != 3 {
-		t.Fatalf("batch should add only two new queue dispatches, got %#v", dispatches)
+	if len(dispatches) != 8 {
+		t.Fatalf("batch should add only seven new queue dispatches, got %#v", dispatches)
 	}
 }
 
@@ -735,8 +737,8 @@ func createPlacementDispatchBatchPlanFixtureAt(t *testing.T, root string, transp
 	if err != nil {
 		t.Fatalf("create placement plan: %v", err)
 	}
-	if placement.ReadyCount != 3 {
-		t.Fatalf("expected three ready placement candidates, got %#v", placement)
+	if placement.ReadyCount != 8 {
+		t.Fatalf("expected eight ready placement candidates, got %#v", placement)
 	}
 	for _, candidate := range placement.Candidates {
 		if candidate.Status != "ready" {
@@ -759,8 +761,8 @@ func createPlacementDispatchBatchPlanFixtureAt(t *testing.T, root string, transp
 	if err != nil {
 		t.Fatalf("create placement dispatch plan: %v", err)
 	}
-	if plan.ReadyCount != 3 {
-		t.Fatalf("expected three ready placement dispatch candidates, got %#v", plan)
+	if plan.ReadyCount != 8 {
+		t.Fatalf("expected eight ready placement dispatch candidates, got %#v", plan)
 	}
 	return plan
 }
@@ -768,6 +770,24 @@ func createPlacementDispatchBatchPlanFixtureAt(t *testing.T, root string, transp
 func placementCandidateByCapability(candidates []RuntimeWorkerPlacementCandidate, capability string) RuntimeWorkerPlacementCandidate {
 	for _, candidate := range candidates {
 		if candidate.Capability == capability {
+			return candidate
+		}
+	}
+	return RuntimeWorkerPlacementCandidate{}
+}
+
+func placementCandidateByToolID(candidates []RuntimeWorkerPlacementCandidate, toolID string) RuntimeWorkerPlacementCandidate {
+	for _, candidate := range candidates {
+		if candidate.ToolPlan.ToolID == toolID {
+			return candidate
+		}
+	}
+	return RuntimeWorkerPlacementCandidate{}
+}
+
+func placementCandidateByParser(candidates []RuntimeWorkerPlacementCandidate, parser string) RuntimeWorkerPlacementCandidate {
+	for _, candidate := range candidates {
+		if candidate.Parser == parser || candidate.ToolPlan.ParserID == parser {
 			return candidate
 		}
 	}

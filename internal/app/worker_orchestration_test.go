@@ -34,7 +34,7 @@ func TestCreateRuntimeWorkerOrchestrationWritesDryRunAuditWithoutMutation(t *tes
 	if orchestration.Status != "dry-run" || orchestration.Mode != "metadata-only" || orchestration.TransportMode != "metadata-only" {
 		t.Fatalf("unexpected dry-run orchestration summary: %#v", orchestration)
 	}
-	if orchestration.PlacementReady != 1 || orchestration.PlacementSkipped != 2 {
+	if orchestration.PlacementReady != 2 || orchestration.PlacementSkipped != 6 {
 		t.Fatalf("expected placement dry-run counts, got %#v", orchestration)
 	}
 	if orchestration.PlacementPlanPath != "" || orchestration.PlacementDispatchPlanPath != "" || orchestration.PlacementDispatchBatchPath != "" {
@@ -108,7 +108,7 @@ func TestCreateRuntimeWorkerOrchestrationExecuteComposesPlacementClaimAndDispatc
 	if orchestration.Status != "completed" || orchestration.Mode != "execute" || orchestration.TransportMode != "metadata-only" {
 		t.Fatalf("unexpected executed orchestration summary: %#v", orchestration)
 	}
-	if orchestration.PlacementReady != 3 || orchestration.PlacementSkipped != 0 || orchestration.ClaimedCount != 2 {
+	if orchestration.PlacementReady != 8 || orchestration.PlacementSkipped != 0 || orchestration.ClaimedCount != 2 {
 		t.Fatalf("expected bounded placement claim counts, got %#v", orchestration)
 	}
 	if orchestration.PlacementPlanPath == "" || orchestration.PlacementDispatchPlanPath == "" || orchestration.PlacementDispatchBatchPath == "" {

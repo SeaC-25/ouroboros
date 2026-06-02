@@ -8654,11 +8654,11 @@ healthcheck: built_in
 	output := out.String()
 	for _, want := range []string{
 		"compile-preview: workspace=" + root + " action=discover_assets mode=metadata-only nodes=2 warnings=1",
-		"compile-node: id=discover_assets:01 manifest=infra-pack capability=infra.host_discovery",
+		"compile-node: id=discover_assets:01 manifest=infra-pack tool=amass adapter=managed_binary operation=subdomain_discovery capability=infra.host_discovery",
 		"score=5",
 		"signals=domain:infra_internal=5",
-		"compile-node: id=discover_assets:02 manifest=ctf-pack capability=ctf.challenge_classification",
-		"compile-warning: budget max_plan_nodes=2 truncated 3 candidates",
+		"compile-node: id=discover_assets:02 manifest=infra-pack tool=dnsrecon adapter=managed_binary operation=dns_probe capability=infra.host_discovery",
+		"compile-warning: budget max_plan_nodes=2 truncated 7 candidates",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("expected compile-preview output to contain %q, got %q", want, output)
@@ -8721,10 +8721,10 @@ healthcheck: built_in
 	output := out.String()
 	for _, want := range []string{
 		"compile-preview: workspace=" + root + " action=discover_assets mode=metadata-only nodes=1 warnings=1",
-		"compile-node: id=discover_assets:01 manifest=infra-pack capability=infra.host_discovery",
+		"compile-node: id=discover_assets:01 manifest=infra-pack tool=amass adapter=managed_binary operation=subdomain_discovery capability=infra.host_discovery",
 		"score=8",
 		"signals=domain:infra_internal=3,frontier=3,history:successes=2 failures=0",
-		"compile-warning: budget max_plan_nodes=1 truncated 3 candidates",
+		"compile-warning: budget max_plan_nodes=1 truncated 7 candidates",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("expected compile-preview output to contain %q, got %q", want, output)
@@ -8771,7 +8771,7 @@ healthcheck: built_in
 	for _, want := range []string{
 		"compile-preview-review: ",
 		"status=dry-run mode=metadata-only action=discover_assets nodes=1 warnings=1",
-		"compile-review-node: id=discover_assets:01 manifest=infra-pack capability=infra.host_discovery",
+		"compile-review-node: id=discover_assets:01 manifest=infra-pack tool=amass adapter=managed_binary operation=subdomain_discovery capability=infra.host_discovery",
 		"signals=domain:infra_internal=4",
 	} {
 		if !strings.Contains(output, want) {
@@ -8807,7 +8807,7 @@ healthcheck: built_in
 	if err := inspectCmd.Execute(); err != nil {
 		t.Fatalf("execute compile-preview-reviews inspect: %v", err)
 	}
-	if !strings.Contains(inspectOut.String(), "compile-review-node: id=discover_assets:01 manifest=infra-pack capability=infra.host_discovery") {
+	if !strings.Contains(inspectOut.String(), "compile-review-node: id=discover_assets:01 manifest=infra-pack tool=amass adapter=managed_binary operation=subdomain_discovery capability=infra.host_discovery") {
 		t.Fatalf("expected inspected review nodes, got %q", inspectOut.String())
 	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
@@ -9111,7 +9111,7 @@ healthcheck: built_in
 	previewOutput := previewOut.String()
 	for _, want := range []string{
 		"compile-preview: workspace=" + root + " action=discover_assets mode=metadata-only nodes=1 warnings=1",
-		"compile-node: id=discover_assets:01 manifest=infra-pack capability=infra.host_discovery",
+		"compile-node: id=discover_assets:01 manifest=infra-pack tool=amass adapter=managed_binary operation=subdomain_discovery capability=infra.host_discovery",
 		"score=8",
 		"signals=domain:infra_internal=3,frontier=3,history:successes=2 failures=0",
 	} {
@@ -9208,7 +9208,7 @@ healthcheck: built_in
 	previewOutput := previewOut.String()
 	for _, want := range []string{
 		"compile-preview: workspace=" + root + " action=discover_assets mode=metadata-only nodes=1 warnings=1",
-		"compile-node: id=discover_assets:01 manifest=infra-pack capability=infra.host_discovery",
+		"compile-node: id=discover_assets:01 manifest=infra-pack tool=amass adapter=managed_binary operation=subdomain_discovery capability=infra.host_discovery",
 		"signals=history:successes=1 failures=0",
 	} {
 		if !strings.Contains(previewOutput, want) {
@@ -9280,7 +9280,7 @@ func TestToolchainCompilePreviewSignalsFromReplayCommandDerivesFrontierScores(t 
 	previewOutput := previewOut.String()
 	for _, want := range []string{
 		"compile-preview: workspace=" + root + " action=discover_assets mode=metadata-only nodes=1 warnings=1",
-		"compile-node: id=discover_assets:01 manifest=infra-pack capability=infra.host_discovery",
+		"compile-node: id=discover_assets:01 manifest=infra-pack tool=amass adapter=managed_binary operation=subdomain_discovery capability=infra.host_discovery",
 		"signals=frontier=3.8",
 	} {
 		if !strings.Contains(previewOutput, want) {
@@ -9366,7 +9366,7 @@ healthcheck: built_in
 	previewOutput := previewOut.String()
 	for _, want := range []string{
 		"compile-preview: workspace=" + root + " action=discover_assets mode=metadata-only nodes=1 warnings=1",
-		"compile-node: id=discover_assets:01 manifest=web-api-pack capability=web.discovery",
+		"compile-node: id=discover_assets:01 manifest=web-api-pack tool= adapter= operation= capability=web.discovery",
 		"signals=frontier=3.8",
 	} {
 		if !strings.Contains(previewOutput, want) {
@@ -14432,10 +14432,15 @@ func TestRuntimeWorkerPlacementPlanCommandWritesAndListsPlan(t *testing.T) {
 		"worker-placement-plan:",
 		"status=dry-run",
 		"mode=metadata-only",
-		"ready=1",
+		"ready=2",
+		"skipped=6",
 		"worker-placement: status=ready",
 		"worker=remote-web-1",
 		"capability=web.discovery",
+		"execution=tool-discover_assets-01",
+		"parser=httpx_jsonl",
+		"execution=tool-discover_assets-02",
+		"parser=subfinder_jsonl",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("expected worker-placement-plan output to contain %q, got %q", want, output)
@@ -14777,8 +14782,8 @@ func TestRuntimeExecuteWorkerPlacementDispatchPlanCommandRunsAllReadyCandidates(
 		"status=completed",
 		"mode=metadata-only",
 		"transport=metadata-only",
-		"total=3",
-		"dispatched=3",
+		"total=8",
+		"dispatched=8",
 		"worker-placement-dispatch-execution:",
 	} {
 		if !strings.Contains(output, want) {
@@ -14789,8 +14794,8 @@ func TestRuntimeExecuteWorkerPlacementDispatchPlanCommandRunsAllReadyCandidates(
 	if err != nil {
 		t.Fatalf("list queue dispatch executions: %v", err)
 	}
-	if len(dispatches) != 3 {
-		t.Fatalf("expected three queue dispatch executions, got %#v", dispatches)
+	if len(dispatches) != 8 {
+		t.Fatalf("expected eight queue dispatch executions, got %#v", dispatches)
 	}
 
 	var listOut bytes.Buffer
@@ -14799,7 +14804,7 @@ func TestRuntimeExecuteWorkerPlacementDispatchPlanCommandRunsAllReadyCandidates(
 	if err := listCmd.Execute(); err != nil {
 		t.Fatalf("list worker placement dispatch batches: %v", err)
 	}
-	if !strings.Contains(listOut.String(), "worker-placement-dispatch-batches: total=1") || !strings.Contains(listOut.String(), "dispatched=3") {
+	if !strings.Contains(listOut.String(), "worker-placement-dispatch-batches: total=1") || !strings.Contains(listOut.String(), "dispatched=8") {
 		t.Fatalf("expected placement dispatch batch listing, got %q", listOut.String())
 	}
 }
@@ -14902,7 +14907,7 @@ func TestRuntimeExecuteWorkerPlacementDispatchPlanSkipsTransportTokenForNonHTTPP
 				"worker-placement-dispatch-batch:",
 				"status=completed",
 				"transport=" + transportMode,
-				"dispatched=3",
+				"dispatched=8",
 			} {
 				if !strings.Contains(out.String(), want) {
 					t.Fatalf("expected placement dispatch output to contain %q, got %q", want, out.String())
@@ -14912,8 +14917,8 @@ func TestRuntimeExecuteWorkerPlacementDispatchPlanSkipsTransportTokenForNonHTTPP
 			if err != nil {
 				t.Fatalf("list queue dispatch executions: %v", err)
 			}
-			if len(dispatches) != 3 {
-				t.Fatalf("expected three non-http queue dispatch executions, got %#v", dispatches)
+			if len(dispatches) != 8 {
+				t.Fatalf("expected eight non-http queue dispatch executions, got %#v", dispatches)
 			}
 		})
 	}
@@ -14945,8 +14950,8 @@ func TestRuntimeWorkerOrchestrateCommandWritesMetadataOnlyArtifact(t *testing.T)
 		"status=dry-run",
 		"mode=metadata-only",
 		"transport=metadata-only",
-		"placement_ready=1",
-		"placement_skipped=2",
+		"placement_ready=2",
+		"placement_skipped=6",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("expected worker-orchestrate output to contain %q, got %q", want, output)
@@ -15039,7 +15044,7 @@ func TestRuntimeWorkerOrchestrateCommandExecuteComposesWorkerGates(t *testing.T)
 		"status=completed",
 		"mode=execute",
 		"transport=metadata-only",
-		"placement_ready=3",
+		"placement_ready=8",
 		"claimed=2",
 		"dispatch_ready=2",
 		"dispatched=2",
@@ -15403,7 +15408,7 @@ func TestRuntimeWorkerOrchestrationsCommandListsAndInspectsArtifacts(t *testing.
 	if err := inspectCmd.Execute(); err != nil {
 		t.Fatalf("execute worker-orchestrations inspect: %v", err)
 	}
-	if !strings.Contains(inspectOut.String(), "worker-orchestration: "+orchestration.Path) || !strings.Contains(inspectOut.String(), "placement_ready=1") {
+	if !strings.Contains(inspectOut.String(), "worker-orchestration: "+orchestration.Path) || !strings.Contains(inspectOut.String(), "placement_ready=2") || !strings.Contains(inspectOut.String(), "placement_skipped=6") {
 		t.Fatalf("expected inspected worker orchestration output, got %q", inspectOut.String())
 	}
 }
@@ -18812,8 +18817,8 @@ func createPlacementDispatchBatchPlanForCLI(t *testing.T, root string, transport
 	if err != nil {
 		t.Fatalf("create placement dispatch plan: %v", err)
 	}
-	if plan.ReadyCount != 3 {
-		t.Fatalf("expected three ready placement dispatch candidates, got %#v", plan)
+	if plan.ReadyCount != 8 {
+		t.Fatalf("expected eight ready placement dispatch candidates, got %#v", plan)
 	}
 	return plan
 }

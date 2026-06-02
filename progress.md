@@ -1,6 +1,13 @@
 # Ouroboros Analysis Progress
 
 ## 2026-06-02
+- Continued tool-level compiler integration in isolated worktree `.worktrees/tool-level-compiler-plan`.
+- Added compiler support for expanding built-in pack manifests into concrete tool-level plan nodes with `ToolID`, `AdapterID`, `Operation`, `ParserID`, `TargetKind`, and dependency identity.
+- Updated compile preview/review identity, CLI output, TUI rows, and runtime worker `tool_plan` payloads so multi-tool packs expose concrete tool contracts instead of collapsing to a single pack node.
+- Added worker command environment variables for tool-level identity, including `OURO_TOOL_ID`, `OURO_ADAPTER_ID`, `OURO_OPERATION`, `OURO_PARSER_ID`, `OURO_TARGET_KIND`, `OURO_DEPENDENCY_NAME`, and `OURO_DEPENDENCY_KIND`.
+- Updated worker placement/orchestration/TUI tests for tool-level candidate counts: the default built-in `discover_assets` plan now emits 8 candidates instead of 3 pack-level candidates.
+- Preserved safety close paths for disabled target policy and disabled isolation; current authorization remains required before side-effect gates run under disabled boundaries.
+- Wrote `docs/progress/milestone-22-tool-level-compiler-plans.md`; remaining gaps are registered argv builders, parser dispatch, and real managed payload bundles.
 - Continued toolchain integration work in isolated worktree `.worktrees/tool-level-registry`.
 - Added RED tests requiring built-in appsec tools to declare tool-level contracts with manifest dependency, dependency kind, target kind, adapter id, operation id, and parser id.
 - Upgraded `toolchain.BuiltInAppSecTools()` so all executable Web/API, Infra/Internal, and APK/mobile/artifact dependencies map to registered adapter/parser contracts; `nuclei-templates` remains a rule-bundle support contract for `nuclei`.

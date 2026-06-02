@@ -815,17 +815,7 @@ func TestRunWorkspaceExecutesToolPlanThroughRunner(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run workspace with tool runner: %v", err)
 	}
-	if len(runner.requests) != 3 {
-		t.Fatalf("expected one discover-assets execution per toolchain manifest, got %#v", runner.requests)
-	}
-	for _, request := range runner.requests {
-		if request.RunID != result.RunID || request.WorkspaceRoot != root {
-			t.Fatalf("expected request to carry run/workspace context, got %#v", request)
-		}
-		if request.Node.Action != compiler.ActionDiscoverAssets {
-			t.Fatalf("expected discover-assets plan node, got %#v", request.Node)
-		}
-	}
+	assertBuiltInDiscoverToolRequests(t, runner.requests, result.RunID, root)
 
 	store, err := eventlog.OpenSQLite(filepath.Join(root, "replay", "events.db"))
 	if err != nil {
@@ -840,6 +830,7 @@ func TestRunWorkspaceExecutesToolPlanThroughRunner(t *testing.T) {
 	queued := 0
 	started := 0
 	completed := 0
+	lifecycleByParser := map[string]map[string]int{}
 	for _, event := range events {
 		if event.Type != eventlog.EventTool {
 			continue
@@ -851,6 +842,7 @@ func TestRunWorkspaceExecutesToolPlanThroughRunner(t *testing.T) {
 			Capability       string `json:"capability"`
 			WorkerCapability string `json:"worker_capability"`
 			Action           string `json:"action"`
+			Parser           string `json:"parser"`
 		}
 		if err := json.Unmarshal(event.Payload, &payload); err != nil {
 			t.Fatalf("decode tool payload: %v", err)
@@ -873,9 +865,28 @@ func TestRunWorkspaceExecutesToolPlanThroughRunner(t *testing.T) {
 		if capability == "" || payload.Action != string(compiler.ActionDiscoverAssets) {
 			t.Fatalf("unexpected tool execution payload: %#v", payload)
 		}
+		want := expectedBuiltInDiscoverNodeByParser(t, payload.Parser)
+		if payload.Parser == "" || capability != want.Capability {
+			t.Fatalf("unexpected tool execution parser/capability payload: %#v", payload)
+		}
+		if lifecycleByParser[payload.Parser] == nil {
+			lifecycleByParser[payload.Parser] = map[string]int{}
+		}
+		switch {
+		case payload.WorkerStatus != "":
+			lifecycleByParser[payload.Parser][payload.WorkerStatus]++
+		case payload.ExecutionStatus != "":
+			lifecycleByParser[payload.Parser][payload.ExecutionStatus]++
+		}
 	}
 	if queued != len(runner.requests) || started != len(runner.requests) || completed != len(runner.requests) {
 		t.Fatalf("expected queued/started/completed lifecycle per request, queued=%d started=%d completed=%d executions=%d requests=%d", queued, started, completed, executions, len(runner.requests))
+	}
+	for _, want := range expectedBuiltInDiscoverPlanNodes() {
+		lifecycle := lifecycleByParser[want.ParserID]
+		if lifecycle["queued"] != 1 || lifecycle["started"] != 1 || lifecycle["completed"] != 1 {
+			t.Fatalf("expected one queued/started/completed lifecycle for %s, got %#v", want.ParserID, lifecycle)
+		}
 	}
 }
 
@@ -909,9 +920,7 @@ execution:
 	if runner.maxActive < 2 {
 		t.Fatalf("expected concurrent tool execution, max active=%d requests=%d", runner.maxActive, len(runner.requests))
 	}
-	if len(runner.requests) != 3 {
-		t.Fatalf("expected one request per toolchain manifest, got %#v", runner.requests)
-	}
+	assertBuiltInDiscoverToolRequests(t, runner.requests, result.RunID, root)
 }
 
 func TestRunWorkspaceHonorsPackPolicyMaxConcurrency(t *testing.T) {
@@ -1398,7 +1407,7 @@ execution:
 	if result.ReportPath == "" {
 		t.Fatalf("expected report after skipping disabled pack")
 	}
-	if len(runner.requests) != 2 {
+	if len(runner.requests) != 6 {
 		t.Fatalf("expected disabled web-api-pack to be skipped before runner execution, got %#v", runner.requests)
 	}
 	for _, request := range runner.requests {
@@ -1416,14 +1425,14 @@ execution:
 	if err != nil {
 		t.Fatalf("replay events: %v", err)
 	}
-	var skipped struct {
+	skippedByParser := map[string]struct {
 		Tool            string `json:"tool"`
 		Capability      string `json:"capability"`
 		ExecutionStatus string `json:"execution_status"`
 		ExecutionPolicy string `json:"execution_policy"`
 		PolicyReason    string `json:"policy_reason"`
 		Transcript      string `json:"transcript"`
-	}
+	}{}
 	for _, event := range events {
 		if event.Type != eventlog.EventTool {
 			continue
@@ -1435,6 +1444,7 @@ execution:
 			ExecutionStatus string `json:"execution_status"`
 			ExecutionPolicy string `json:"execution_policy"`
 			PolicyReason    string `json:"policy_reason"`
+			Parser          string `json:"parser"`
 			Transcript      string `json:"transcript"`
 		}
 		if err := json.Unmarshal(event.Payload, &payload); err != nil {
@@ -1444,19 +1454,31 @@ execution:
 			if payload.WorkerStatus != "" {
 				t.Fatalf("disabled pack must not emit worker lifecycle events, got %#v", payload)
 			}
-			skipped.Tool = payload.Tool
-			skipped.Capability = payload.Capability
-			skipped.ExecutionStatus = payload.ExecutionStatus
-			skipped.ExecutionPolicy = payload.ExecutionPolicy
-			skipped.PolicyReason = payload.PolicyReason
-			skipped.Transcript = payload.Transcript
+			skippedByParser[payload.Parser] = struct {
+				Tool            string `json:"tool"`
+				Capability      string `json:"capability"`
+				ExecutionStatus string `json:"execution_status"`
+				ExecutionPolicy string `json:"execution_policy"`
+				PolicyReason    string `json:"policy_reason"`
+				Transcript      string `json:"transcript"`
+			}{
+				Tool:            payload.Tool,
+				Capability:      payload.Capability,
+				ExecutionStatus: payload.ExecutionStatus,
+				ExecutionPolicy: payload.ExecutionPolicy,
+				PolicyReason:    payload.PolicyReason,
+				Transcript:      payload.Transcript,
+			}
 		}
 	}
-	if skipped.ExecutionStatus != "skipped" || skipped.ExecutionPolicy != "disabled" {
-		t.Fatalf("expected skipped policy event for disabled pack, got %#v", skipped)
-	}
-	if !strings.Contains(skipped.Transcript, "noisy active scan deferred") || skipped.PolicyReason != "noisy active scan deferred" {
-		t.Fatalf("expected policy reason in skipped event, got %#v", skipped)
+	for _, parser := range []string{"httpx_jsonl", "subfinder_jsonl"} {
+		skipped, ok := skippedByParser[parser]
+		if !ok || skipped.ExecutionStatus != "skipped" || skipped.ExecutionPolicy != "disabled" {
+			t.Fatalf("expected skipped policy event for disabled web parser %s, got %#v", parser, skippedByParser)
+		}
+		if !strings.Contains(skipped.Transcript, "noisy active scan deferred") || skipped.PolicyReason != "noisy active scan deferred" {
+			t.Fatalf("expected policy reason in skipped event for %s, got %#v", parser, skipped)
+		}
 	}
 }
 
@@ -1508,11 +1530,12 @@ execution:
 		Action            string `json:"admission_action"`
 		Capability        string `json:"admission_capability"`
 		Isolation         string `json:"isolation"`
+		Parser            string `json:"parser"`
 	}
 	admissions := map[string]admissionPayload{}
 	admissionIndex := map[string]int{}
-	webSkippedIndex := -1
-	infraQueuedIndex := -1
+	webSkippedIndex := map[string]int{}
+	infraQueuedIndex := map[string]int{}
 	for index, event := range events {
 		if event.Type != eventlog.EventTool {
 			continue
@@ -1530,11 +1553,12 @@ execution:
 			WorkerStatus        string `json:"worker_status"`
 			WorkerCapability    string `json:"worker_capability"`
 			ExecutionStatus     string `json:"execution_status"`
+			Parser              string `json:"parser"`
 		}
 		if err := json.Unmarshal(event.Payload, &payload); err != nil {
 			t.Fatalf("decode tool payload: %v", err)
 		}
-		key := payload.Tool + "/" + payload.AdmissionCapability
+		key := expectedBuiltInDiscoverPlanKey(payload.Tool, payload.Parser)
 		if payload.Kind == "scheduler_admission" {
 			admissions[key] = admissionPayload{
 				Kind:              payload.Kind,
@@ -1545,43 +1569,52 @@ execution:
 				Action:            payload.AdmissionAction,
 				Capability:        payload.AdmissionCapability,
 				Isolation:         payload.Isolation,
+				Parser:            payload.Parser,
 			}
 			admissionIndex[key] = index
 		}
 		if payload.Tool == "web-api-pack" && payload.Capability == "web.discovery" && payload.ExecutionStatus == "skipped" {
-			webSkippedIndex = index
+			webSkippedIndex[payload.Parser] = index
 		}
 		if payload.Tool == "infra-pack" && payload.WorkerCapability == "infra.host_discovery" && payload.WorkerStatus == "queued" {
-			infraQueuedIndex = index
+			infraQueuedIndex[payload.Parser] = index
 		}
 	}
 
-	if len(admissions) != 3 {
+	if len(admissions) != len(expectedBuiltInDiscoverPlanNodes()) {
 		t.Fatalf("expected one scheduler admission event per compiled plan node, got %#v", admissions)
 	}
-	webAdmission := admissions["web-api-pack/web.discovery"]
-	if webAdmission.AdmissionDecision != "skipped" || webAdmission.ExecutionPolicy != "disabled" {
-		t.Fatalf("expected disabled web pack admission decision, got %#v", webAdmission)
-	}
-	if webAdmission.PolicyReason != "noisy active scan deferred" || webAdmission.Action != string(compiler.ActionDiscoverAssets) || webAdmission.Isolation != "process" {
-		t.Fatalf("expected disabled admission metadata, got %#v", webAdmission)
-	}
-	if webSkippedIndex == -1 || admissionIndex["web-api-pack/web.discovery"] >= webSkippedIndex {
-		t.Fatalf("expected web admission before skipped execution event, admission=%d skipped=%d", admissionIndex["web-api-pack/web.discovery"], webSkippedIndex)
-	}
-	infraAdmission := admissions["infra-pack/infra.host_discovery"]
-	if infraAdmission.AdmissionDecision != "admitted" || infraAdmission.ExecutionPolicy != "enabled" {
-		t.Fatalf("expected enabled infra pack admission decision, got %#v", infraAdmission)
-	}
-	if infraAdmission.PolicyReason != "authorized infra discovery" {
-		t.Fatalf("expected infra policy reason in admission, got %#v", infraAdmission)
-	}
-	if infraQueuedIndex == -1 || admissionIndex["infra-pack/infra.host_discovery"] >= infraQueuedIndex {
-		t.Fatalf("expected infra admission before queued worker event, admission=%d queued=%d", admissionIndex["infra-pack/infra.host_discovery"], infraQueuedIndex)
-	}
-	ctfAdmission := admissions["ctf-pack/ctf.challenge_classification"]
-	if ctfAdmission.AdmissionDecision != "admitted" || ctfAdmission.ExecutionPolicy != "default" {
-		t.Fatalf("expected default ctf admission decision, got %#v", ctfAdmission)
+	for _, want := range expectedBuiltInDiscoverPlanNodes() {
+		key := expectedBuiltInDiscoverPlanKey(want.ManifestName, want.ParserID)
+		admission, ok := admissions[key]
+		if !ok {
+			t.Fatalf("missing scheduler admission for %s, got %#v", key, admissions)
+		}
+		if admission.Action != string(compiler.ActionDiscoverAssets) || admission.Capability != want.Capability || admission.Parser != want.ParserID || admission.Isolation != "process" {
+			t.Fatalf("unexpected admission metadata for %s: %#v", key, admission)
+		}
+		switch want.ManifestName {
+		case "web-api-pack":
+			if admission.AdmissionDecision != "skipped" || admission.ExecutionPolicy != "disabled" || admission.PolicyReason != "noisy active scan deferred" {
+				t.Fatalf("expected disabled web pack admission decision for %s, got %#v", key, admission)
+			}
+			skippedIndex, ok := webSkippedIndex[want.ParserID]
+			if !ok || admissionIndex[key] >= skippedIndex {
+				t.Fatalf("expected web admission before skipped execution event for %s, admission=%d skipped=%d", key, admissionIndex[key], skippedIndex)
+			}
+		case "infra-pack":
+			if admission.AdmissionDecision != "admitted" || admission.ExecutionPolicy != "enabled" || admission.PolicyReason != "authorized infra discovery" {
+				t.Fatalf("expected enabled infra pack admission decision for %s, got %#v", key, admission)
+			}
+			queuedIndex, ok := infraQueuedIndex[want.ParserID]
+			if !ok || admissionIndex[key] >= queuedIndex {
+				t.Fatalf("expected infra admission before queued worker event for %s, admission=%d queued=%d", key, admissionIndex[key], queuedIndex)
+			}
+		case "ctf-pack":
+			if admission.AdmissionDecision != "admitted" || admission.ExecutionPolicy != "default" {
+				t.Fatalf("expected default ctf admission decision for %s, got %#v", key, admission)
+			}
+		}
 	}
 }
 
@@ -3033,6 +3066,71 @@ execution:
 		return
 	}
 	t.Fatalf("expected native managed web.discovery execution event, got %#v", events)
+}
+
+func TestRunWorkspaceDoesNotExecuteToolLevelCatalogNodeBeforeAdapterArgvBuilder(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	scope := `version: 1
+scope:
+  target_policy: enforce
+  targets:
+    - kind: url
+      value: https://app.example
+  exclusions: []
+execution:
+  isolation: process
+`
+	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
+		t.Fatalf("write scope: %v", err)
+	}
+	marker := filepath.Join(t.TempDir(), "tool-level-catalog-native-ran")
+	writeManagedBundleFixture(t, root, "httpx", "binary", "1.3.0", "#!/usr/bin/env sh\nprintf 'unexpected-tool-level-native-output target=%s\\n' \"$1\"\ntouch "+marker+"\n")
+	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "httpx", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed httpx bundle: %v", err)
+	}
+
+	result, err := RunWorkspace(ctx, root)
+	if err != nil {
+		t.Fatalf("run workspace: %v", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("tool-level catalog node must not execute native payload before adapter argv builder, marker stat err=%v", err)
+	}
+	store, err := eventlog.OpenSQLite(filepath.Join(root, "replay", "events.db"))
+	if err != nil {
+		t.Fatalf("open event log: %v", err)
+	}
+	defer store.Close()
+	events, err := store.Replay(ctx, result.RunID)
+	if err != nil {
+		t.Fatalf("replay events: %v", err)
+	}
+	for _, event := range events {
+		if event.Type != eventlog.EventTool {
+			continue
+		}
+		var payload struct {
+			Tool            string `json:"tool"`
+			Parser          string `json:"parser"`
+			ExecutionStatus string `json:"execution_status"`
+			Transcript      string `json:"transcript"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatalf("decode tool payload: %v", err)
+		}
+		if payload.Tool != "web-api-pack" || payload.Parser != "httpx_jsonl" || payload.ExecutionStatus == "" {
+			continue
+		}
+		if payload.ExecutionStatus != "completed" || !strings.Contains(payload.Transcript, "offline tool execution boundary") {
+			t.Fatalf("expected httpx tool-level node to stay offline, got %#v", payload)
+		}
+		return
+	}
+	t.Fatalf("expected httpx tool-level execution event, got %#v", events)
 }
 
 func TestRunWorkspaceNativeManagedBundleRejectsExcludedScopeBeforeExecution(t *testing.T) {
@@ -5648,6 +5746,172 @@ func waitForToolWaitingReason(t *testing.T, events <-chan eventlog.Event, reason
 			}
 		case <-timeout:
 			t.Fatalf("timed out waiting for worker wait_reason=%s", reason)
+		}
+	}
+}
+
+type expectedBuiltInDiscoverPlanNode struct {
+	ManifestName   string
+	Capability     string
+	ToolID         string
+	AdapterID      string
+	Operation      string
+	ParserID       string
+	TargetKind     string
+	DependencyName string
+	DependencyKind string
+}
+
+func expectedBuiltInDiscoverPlanNodes() []expectedBuiltInDiscoverPlanNode {
+	return []expectedBuiltInDiscoverPlanNode{
+		{
+			ManifestName:   "web-api-pack",
+			Capability:     "web.discovery",
+			ToolID:         "httpx",
+			AdapterID:      "managed_binary",
+			Operation:      "http_probe",
+			ParserID:       "httpx_jsonl",
+			TargetKind:     "url",
+			DependencyName: "httpx",
+			DependencyKind: "binary",
+		},
+		{
+			ManifestName:   "web-api-pack",
+			Capability:     "web.discovery",
+			ToolID:         "subfinder",
+			AdapterID:      "managed_binary",
+			Operation:      "subdomain_discovery",
+			ParserID:       "subfinder_jsonl",
+			TargetKind:     "domain",
+			DependencyName: "subfinder",
+			DependencyKind: "binary",
+		},
+		{
+			ManifestName:   "infra-pack",
+			Capability:     "infra.host_discovery",
+			ToolID:         "amass",
+			AdapterID:      "managed_binary",
+			Operation:      "subdomain_discovery",
+			ParserID:       "amass_json",
+			TargetKind:     "domain",
+			DependencyName: "amass",
+			DependencyKind: "binary",
+		},
+		{
+			ManifestName:   "infra-pack",
+			Capability:     "infra.host_discovery",
+			ToolID:         "dnsrecon",
+			AdapterID:      "managed_binary",
+			Operation:      "dns_probe",
+			ParserID:       "dnsrecon_json",
+			TargetKind:     "domain",
+			DependencyName: "dnsrecon",
+			DependencyKind: "binary",
+		},
+		{
+			ManifestName:   "infra-pack",
+			Capability:     "infra.host_discovery",
+			ToolID:         "dnsx",
+			AdapterID:      "managed_binary",
+			Operation:      "dns_probe",
+			ParserID:       "dnsx_jsonl",
+			TargetKind:     "domain",
+			DependencyName: "dnsx",
+			DependencyKind: "binary",
+		},
+		{
+			ManifestName:   "infra-pack",
+			Capability:     "infra.host_discovery",
+			ToolID:         "naabu",
+			AdapterID:      "managed_binary",
+			Operation:      "port_scan",
+			ParserID:       "naabu_jsonl",
+			TargetKind:     "host",
+			DependencyName: "naabu",
+			DependencyKind: "binary",
+		},
+		{
+			ManifestName:   "infra-pack",
+			Capability:     "infra.host_discovery",
+			ToolID:         "nmap",
+			AdapterID:      "managed_binary",
+			Operation:      "service_fingerprint",
+			ParserID:       "nmap_xml",
+			TargetKind:     "host",
+			DependencyName: "nmap",
+			DependencyKind: "binary",
+		},
+		{
+			ManifestName: "ctf-pack",
+			Capability:   "ctf.challenge_classification",
+			ParserID:     "ctf_parser",
+		},
+	}
+}
+
+func expectedBuiltInDiscoverPlanKey(manifestName, parser string) string {
+	return manifestName + "/" + parser
+}
+
+func expectedBuiltInDiscoverNodeByParser(t *testing.T, parser string) expectedBuiltInDiscoverPlanNode {
+	t.Helper()
+	for _, want := range expectedBuiltInDiscoverPlanNodes() {
+		if want.ParserID == parser {
+			return want
+		}
+	}
+	t.Fatalf("unexpected built-in discover parser %q", parser)
+	return expectedBuiltInDiscoverPlanNode{}
+}
+
+func assertBuiltInDiscoverToolRequests(t *testing.T, requests []ToolExecutionRequest, runID string, root string) {
+	t.Helper()
+	expected := expectedBuiltInDiscoverPlanNodes()
+	if len(requests) != len(expected) {
+		t.Fatalf("expected one request per built-in discover tool node, got %#v", requests)
+	}
+
+	seen := map[string]bool{}
+	for _, request := range requests {
+		if request.RunID != runID || request.WorkspaceRoot != root {
+			t.Fatalf("expected request to carry run/workspace context, got %#v", request)
+		}
+		if request.Node.ID == "" || request.Node.Action != compiler.ActionDiscoverAssets {
+			t.Fatalf("expected discover-assets plan node, got %#v", request.Node)
+		}
+		want := expectedBuiltInDiscoverNodeByParser(t, request.Node.ParserID)
+		key := expectedBuiltInDiscoverPlanKey(request.Node.ManifestName, request.Node.ParserID)
+		if seen[key] {
+			t.Fatalf("duplicate built-in discover request for %s: %#v", key, request.Node)
+		}
+		seen[key] = true
+
+		if request.Node.ManifestName != want.ManifestName ||
+			request.Node.Capability != want.Capability ||
+			request.Node.ToolID != want.ToolID ||
+			request.Node.AdapterID != want.AdapterID ||
+			request.Node.Operation != want.Operation ||
+			request.Node.ParserID != want.ParserID ||
+			request.Node.Parser != want.ParserID ||
+			request.Node.TargetKind != want.TargetKind ||
+			request.Node.DependencyName != want.DependencyName ||
+			request.Node.DependencyKind != want.DependencyKind ||
+			request.Node.Runner != "native" {
+			t.Fatalf("unexpected built-in discover request for %s: got %#v want %#v", key, request.Node, want)
+		}
+		if want.DependencyName == "" {
+			continue
+		}
+		if len(request.Node.Dependencies) != 1 ||
+			request.Node.Dependencies[0].Name != want.DependencyName ||
+			request.Node.Dependencies[0].Kind != want.DependencyKind {
+			t.Fatalf("expected request dependency %s/%s, got %#v", want.DependencyName, want.DependencyKind, request.Node.Dependencies)
+		}
+	}
+	for _, want := range expected {
+		key := expectedBuiltInDiscoverPlanKey(want.ManifestName, want.ParserID)
+		if !seen[key] {
+			t.Fatalf("missing built-in discover request for %s, got %#v", key, requests)
 		}
 	}
 }

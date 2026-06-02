@@ -1641,6 +1641,9 @@ func nativeManagedRunCommand(request ToolExecutionRequest) ([]string, bool, erro
 	if executionIsolationMode(request.IsolationMode) == "container" {
 		return nil, false, nil
 	}
+	if catalogToolLevelNodeRequiresAdapterArgvBuilder(request.Node) {
+		return nil, false, nil
+	}
 	candidates := nativeManagedToolCandidates(request)
 	for _, candidate := range candidates {
 		if _, ok, err := workspaceToolchainExecutable(request.WorkspaceRoot, candidate); err != nil {
@@ -1654,6 +1657,11 @@ func nativeManagedRunCommand(request ToolExecutionRequest) ([]string, bool, erro
 		}
 	}
 	return nil, false, nil
+}
+
+func catalogToolLevelNodeRequiresAdapterArgvBuilder(node compiler.PlanNode) bool {
+	return strings.TrimSpace(node.ToolID) != "" &&
+		(strings.TrimSpace(node.AdapterID) != "" || strings.TrimSpace(node.Operation) != "")
 }
 
 func nativeManagedToolCandidates(request ToolExecutionRequest) []string {

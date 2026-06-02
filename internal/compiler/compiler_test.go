@@ -1,6 +1,7 @@
 package compiler
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -89,6 +90,83 @@ func TestCompileChoosesCapabilitiesNotHardCodedToolNames(t *testing.T) {
 	}
 	if len(node.ExpectedEvidence) == 0 || node.ExpectedEvidence[0] != evidence.NodeSurface {
 		t.Fatalf("expected surface evidence output, got %#v", node.ExpectedEvidence)
+	}
+}
+
+func TestCompileEmitsToolLevelPlanNodesFromBuiltInCatalog(t *testing.T) {
+	manifests, err := toolchain.LoadManifests(filepath.Join("..", "..", "toolchains"))
+	if err != nil {
+		t.Fatalf("load root manifests: %v", err)
+	}
+
+	plan, err := NewCompiler().Compile(CompileRequest{
+		Action:    ActionDiscoverAssets,
+		Manifests: manifests,
+	})
+	if err != nil {
+		t.Fatalf("compile plan: %v", err)
+	}
+	byTool := planNodesByToolID(plan.Nodes)
+
+	for _, expected := range []struct {
+		toolID         string
+		manifestName   string
+		capability     string
+		operation      string
+		parser         string
+		targetKind     string
+		dependencyName string
+		dependencyKind string
+	}{
+		{toolID: "httpx", manifestName: "web-api-pack", capability: "web.discovery", operation: "http_probe", parser: "httpx_jsonl", targetKind: "url", dependencyName: "httpx", dependencyKind: "binary"},
+		{toolID: "subfinder", manifestName: "web-api-pack", capability: "web.discovery", operation: "subdomain_discovery", parser: "subfinder_jsonl", targetKind: "domain", dependencyName: "subfinder", dependencyKind: "binary"},
+		{toolID: "nmap", manifestName: "infra-pack", capability: "infra.host_discovery", operation: "service_fingerprint", parser: "nmap_xml", targetKind: "host", dependencyName: "nmap", dependencyKind: "binary"},
+		{toolID: "naabu", manifestName: "infra-pack", capability: "infra.host_discovery", operation: "port_scan", parser: "naabu_jsonl", targetKind: "host", dependencyName: "naabu", dependencyKind: "binary"},
+	} {
+		node, ok := byTool[expected.toolID]
+		if !ok {
+			t.Fatalf("expected tool-level node for %s, got %#v", expected.toolID, plan.Nodes)
+		}
+		if node.ManifestName != expected.manifestName || node.Capability != expected.capability {
+			t.Fatalf("unexpected manifest/capability for %s: %#v", expected.toolID, node)
+		}
+		if node.AdapterID != "managed_binary" || node.Operation != expected.operation {
+			t.Fatalf("unexpected adapter operation for %s: %#v", expected.toolID, node)
+		}
+		if node.Parser != expected.parser || node.ParserID != expected.parser {
+			t.Fatalf("unexpected parser contract for %s: %#v", expected.toolID, node)
+		}
+		if node.TargetKind != expected.targetKind || node.DependencyName != expected.dependencyName || node.DependencyKind != expected.dependencyKind {
+			t.Fatalf("unexpected target/dependency contract for %s: %#v", expected.toolID, node)
+		}
+		if len(node.Dependencies) != 1 || node.Dependencies[0].Name != expected.dependencyName {
+			t.Fatalf("expected dependency subset for %s, got %#v", expected.toolID, node.Dependencies)
+		}
+	}
+}
+
+func TestCompileIncludesRuleBundleDependencyForToolLevelTemplateScan(t *testing.T) {
+	manifests, err := toolchain.LoadManifests(filepath.Join("..", "..", "toolchains"))
+	if err != nil {
+		t.Fatalf("load root manifests: %v", err)
+	}
+
+	plan, err := NewCompiler().Compile(CompileRequest{
+		Action:    ActionGenerateCandidates,
+		Manifests: manifests,
+	})
+	if err != nil {
+		t.Fatalf("compile plan: %v", err)
+	}
+	nuclei, ok := planNodesByToolID(plan.Nodes)["nuclei"]
+	if !ok {
+		t.Fatalf("expected nuclei tool-level node, got %#v", plan.Nodes)
+	}
+	if nuclei.Operation != "template_scan" || nuclei.ParserID != "nuclei_jsonl" {
+		t.Fatalf("expected nuclei template scan contract, got %#v", nuclei)
+	}
+	if !dependencyNamesEqual(nuclei.Dependencies, []string{"nuclei", "nuclei-templates"}) {
+		t.Fatalf("expected nuclei binary plus templates rule bundle, got %#v", nuclei.Dependencies)
 	}
 }
 
@@ -239,4 +317,31 @@ func containsString(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func planNodesByToolID(nodes []PlanNode) map[string]PlanNode {
+	byTool := map[string]PlanNode{}
+	for _, node := range nodes {
+		if strings.TrimSpace(node.ToolID) == "" {
+			continue
+		}
+		byTool[node.ToolID] = node
+	}
+	return byTool
+}
+
+func dependencyNamesEqual(dependencies []toolchain.Dependency, want []string) bool {
+	if len(dependencies) != len(want) {
+		return false
+	}
+	byName := map[string]bool{}
+	for _, dependency := range dependencies {
+		byName[dependency.Name] = true
+	}
+	for _, name := range want {
+		if !byName[name] {
+			return false
+		}
+	}
+	return true
 }
