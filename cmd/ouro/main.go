@@ -5349,6 +5349,8 @@ func newToolchainCommand(out io.Writer) *cobra.Command {
 	cmd.AddCommand(newToolchainManagedBundlesCommand(out))
 	cmd.AddCommand(newToolchainManagedInstallPlanCommand(out))
 	cmd.AddCommand(newToolchainManagedInstallCommand(out))
+	cmd.AddCommand(newToolchainReleaseManagedInstallPlanCommand(out))
+	cmd.AddCommand(newToolchainReleaseManagedInstallCommand(out))
 	cmd.AddCommand(newToolchainCompilePreviewCommand(out))
 	cmd.AddCommand(newToolchainCompilePreviewReviewCommand(out))
 	cmd.AddCommand(newToolchainCompilePreviewReviewAnnotateCommand(out))
@@ -10578,6 +10580,39 @@ func newToolchainManagedInstallCommand(out io.Writer) *cobra.Command {
 	return cmd
 }
 
+func newToolchainReleaseManagedInstallPlanCommand(out io.Writer) *cobra.Command {
+	return &cobra.Command{
+		Use:   "release-managed-install-plan <workspace> <release-root> <pack> <dependency>",
+		Short: "Print a metadata-only release managed bundle install plan",
+		Args:  cobra.ExactArgs(4),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			plan, err := app.CreateReleaseManagedToolBundleInstallPlan(args[0], args[1], args[2], args[3])
+			if err != nil {
+				return err
+			}
+			return printReleaseManagedToolBundleInstallPlan(out, plan)
+		},
+	}
+}
+
+func newToolchainReleaseManagedInstallCommand(out io.Writer) *cobra.Command {
+	var execute bool
+	cmd := &cobra.Command{
+		Use:   "release-managed-install <workspace> <release-root> <pack> <dependency>",
+		Short: "Copy a release managed tool bundle into a workspace and link it",
+		Args:  cobra.ExactArgs(4),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := app.ExecuteReleaseManagedToolBundleInstall(args[0], args[1], args[2], args[3], app.ManagedToolBundleInstallOptions{Execute: execute})
+			if err != nil {
+				return err
+			}
+			return printReleaseManagedToolBundleInstallResult(out, result)
+		},
+	}
+	cmd.Flags().BoolVar(&execute, "execute", false, "copy the release bundle and create the workspace link")
+	return cmd
+}
+
 func printManagedToolBundle(out io.Writer, bundle app.ManagedToolBundle) error {
 	_, err := fmt.Fprintf(
 		out,
@@ -10609,6 +10644,50 @@ func printManagedToolBundleInstallPlan(out io.Writer, plan app.ManagedToolBundle
 		plan.SHA256,
 		plan.PayloadPath,
 		plan.InstallPath,
+	)
+	return err
+}
+
+func printReleaseManagedToolBundleInstallPlan(out io.Writer, plan app.ReleaseManagedToolBundleInstallPlan) error {
+	_, err := fmt.Fprintf(
+		out,
+		"release-managed-install-plan: status=%s mode=%s action=%s pack=%s dependency=%s kind=%s version=%s source=%s sha256=%s release_bundle=%s release_payload=%s workspace_bundle=%s workspace_payload=%s install=%s\n",
+		plan.Status,
+		plan.Mode,
+		plan.Action,
+		plan.Pack,
+		plan.Dependency,
+		plan.Kind,
+		plan.Version,
+		plan.Source,
+		plan.SHA256,
+		plan.ReleaseBundleDir,
+		plan.ReleasePayloadPath,
+		plan.WorkspaceBundleDir,
+		plan.WorkspacePayloadPath,
+		plan.InstallPath,
+	)
+	return err
+}
+
+func printReleaseManagedToolBundleInstallResult(out io.Writer, result app.ReleaseManagedToolBundleInstallResult) error {
+	_, err := fmt.Fprintf(
+		out,
+		"release-managed-install: status=%s mode=%s action=%s pack=%s dependency=%s kind=%s version=%s source=%s sha256=%s release_bundle=%s release_payload=%s workspace_bundle=%s workspace_payload=%s install=%s\n",
+		result.Status,
+		result.Mode,
+		result.Action,
+		result.Pack,
+		result.Dependency,
+		result.Kind,
+		result.Version,
+		result.Source,
+		result.SHA256,
+		result.ReleaseBundleDir,
+		result.ReleasePayloadPath,
+		result.WorkspaceBundleDir,
+		result.WorkspacePayloadPath,
+		result.InstallPath,
 	)
 	return err
 }

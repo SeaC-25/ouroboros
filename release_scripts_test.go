@@ -3,6 +3,8 @@ package ouroboros_test
 import (
 	"archive/tar"
 	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +18,8 @@ import (
 func TestReleaseScriptCreatesArchiveAndChecksums(t *testing.T) {
 	dist := t.TempDir()
 	version := "0.1.0-test"
+	releaseTestBundle := "ouro-release-test-tool"
+	writeReleaseScriptManagedBundleFixture(t, releaseTestBundle)
 	env := append(os.Environ(),
 		"GOPROXY=https://goproxy.cn,direct",
 		"DIST_DIR="+dist,
@@ -49,6 +53,8 @@ func TestReleaseScriptCreatesArchiveAndChecksums(t *testing.T) {
 		"ouro_" + version + "_" + runtime.GOOS + "_" + runtime.GOARCH + "/ouro",
 		"ouro_" + version + "_" + runtime.GOOS + "_" + runtime.GOARCH + "/README.md",
 		"ouro_" + version + "_" + runtime.GOOS + "_" + runtime.GOARCH + "/install.sh",
+		"ouro_" + version + "_" + runtime.GOOS + "_" + runtime.GOARCH + "/toolchains/managed-bundles/" + releaseTestBundle + "/bundle.yaml",
+		"ouro_" + version + "_" + runtime.GOOS + "_" + runtime.GOARCH + "/toolchains/managed-bundles/" + releaseTestBundle + "/payload/" + releaseTestBundle,
 	} {
 		if !members[want] {
 			t.Fatalf("expected archive member %q in %#v", want, members)
@@ -66,8 +72,25 @@ func TestInstallScriptInstallsFromLocalArchiveWithoutNetwork(t *testing.T) {
 	if err := os.WriteFile(binary, []byte("#!/usr/bin/env sh\nprintf 'fake ouro\\n'\n"), 0o755); err != nil {
 		t.Fatalf("write fake binary: %v", err)
 	}
+	bundleDir := filepath.Join(payloadDir, "toolchains", "managed-bundles", "httpx")
+	if err := os.MkdirAll(filepath.Join(bundleDir, "payload"), 0o755); err != nil {
+		t.Fatalf("mkdir fake bundle payload: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(bundleDir, "bundle.yaml"), []byte("name: httpx\nkind: binary\nversion: \"1.3.0\"\nsource: test\npayload: payload/httpx\nsha256: 0000000000000000000000000000000000000000000000000000000000000000\n"), 0o644); err != nil {
+		t.Fatalf("write fake bundle manifest: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(bundleDir, "payload", "httpx"), []byte("#!/usr/bin/env sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write fake bundle payload: %v", err)
+	}
 	archivePath := filepath.Join(releaseRoot, "ouro_0.1.0-test_linux_amd64.tar.gz")
-	createTarGz(t, archivePath, releaseRoot, filepath.Base(payloadDir)+"/ouro")
+	createTarGz(
+		t,
+		archivePath,
+		releaseRoot,
+		filepath.Base(payloadDir)+"/ouro",
+		filepath.Base(payloadDir)+"/toolchains/managed-bundles/httpx/bundle.yaml",
+		filepath.Base(payloadDir)+"/toolchains/managed-bundles/httpx/payload/httpx",
+	)
 
 	prefix := filepath.Join(t.TempDir(), "prefix")
 	cmd := exec.Command("sh", "./scripts/install.sh", archivePath)
@@ -83,6 +106,10 @@ func TestInstallScriptInstallsFromLocalArchiveWithoutNetwork(t *testing.T) {
 	}
 	if info.Mode()&0o111 == 0 {
 		t.Fatalf("expected installed binary to be executable, mode=%s", info.Mode())
+	}
+	installedBundle := filepath.Join(prefix, "share", "ouroboros", "toolchains", "managed-bundles", "httpx", "bundle.yaml")
+	if _, err := os.Stat(installedBundle); err != nil {
+		t.Fatalf("expected installed managed bundle metadata %s: %v\noutput:\n%s", installedBundle, err, output)
 	}
 }
 
@@ -261,5 +288,31 @@ func createTarGz(t *testing.T, archivePath string, root string, names ...string)
 		if _, err := writer.Write(content); err != nil {
 			t.Fatalf("write tar member: %v", err)
 		}
+	}
+}
+
+func writeReleaseScriptManagedBundleFixture(t *testing.T, name string) {
+	t.Helper()
+	bundleDir := filepath.Join("toolchains", "managed-bundles", name)
+	t.Cleanup(func() {
+		_ = os.RemoveAll(bundleDir)
+	})
+	payloadBody := []byte("#!/usr/bin/env sh\nexit 0\n")
+	if err := os.MkdirAll(filepath.Join(bundleDir, "payload"), 0o755); err != nil {
+		t.Fatalf("create release script bundle payload dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(bundleDir, "payload", name), payloadBody, 0o755); err != nil {
+		t.Fatalf("write release script bundle payload: %v", err)
+	}
+	digest := sha256.Sum256(payloadBody)
+	manifest := `name: ` + name + `
+kind: binary
+version: "1.3.0"
+source: projectdiscovery/` + name + `
+payload: payload/` + name + `
+sha256: ` + hex.EncodeToString(digest[:]) + `
+`
+	if err := os.WriteFile(filepath.Join(bundleDir, "bundle.yaml"), []byte(manifest), 0o644); err != nil {
+		t.Fatalf("write release script bundle manifest: %v", err)
 	}
 }

@@ -38,6 +38,10 @@ cd "$ROOT"
 GOPROXY="$GOPROXY" GOOS="$GOOS" GOARCH="$GOARCH" go build -o "$RELEASE_DIR/$BINARY_NAME" ./cmd/ouro
 cp "$ROOT/scripts/install.sh" "$RELEASE_DIR/install.sh"
 chmod 0755 "$RELEASE_DIR/install.sh"
+if [ -d "$ROOT/toolchains/managed-bundles" ]; then
+	mkdir -p "$RELEASE_DIR/toolchains"
+	cp -R "$ROOT/toolchains/managed-bundles" "$RELEASE_DIR/toolchains/managed-bundles"
+fi
 cat > "$RELEASE_DIR/README.md" <<EOF
 # Ouroboros $VERSION
 
@@ -50,6 +54,18 @@ PREFIX="\${HOME}/.local" sh install.sh .
 \`\`\`
 
 No network access is required by the installer.
+
+If this archive includes managed tool bundles, the installer copies them to:
+
+\`\`\`text
+\${PREFIX}/share/ouroboros/toolchains/managed-bundles
+\`\`\`
+
+Import a bundled tool into a workspace explicitly:
+
+\`\`\`sh
+ouro toolchain release-managed-install <workspace> "\${PREFIX}/share/ouroboros" web-api-pack httpx --execute
+\`\`\`
 EOF
 
 (cd "$DIST_DIR" && tar -czf "$PACKAGE.tar.gz" "$PACKAGE")

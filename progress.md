@@ -1,6 +1,14 @@
 # Ouroboros Analysis Progress
 
 ## 2026-06-02
+- Continued release-level managed bundle distribution in isolated worktree `.worktrees/release-tool-bundles`.
+- Added RED app tests for release managed bundle install planning, explicit `--execute` copy-and-link execution, no payload execution, rule-bundle directory digest enforcement, and symlink payload rejection.
+- Added RED CLI tests for `ouro toolchain release-managed-install-plan` and `release-managed-install --execute`.
+- Implemented release bundle layout support at `<release-root>/toolchains/managed-bundles/<tool>/bundle.yaml` plus `payload/...`.
+- Added release managed bundle app APIs that validate the selected pack dependency, verify release bundle metadata and payload digest, copy the selected bundle into `workspace/toolchain/managed-bundles/<tool>/`, and then create a workspace-local binary/rules symlink.
+- Tightened managed bundle integrity so `rule_bundle` payloads also require SHA-256 and are hashed as sorted relative paths plus file contents.
+- Updated `scripts/release.sh` to include `toolchains/managed-bundles` when present, and `scripts/install.sh` to install those release bundles under `${PREFIX}/share/ouroboros/toolchains/managed-bundles` without writing workspaces.
+- Updated README/development docs and wrote `docs/progress/milestone-17-release-managed-tool-bundles.md`; remaining gaps are real release payload build assets, native runner lookup through workspace toolchain paths, authored native adapter contracts, and high-value parser bindings.
 - Continued the managed installer work in isolated worktree `.worktrees/managed-tool-bundles`.
 - Added RED app tests for workspace-local managed bundle discovery, metadata-only install planning, explicit `--execute` link creation, no payload execution, and outside-payload rejection.
 - Added RED CLI tests for `ouro toolchain managed-bundles`, `managed-install-plan`, and `managed-install --execute`.

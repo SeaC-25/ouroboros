@@ -274,7 +274,18 @@ payload: payload/httpx
 sha256: <hex sha256 of payload/httpx>
 ```
 
-`ouro toolchain managed-bundles <workspace> [name]` lists or inspects those local bundle manifests. `ouro toolchain managed-install-plan <workspace> <pack> <dependency>` validates that the dependency exists in the selected pack manifest, resolves the matching local bundle, verifies the payload digest, and prints a metadata-only `action=link` plan. `ouro toolchain managed-install <workspace> <pack> <dependency> --execute` creates only a workspace-local link such as `workspace/toolchain/bin/httpx -> workspace/toolchain/managed-bundles/httpx/payload/httpx`; it does not run the payload, invoke package managers, fetch remotes, contact targets, dispatch workers, or execute health probes. Payload paths must stay under the bundle directory, payloads must not be symlinks, and binary payloads require a valid SHA-256 digest. This is the local bundle substrate for future release-packaged tools; actual release bundles for every tool are still a separate distribution task.
+`rule_bundle` payloads use the same manifest shape with `kind: rule_bundle`, `payload: payload`, and a SHA-256 digest over sorted relative file paths and file contents.
+
+`ouro toolchain managed-bundles <workspace> [name]` lists or inspects those local bundle manifests. `ouro toolchain managed-install-plan <workspace> <pack> <dependency>` validates that the dependency exists in the selected pack manifest, resolves the matching local bundle, verifies the payload digest, and prints a metadata-only `action=link` plan. `ouro toolchain managed-install <workspace> <pack> <dependency> --execute` creates only a workspace-local link such as `workspace/toolchain/bin/httpx -> workspace/toolchain/managed-bundles/httpx/payload/httpx`; rule bundles link into `workspace/toolchain/rules/<name>`. It does not run the payload, invoke package managers, fetch remotes, contact targets, dispatch workers, or execute health probes. Payload paths must stay under the bundle directory, payloads must not be symlinks, and binary plus rule-bundle payloads require a valid SHA-256 digest.
+
+Release archives can carry the same bundle shape under:
+
+```text
+<release-root>/toolchains/managed-bundles/<tool>/bundle.yaml
+<release-root>/toolchains/managed-bundles/<tool>/payload/...
+```
+
+`scripts/release.sh` copies `toolchains/managed-bundles` into the archive when that directory exists. `scripts/install.sh` copies bundled metadata and payloads to `${PREFIX}/share/ouroboros/toolchains/managed-bundles` without writing any workspace. `ouro toolchain release-managed-install-plan <workspace> <release-root> <pack> <dependency>` validates a release bundle and prints a metadata-only `action=copy-and-link` plan. `ouro toolchain release-managed-install <workspace> <release-root> <pack> <dependency> --execute` copies the selected release bundle into `workspace/toolchain/managed-bundles/<tool>/` and then creates the same workspace-local link. It does not run the payload or link the workspace directly to the release/install directory, so workspace state survives Ouroboros upgrades or uninstall operations.
 
 `ouro toolchain install-plan <workspace>` prints only the non-executing remediation plan rows. It is intended for operators and future TUI dispatchers that need to inspect or copy the proposed command arrays without running them.
 

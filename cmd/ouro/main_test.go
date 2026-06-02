@@ -8422,6 +8422,65 @@ func TestToolchainManagedBundleCommandsListPlanAndInstall(t *testing.T) {
 	}
 }
 
+func TestToolchainReleaseManagedInstallPlanAndInstallCommands(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	releaseRoot := filepath.Join(t.TempDir(), "release")
+	marker := filepath.Join(t.TempDir(), "release-managed-payload-ran")
+	releasePayload := writeReleaseManagedBundleFixtureForCLITest(t, releaseRoot, "httpx", "#!/bin/sh\ntouch "+marker+"\n")
+	workspacePayload := filepath.Join(root, "toolchain", "managed-bundles", "httpx", "payload", "httpx")
+	installPath := filepath.Join(root, "toolchain", "bin", "httpx")
+
+	var planOut bytes.Buffer
+	planCmd := newRootCommand(&planOut, new(bytes.Buffer))
+	planCmd.SetArgs([]string{"toolchain", "release-managed-install-plan", root, releaseRoot, "web-api-pack", "httpx"})
+	if err := planCmd.Execute(); err != nil {
+		t.Fatalf("execute release-managed-install-plan: %v", err)
+	}
+	for _, want := range []string{"release-managed-install-plan: status=ready", "action=copy-and-link", "pack=web-api-pack", "dependency=httpx", "release_payload=" + releasePayload, "workspace_payload=" + workspacePayload} {
+		if !strings.Contains(planOut.String(), want) {
+			t.Fatalf("expected release-managed-install-plan output to contain %q, got %q", want, planOut.String())
+		}
+	}
+	if _, err := os.Lstat(workspacePayload); !os.IsNotExist(err) {
+		t.Fatalf("release-managed-install-plan must not copy payload, stat err=%v", err)
+	}
+
+	var dryRunOut bytes.Buffer
+	dryRunCmd := newRootCommand(&dryRunOut, new(bytes.Buffer))
+	dryRunCmd.SetArgs([]string{"toolchain", "release-managed-install", root, releaseRoot, "web-api-pack", "httpx"})
+	err := dryRunCmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "--execute") {
+		t.Fatalf("expected release-managed-install to require --execute, got %v output=%q", err, dryRunOut.String())
+	}
+	if _, err := os.Lstat(workspacePayload); !os.IsNotExist(err) {
+		t.Fatalf("release-managed-install without execute must not copy payload, stat err=%v", err)
+	}
+
+	var installOut bytes.Buffer
+	installCmd := newRootCommand(&installOut, new(bytes.Buffer))
+	installCmd.SetArgs([]string{"toolchain", "release-managed-install", root, releaseRoot, "web-api-pack", "httpx", "--execute"})
+	if err := installCmd.Execute(); err != nil {
+		t.Fatalf("execute release-managed-install: %v", err)
+	}
+	for _, want := range []string{"release-managed-install: status=installed", "mode=workspace-copy-link", "pack=web-api-pack", "dependency=httpx", "workspace_payload=" + workspacePayload, "install=" + installPath} {
+		if !strings.Contains(installOut.String(), want) {
+			t.Fatalf("expected release-managed-install output to contain %q, got %q", want, installOut.String())
+		}
+	}
+	if _, err := os.Stat(workspacePayload); err != nil {
+		t.Fatalf("expected workspace payload copy: %v", err)
+	}
+	if _, err := os.Lstat(installPath); err != nil {
+		t.Fatalf("expected release managed install link: %v", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("release-managed-install must not execute payload, marker stat err=%v", err)
+	}
+}
+
 func writeManagedBundleFixtureForCLITest(t *testing.T, root string, name string, payloadBody string) string {
 	t.Helper()
 	bundleDir := filepath.Join(root, "toolchain", "managed-bundles", name)
@@ -8443,6 +8502,31 @@ sha256: ` + hex.EncodeToString(digest[:]) + `
 `
 	if err := os.WriteFile(filepath.Join(bundleDir, "bundle.yaml"), []byte(manifest), 0o644); err != nil {
 		t.Fatalf("write bundle manifest: %v", err)
+	}
+	return payloadPath
+}
+
+func writeReleaseManagedBundleFixtureForCLITest(t *testing.T, releaseRoot string, name string, payloadBody string) string {
+	t.Helper()
+	bundleDir := filepath.Join(releaseRoot, "toolchains", "managed-bundles", name)
+	payloadDir := filepath.Join(bundleDir, "payload")
+	if err := os.MkdirAll(payloadDir, 0o755); err != nil {
+		t.Fatalf("create release bundle payload dir: %v", err)
+	}
+	payloadPath := filepath.Join(payloadDir, name)
+	if err := os.WriteFile(payloadPath, []byte(payloadBody), 0o755); err != nil {
+		t.Fatalf("write release bundle payload: %v", err)
+	}
+	digest := sha256.Sum256([]byte(payloadBody))
+	manifest := `name: ` + name + `
+kind: binary
+version: "1.3.0"
+source: projectdiscovery/` + name + `
+payload: payload/` + name + `
+sha256: ` + hex.EncodeToString(digest[:]) + `
+`
+	if err := os.WriteFile(filepath.Join(bundleDir, "bundle.yaml"), []byte(manifest), 0o644); err != nil {
+		t.Fatalf("write release bundle manifest: %v", err)
 	}
 	return payloadPath
 }

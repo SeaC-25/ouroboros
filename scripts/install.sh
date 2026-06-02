@@ -13,6 +13,7 @@ fi
 SOURCE="$1"
 PREFIX="${PREFIX:-"$HOME/.local"}"
 BIN_DIR="${BIN_DIR:-"$PREFIX/bin"}"
+SHARE_DIR="${SHARE_DIR:-"$PREFIX/share/ouroboros"}"
 TMP_DIR=""
 
 cleanup() {
@@ -31,6 +32,20 @@ find_binary() {
 		fi
 	done
 	return 1
+}
+
+install_managed_bundles() {
+	release_payload_root="$1"
+	source_bundles="$release_payload_root/toolchains/managed-bundles"
+	target_toolchains="$SHARE_DIR/toolchains"
+	target_bundles="$target_toolchains/managed-bundles"
+	if [ ! -d "$source_bundles" ]; then
+		return 0
+	fi
+	mkdir -p "$target_toolchains"
+	rm -rf "$target_bundles"
+	cp -R "$source_bundles" "$target_bundles"
+	printf 'installed %s\n' "$target_bundles"
 }
 
 case "$SOURCE" in
@@ -68,4 +83,5 @@ fi
 mkdir -p "$BIN_DIR"
 cp "$BINARY" "$BIN_DIR/ouro"
 chmod 0755 "$BIN_DIR/ouro"
+install_managed_bundles "$(dirname "$BINARY")"
 printf 'installed %s\n' "$BIN_DIR/ouro"

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/netip"
 	"net/url"
 	"os"
@@ -91,6 +92,40 @@ type ManagedToolBundleInstallResult struct {
 	SHA256      string `json:"sha256"`
 	PayloadPath string `json:"payload_path"`
 	InstallPath string `json:"install_path"`
+}
+
+type ReleaseManagedToolBundleInstallPlan struct {
+	Status               string `json:"status"`
+	Mode                 string `json:"mode"`
+	Action               string `json:"action"`
+	Pack                 string `json:"pack"`
+	Dependency           string `json:"dependency"`
+	Kind                 string `json:"kind"`
+	Version              string `json:"version"`
+	Source               string `json:"source"`
+	SHA256               string `json:"sha256"`
+	ReleaseBundleDir     string `json:"release_bundle_dir"`
+	ReleasePayloadPath   string `json:"release_payload_path"`
+	WorkspaceBundleDir   string `json:"workspace_bundle_dir"`
+	WorkspacePayloadPath string `json:"workspace_payload_path"`
+	InstallPath          string `json:"install_path"`
+}
+
+type ReleaseManagedToolBundleInstallResult struct {
+	Status               string `json:"status"`
+	Mode                 string `json:"mode"`
+	Action               string `json:"action"`
+	Pack                 string `json:"pack"`
+	Dependency           string `json:"dependency"`
+	Kind                 string `json:"kind"`
+	Version              string `json:"version"`
+	Source               string `json:"source"`
+	SHA256               string `json:"sha256"`
+	ReleaseBundleDir     string `json:"release_bundle_dir"`
+	ReleasePayloadPath   string `json:"release_payload_path"`
+	WorkspaceBundleDir   string `json:"workspace_bundle_dir"`
+	WorkspacePayloadPath string `json:"workspace_payload_path"`
+	InstallPath          string `json:"install_path"`
 }
 
 type ToolCompilePreviewOptions struct {
@@ -2629,6 +2664,92 @@ func ExecuteManagedToolBundleInstall(root, pack, dependency string, options Mana
 	}, nil
 }
 
+func CreateReleaseManagedToolBundleInstallPlan(root, releaseRoot, pack, dependency string) (ReleaseManagedToolBundleInstallPlan, error) {
+	if err := requireAuthoredToolWorkspace(root); err != nil {
+		return ReleaseManagedToolBundleInstallPlan{}, err
+	}
+	declared, err := findManagedInstallDependency(root, pack, dependency)
+	if err != nil {
+		return ReleaseManagedToolBundleInstallPlan{}, err
+	}
+	releaseBundleDir, err := releaseManagedToolBundleDir(releaseRoot, declared.Name)
+	if err != nil {
+		return ReleaseManagedToolBundleInstallPlan{}, err
+	}
+	bundle, err := readManagedToolBundle(root, releaseBundleDir)
+	if err != nil {
+		return ReleaseManagedToolBundleInstallPlan{}, err
+	}
+	if bundle.Kind != dependencyKindForManagedInstall(declared) {
+		return ReleaseManagedToolBundleInstallPlan{}, fmt.Errorf("release managed bundle kind %s does not match dependency kind %s", bundle.Kind, dependencyKindForManagedInstall(declared))
+	}
+	workspaceBundleDir := filepath.Join(root, "toolchain", "managed-bundles", bundle.Name)
+	workspacePayloadPath, err := releaseWorkspacePayloadPath(bundle.BundleDir, bundle.PayloadPath, workspaceBundleDir)
+	if err != nil {
+		return ReleaseManagedToolBundleInstallPlan{}, err
+	}
+	return ReleaseManagedToolBundleInstallPlan{
+		Status:               "ready",
+		Mode:                 "metadata-only",
+		Action:               "copy-and-link",
+		Pack:                 strings.TrimSpace(pack),
+		Dependency:           strings.TrimSpace(dependency),
+		Kind:                 bundle.Kind,
+		Version:              bundle.Version,
+		Source:               bundle.Source,
+		SHA256:               bundle.SHA256,
+		ReleaseBundleDir:     bundle.BundleDir,
+		ReleasePayloadPath:   bundle.PayloadPath,
+		WorkspaceBundleDir:   workspaceBundleDir,
+		WorkspacePayloadPath: workspacePayloadPath,
+		InstallPath:          bundle.InstallPath,
+	}, nil
+}
+
+func ExecuteReleaseManagedToolBundleInstall(root, releaseRoot, pack, dependency string, options ManagedToolBundleInstallOptions) (ReleaseManagedToolBundleInstallResult, error) {
+	if !options.Execute {
+		return ReleaseManagedToolBundleInstallResult{}, fmt.Errorf("release managed tool bundle install requires --execute")
+	}
+	plan, err := CreateReleaseManagedToolBundleInstallPlan(root, releaseRoot, pack, dependency)
+	if err != nil {
+		return ReleaseManagedToolBundleInstallResult{}, err
+	}
+	if err := ensureAuthoredToolDirectory(filepath.Dir(plan.WorkspaceBundleDir), "managed bundle directory"); err != nil {
+		return ReleaseManagedToolBundleInstallResult{}, err
+	}
+	if err := rejectUnsafeAuthoredToolDirectory(plan.WorkspaceBundleDir, "workspace managed bundle directory"); err != nil {
+		return ReleaseManagedToolBundleInstallResult{}, err
+	}
+	if _, err := os.Lstat(plan.WorkspaceBundleDir); err == nil {
+		return ReleaseManagedToolBundleInstallResult{}, fmt.Errorf("workspace managed bundle already exists: %s", plan.WorkspaceBundleDir)
+	} else if !os.IsNotExist(err) {
+		return ReleaseManagedToolBundleInstallResult{}, fmt.Errorf("inspect workspace managed bundle: %w", err)
+	}
+	if err := copyManagedBundleDirectory(plan.ReleaseBundleDir, plan.WorkspaceBundleDir); err != nil {
+		return ReleaseManagedToolBundleInstallResult{}, err
+	}
+	install, err := ExecuteManagedToolBundleInstall(root, pack, dependency, options)
+	if err != nil {
+		return ReleaseManagedToolBundleInstallResult{}, err
+	}
+	return ReleaseManagedToolBundleInstallResult{
+		Status:               install.Status,
+		Mode:                 "workspace-copy-link",
+		Action:               plan.Action,
+		Pack:                 plan.Pack,
+		Dependency:           plan.Dependency,
+		Kind:                 plan.Kind,
+		Version:              plan.Version,
+		Source:               plan.Source,
+		SHA256:               plan.SHA256,
+		ReleaseBundleDir:     plan.ReleaseBundleDir,
+		ReleasePayloadPath:   plan.ReleasePayloadPath,
+		WorkspaceBundleDir:   plan.WorkspaceBundleDir,
+		WorkspacePayloadPath: plan.WorkspacePayloadPath,
+		InstallPath:          install.InstallPath,
+	}, nil
+}
+
 func ReadManagedToolBundle(root, name string) (ManagedToolBundle, error) {
 	if err := requireAuthoredToolWorkspace(root); err != nil {
 		return ManagedToolBundle{}, err
@@ -2707,14 +2828,14 @@ func validateManagedToolBundleManifest(manifest managedToolBundleManifest, dirNa
 	if strings.TrimSpace(manifest.Payload) == "" {
 		return fmt.Errorf("managed bundle payload is required")
 	}
-	if strings.TrimSpace(manifest.Kind) == "binary" {
+	if strings.TrimSpace(manifest.Kind) == "binary" || strings.TrimSpace(manifest.Kind) == "rule_bundle" {
 		digest := strings.TrimSpace(manifest.SHA256)
 		if digest == "" {
-			return fmt.Errorf("managed binary bundle sha256 is required")
+			return fmt.Errorf("managed %s bundle sha256 is required", strings.TrimSpace(manifest.Kind))
 		}
 		decoded, err := hex.DecodeString(digest)
 		if err != nil || len(decoded) != sha256.Size {
-			return fmt.Errorf("managed binary bundle sha256 is invalid")
+			return fmt.Errorf("managed %s bundle sha256 is invalid", strings.TrimSpace(manifest.Kind))
 		}
 	}
 	return nil
@@ -2760,6 +2881,15 @@ func validateManagedBundlePayload(path string, manifest managedToolBundleManifes
 	if strings.TrimSpace(manifest.Kind) == "rule_bundle" && !info.IsDir() {
 		return fmt.Errorf("managed rule_bundle payload is not a directory: %s", path)
 	}
+	if strings.TrimSpace(manifest.SHA256) != "" && info.IsDir() {
+		actual, err := digestManagedBundleDirectory(path)
+		if err != nil {
+			return err
+		}
+		if actual != strings.TrimSpace(manifest.SHA256) {
+			return fmt.Errorf("managed bundle payload sha256 mismatch: %s", path)
+		}
+	}
 	if strings.TrimSpace(manifest.SHA256) != "" && !info.IsDir() {
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -2772,6 +2902,147 @@ func validateManagedBundlePayload(path string, manifest managedToolBundleManifes
 		}
 	}
 	return nil
+}
+
+func releaseManagedToolBundleDir(releaseRoot, name string) (string, error) {
+	if strings.TrimSpace(releaseRoot) == "" {
+		return "", fmt.Errorf("release root is required")
+	}
+	safeName, err := validateAuthoredToolName(name)
+	if err != nil {
+		return "", err
+	}
+	root, err := filepath.Abs(filepath.Join(releaseRoot, "toolchains", "managed-bundles"))
+	if err != nil {
+		return "", fmt.Errorf("resolve release managed bundle root: %w", err)
+	}
+	if err := rejectUnsafeAuthoredToolDirectory(root, "release managed bundle root"); err != nil {
+		return "", err
+	}
+	return filepath.Join(root, safeName), nil
+}
+
+func releaseWorkspacePayloadPath(releaseBundleDir, releasePayloadPath, workspaceBundleDir string) (string, error) {
+	rel, err := filepath.Rel(releaseBundleDir, releasePayloadPath)
+	if err != nil {
+		return "", fmt.Errorf("resolve release payload relative path: %w", err)
+	}
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("release managed payload path must stay under %s", releaseBundleDir)
+	}
+	return filepath.Join(workspaceBundleDir, rel), nil
+}
+
+func copyManagedBundleDirectory(src, dst string) error {
+	if err := requireAuthoredToolDirectory(src, "release managed bundle directory"); err != nil {
+		return err
+	}
+	if err := filepath.WalkDir(src, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return fmt.Errorf("resolve managed bundle copy path: %w", err)
+		}
+		if rel == "." {
+			return nil
+		}
+		if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+			return fmt.Errorf("managed bundle copy path must stay under %s", src)
+		}
+		target := filepath.Join(dst, rel)
+		info, err := os.Lstat(path)
+		if err != nil {
+			return fmt.Errorf("inspect managed bundle source: %w", err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("managed bundle source must not contain symlinks: %s", path)
+		}
+		if entry.IsDir() {
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				return fmt.Errorf("create managed bundle target directory: %w", err)
+			}
+			return nil
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("managed bundle source must contain only regular files: %s", path)
+		}
+		if err := copyManagedBundleFile(path, target, info.Mode().Perm()); err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
+		_ = os.RemoveAll(dst)
+		return err
+	}
+	return nil
+}
+
+func copyManagedBundleFile(src, dst string, mode os.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return fmt.Errorf("create managed bundle target file directory: %w", err)
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("open managed bundle source file: %w", err)
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+	if err != nil {
+		return fmt.Errorf("create managed bundle target file: %w", err)
+	}
+	defer out.Close()
+	if _, err := io.Copy(out, in); err != nil {
+		return fmt.Errorf("copy managed bundle target file: %w", err)
+	}
+	if err := out.Chmod(mode); err != nil {
+		return fmt.Errorf("chmod managed bundle target file: %w", err)
+	}
+	return nil
+}
+
+func digestManagedBundleDirectory(dir string) (string, error) {
+	paths := []string{}
+	if err := filepath.WalkDir(dir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		info, err := os.Lstat(path)
+		if err != nil {
+			return fmt.Errorf("inspect managed bundle digest path: %w", err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("managed bundle digest path must not be a symlink: %s", path)
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("managed bundle digest path must be a regular file: %s", path)
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return fmt.Errorf("resolve managed bundle digest path: %w", err)
+		}
+		paths = append(paths, filepath.ToSlash(rel))
+		return nil
+	}); err != nil {
+		return "", err
+	}
+	sort.Strings(paths)
+	hash := sha256.New()
+	for _, rel := range paths {
+		data, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(rel)))
+		if err != nil {
+			return "", fmt.Errorf("read managed bundle digest file: %w", err)
+		}
+		hash.Write([]byte(rel))
+		hash.Write([]byte{0})
+		hash.Write(data)
+		hash.Write([]byte{0})
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 func findManagedInstallDependency(root, pack, dependency string) (toolchain.Dependency, error) {

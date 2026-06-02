@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -1368,6 +1369,152 @@ sha256: ` + hex.EncodeToString(payloadDigest[:]) + `
 	}
 }
 
+func TestReleaseManagedToolBundleInstallPlanAndExecutionCopiesBundleThenLinksPayload(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	releaseRoot := filepath.Join(t.TempDir(), "release")
+	marker := filepath.Join(t.TempDir(), "release-payload-ran")
+	releasePayload := writeReleaseManagedBinaryBundleFixture(t, releaseRoot, "httpx", "1.3.0", "#!/bin/sh\ntouch "+marker+"\n")
+
+	plan, err := CreateReleaseManagedToolBundleInstallPlan(root, releaseRoot, "web-api-pack", "httpx")
+	if err != nil {
+		t.Fatalf("create release managed install plan: %v", err)
+	}
+	workspacePayload := filepath.Join(root, "toolchain", "managed-bundles", "httpx", "payload", "httpx")
+	if plan.Status != "ready" || plan.Mode != "metadata-only" || plan.Action != "copy-and-link" {
+		t.Fatalf("unexpected release managed install plan: %#v", plan)
+	}
+	if plan.ReleasePayloadPath != releasePayload || plan.WorkspacePayloadPath != workspacePayload || plan.InstallPath != filepath.Join(root, "toolchain", "bin", "httpx") {
+		t.Fatalf("unexpected release managed install plan paths: %#v", plan)
+	}
+	if _, err := os.Lstat(plan.WorkspacePayloadPath); !os.IsNotExist(err) {
+		t.Fatalf("release managed install plan must not copy payload, stat err=%v", err)
+	}
+	if _, err := os.Lstat(plan.InstallPath); !os.IsNotExist(err) {
+		t.Fatalf("release managed install plan must not create link, stat err=%v", err)
+	}
+
+	_, err = ExecuteReleaseManagedToolBundleInstall(root, releaseRoot, "web-api-pack", "httpx", ManagedToolBundleInstallOptions{})
+	if err == nil || !strings.Contains(err.Error(), "--execute") {
+		t.Fatalf("expected explicit execute requirement, got %v", err)
+	}
+	if _, err := os.Lstat(plan.WorkspacePayloadPath); !os.IsNotExist(err) {
+		t.Fatalf("release managed install without execute must not copy payload, stat err=%v", err)
+	}
+
+	result, err := ExecuteReleaseManagedToolBundleInstall(root, releaseRoot, "web-api-pack", "httpx", ManagedToolBundleInstallOptions{Execute: true})
+	if err != nil {
+		t.Fatalf("execute release managed install: %v", err)
+	}
+	if result.Status != "installed" || result.Mode != "workspace-copy-link" || result.WorkspacePayloadPath != workspacePayload {
+		t.Fatalf("unexpected release managed install result: %#v", result)
+	}
+	if _, err := os.Stat(workspacePayload); err != nil {
+		t.Fatalf("expected workspace managed payload copy: %v", err)
+	}
+	info, err := os.Lstat(result.InstallPath)
+	if err != nil {
+		t.Fatalf("expected managed install link: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("expected managed install to create symlink, mode=%v", info.Mode())
+	}
+	workspaceBundle, err := ReadManagedToolBundle(root, "httpx")
+	if err != nil {
+		t.Fatalf("read imported workspace bundle: %v", err)
+	}
+	if workspaceBundle.PayloadPath != workspacePayload {
+		t.Fatalf("expected imported bundle to point at workspace payload, got %#v", workspaceBundle)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("release managed install must not execute payload, marker stat err=%v", err)
+	}
+}
+
+func TestReleaseManagedRuleBundleRequiresDigestAndLinksRulesDirectory(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	releaseRoot := filepath.Join(t.TempDir(), "release")
+	writeReleaseManagedRuleBundleFixture(t, releaseRoot, "nuclei-templates", "2026.06.02", map[string]string{
+		"http/example.yaml": "id: ouro-test\ninfo:\n  name: Ouro Test\n  severity: info\n",
+	})
+
+	missingDigestManifest := filepath.Join(releaseRoot, "toolchains", "managed-bundles", "nuclei-templates", "bundle.yaml")
+	manifestData, err := os.ReadFile(missingDigestManifest)
+	if err != nil {
+		t.Fatalf("read release rule bundle manifest: %v", err)
+	}
+	if err := os.WriteFile(missingDigestManifest, []byte(strings.Replace(string(manifestData), "sha256: "+releaseRuleBundleDigestFromManifest(t, manifestData)+"\n", "", 1)), 0o644); err != nil {
+		t.Fatalf("remove release rule bundle digest: %v", err)
+	}
+	_, err = CreateReleaseManagedToolBundleInstallPlan(root, releaseRoot, "web-api-pack", "nuclei-templates")
+	if err == nil || !strings.Contains(err.Error(), "sha256 is required") {
+		t.Fatalf("expected missing rule bundle digest rejection, got %v", err)
+	}
+	writeReleaseManagedRuleBundleFixture(t, releaseRoot, "nuclei-templates", "2026.06.02", map[string]string{
+		"http/example.yaml": "id: ouro-test\ninfo:\n  name: Ouro Test\n  severity: info\n",
+	})
+
+	result, err := ExecuteReleaseManagedToolBundleInstall(root, releaseRoot, "web-api-pack", "nuclei-templates", ManagedToolBundleInstallOptions{Execute: true})
+	if err != nil {
+		t.Fatalf("execute release managed rule bundle install: %v", err)
+	}
+	if result.Kind != "rule_bundle" || result.InstallPath != filepath.Join(root, "toolchain", "rules", "nuclei-templates") {
+		t.Fatalf("unexpected release rule bundle install result: %#v", result)
+	}
+	info, err := os.Lstat(result.InstallPath)
+	if err != nil {
+		t.Fatalf("expected managed rule bundle link: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("expected managed rule bundle install to create symlink, mode=%v", info.Mode())
+	}
+	if _, err := os.Stat(filepath.Join(root, "toolchain", "managed-bundles", "nuclei-templates", "payload", "http", "example.yaml")); err != nil {
+		t.Fatalf("expected workspace rule bundle payload copy: %v", err)
+	}
+}
+
+func TestReleaseManagedToolBundleRejectsSymlinkPayload(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	releaseRoot := filepath.Join(t.TempDir(), "release")
+	bundleDir := filepath.Join(releaseRoot, "toolchains", "managed-bundles", "httpx")
+	payloadDir := filepath.Join(bundleDir, "payload")
+	if err := os.MkdirAll(payloadDir, 0o755); err != nil {
+		t.Fatalf("create release bundle payload dir: %v", err)
+	}
+	target := filepath.Join(t.TempDir(), "httpx")
+	body := []byte("#!/bin/sh\nexit 0\n")
+	if err := os.WriteFile(target, body, 0o755); err != nil {
+		t.Fatalf("write symlink target: %v", err)
+	}
+	if err := os.Symlink(target, filepath.Join(payloadDir, "httpx")); err != nil {
+		t.Fatalf("write payload symlink: %v", err)
+	}
+	digest := sha256.Sum256(body)
+	manifest := `name: httpx
+kind: binary
+version: "1.3.0"
+source: projectdiscovery/httpx
+payload: payload/httpx
+sha256: ` + hex.EncodeToString(digest[:]) + `
+`
+	if err := os.WriteFile(filepath.Join(bundleDir, "bundle.yaml"), []byte(manifest), 0o644); err != nil {
+		t.Fatalf("write release bundle manifest: %v", err)
+	}
+
+	_, err := CreateReleaseManagedToolBundleInstallPlan(root, releaseRoot, "web-api-pack", "httpx")
+	if err == nil || !strings.Contains(err.Error(), "payload must not be a symlink") {
+		t.Fatalf("expected symlink payload rejection, got %v", err)
+	}
+}
+
 func writeManagedBundleFixture(t *testing.T, root string, name string, kind string, version string, payloadBody string) string {
 	t.Helper()
 	bundleDir := filepath.Join(root, "toolchain", "managed-bundles", name)
@@ -1391,6 +1538,106 @@ sha256: ` + hex.EncodeToString(digest[:]) + `
 		t.Fatalf("write bundle manifest: %v", err)
 	}
 	return payloadPath
+}
+
+func writeReleaseManagedBinaryBundleFixture(t *testing.T, releaseRoot string, name string, version string, payloadBody string) string {
+	t.Helper()
+	bundleDir := filepath.Join(releaseRoot, "toolchains", "managed-bundles", name)
+	payloadDir := filepath.Join(bundleDir, "payload")
+	if err := os.MkdirAll(payloadDir, 0o755); err != nil {
+		t.Fatalf("create release bundle payload dir: %v", err)
+	}
+	payloadPath := filepath.Join(payloadDir, name)
+	if err := os.WriteFile(payloadPath, []byte(payloadBody), 0o755); err != nil {
+		t.Fatalf("write release bundle payload: %v", err)
+	}
+	digest := sha256.Sum256([]byte(payloadBody))
+	manifest := `name: ` + name + `
+kind: binary
+version: "` + version + `"
+source: projectdiscovery/` + name + `
+payload: payload/` + name + `
+sha256: ` + hex.EncodeToString(digest[:]) + `
+`
+	if err := os.WriteFile(filepath.Join(bundleDir, "bundle.yaml"), []byte(manifest), 0o644); err != nil {
+		t.Fatalf("write release bundle manifest: %v", err)
+	}
+	return payloadPath
+}
+
+func writeReleaseManagedRuleBundleFixture(t *testing.T, releaseRoot string, name string, version string, files map[string]string) string {
+	t.Helper()
+	bundleDir := filepath.Join(releaseRoot, "toolchains", "managed-bundles", name)
+	if err := os.RemoveAll(bundleDir); err != nil {
+		t.Fatalf("reset release rule bundle dir: %v", err)
+	}
+	payloadDir := filepath.Join(bundleDir, "payload")
+	for rel, body := range files {
+		path := filepath.Join(payloadDir, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("create release rule payload dir: %v", err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatalf("write release rule payload: %v", err)
+		}
+	}
+	digest := digestDirectoryForAppTest(t, payloadDir)
+	manifest := `name: ` + name + `
+kind: rule_bundle
+version: "` + version + `"
+source: projectdiscovery/` + name + `
+payload: payload
+sha256: ` + digest + `
+`
+	if err := os.WriteFile(filepath.Join(bundleDir, "bundle.yaml"), []byte(manifest), 0o644); err != nil {
+		t.Fatalf("write release rule bundle manifest: %v", err)
+	}
+	return payloadDir
+}
+
+func digestDirectoryForAppTest(t *testing.T, dir string) string {
+	t.Helper()
+	paths := []string{}
+	if err := filepath.WalkDir(dir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		paths = append(paths, filepath.ToSlash(rel))
+		return nil
+	}); err != nil {
+		t.Fatalf("walk digest directory: %v", err)
+	}
+	sort.Strings(paths)
+	hash := sha256.New()
+	for _, rel := range paths {
+		data, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(rel)))
+		if err != nil {
+			t.Fatalf("read digest file: %v", err)
+		}
+		hash.Write([]byte(rel))
+		hash.Write([]byte{0})
+		hash.Write(data)
+		hash.Write([]byte{0})
+	}
+	return hex.EncodeToString(hash.Sum(nil))
+}
+
+func releaseRuleBundleDigestFromManifest(t *testing.T, data []byte) string {
+	t.Helper()
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "sha256: ") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "sha256: "))
+		}
+	}
+	t.Fatalf("release rule bundle digest missing from manifest")
+	return ""
 }
 
 func containsString(values []string, want string) bool {
