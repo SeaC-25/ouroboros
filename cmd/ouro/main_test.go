@@ -8393,6 +8393,29 @@ func TestToolchainAuthoredToolValidateRejectsUnknownFieldAndDependencyCommand(t 
 	}
 }
 
+func TestToolchainAuthoredToolRegistryCommandPrintsContracts(t *testing.T) {
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{"toolchain", "authored-tool-registry"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute authored tool registry command: %v", err)
+	}
+	output := out.String()
+	for _, want := range []string{
+		"adapter: id=managed_binary",
+		"operation: adapter=managed_binary id=http_probe",
+		"operation: adapter=managed_binary id=template_scan",
+		"operation: adapter=managed_binary id=apk_decompile",
+		"parser: id=httpx_jsonl",
+		"parser: id=nmap_xml",
+		"parser: id=semgrep_sarif",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("expected registry output to contain %q, got %q", want, output)
+		}
+	}
+}
+
 func TestToolchainManagedBundleCommandsListPlanAndInstall(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
 	if err := app.InitWorkspace(root); err != nil {

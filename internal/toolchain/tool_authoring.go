@@ -78,6 +78,7 @@ func ValidateAuthoredToolSpec(spec AuthoredToolSpec) error {
 		errs = append(errs, fmt.Errorf("runner must be native for authored tools, got %s", runner))
 	}
 	errs = append(errs, validateAuthoredToolAdapter(spec.Adapter)...)
+	errs = append(errs, validateAuthoredToolRegistryContracts(spec, DefaultAuthoredToolRegistry())...)
 	errs = append(errs, validateAuthoredToolInputs(spec.Inputs)...)
 	errs = append(errs, validateAuthoredToolEvidence(spec.ExpectedEvidence)...)
 	errs = append(errs, validateAuthoredToolSafety(spec.Safety)...)
@@ -113,6 +114,95 @@ func validateAuthoredToolAdapter(adapter AuthoredToolAdapter) []error {
 		errs = append(errs, errors.New("adapter operation is required"))
 	}
 	return errs
+}
+
+func validateAuthoredToolRegistryContracts(spec AuthoredToolSpec, registry AuthoredToolRegistry) []error {
+	var errs []error
+	parserID := strings.TrimSpace(spec.Parser)
+	if parserID != "" && !registry.ParserExists(parserID) {
+		errs = append(errs, fmt.Errorf("parser is not registered: %s", parserID))
+	}
+
+	adapterID := strings.TrimSpace(spec.Adapter.ID)
+	operationID := strings.TrimSpace(spec.Adapter.Operation)
+	if adapterID == "" || operationID == "" {
+		return errs
+	}
+	if !registry.AdapterExists(adapterID) {
+		errs = append(errs, fmt.Errorf("adapter id is not registered: %s", adapterID))
+		return errs
+	}
+	operation, ok := registry.AdapterOperation(adapterID, operationID)
+	if !ok {
+		errs = append(errs, fmt.Errorf("adapter operation is not registered: %s/%s", adapterID, operationID))
+		return errs
+	}
+	if parserID != "" && len(operation.SupportedParsers) > 0 && !containsTrimmed(operation.SupportedParsers, parserID) {
+		errs = append(errs, fmt.Errorf("parser %s is not supported by adapter operation %s", parserID, operation.ID))
+	}
+	errs = append(errs, validateAuthoredToolOperationInputs(spec.Inputs, operation)...)
+	errs = append(errs, validateAuthoredToolOperationDependencies(spec.Dependencies, operation)...)
+	return errs
+}
+
+func validateAuthoredToolOperationInputs(inputs []AuthoredToolInput, operation AuthoredToolOperationDefinition) []error {
+	var errs []error
+	byName := make(map[string]AuthoredToolInput, len(inputs))
+	for _, input := range inputs {
+		name := strings.TrimSpace(input.Name)
+		if name == "" {
+			continue
+		}
+		byName[name] = input
+	}
+	for _, contract := range operation.RequiredInputs {
+		name := strings.TrimSpace(contract.Name)
+		if name == "" {
+			continue
+		}
+		input, ok := byName[name]
+		if !ok {
+			errs = append(errs, fmt.Errorf("adapter operation %s requires input %s", operation.ID, name))
+			continue
+		}
+		if !input.Required {
+			errs = append(errs, fmt.Errorf("adapter operation %s requires input %s to be marked required", operation.ID, name))
+		}
+		inputType := strings.TrimSpace(input.Type)
+		if len(contract.Types) > 0 && !containsTrimmed(contract.Types, inputType) {
+			errs = append(errs, fmt.Errorf("input %s type must be one of %s", name, strings.Join(contract.Types, ", ")))
+		}
+	}
+	return errs
+}
+
+func validateAuthoredToolOperationDependencies(dependencies []Dependency, operation AuthoredToolOperationDefinition) []error {
+	if len(operation.DependencyNames) == 0 {
+		return nil
+	}
+	declared := make(map[string]bool, len(dependencies))
+	for _, dependency := range dependencies {
+		name := strings.TrimSpace(dependency.Name)
+		if name != "" {
+			declared[name] = true
+		}
+	}
+	for _, dependencyName := range operation.DependencyNames {
+		if declared[strings.TrimSpace(dependencyName)] {
+			return nil
+		}
+	}
+	return []error{fmt.Errorf("adapter operation %s requires one of dependencies: %s", operation.ID, strings.Join(operation.DependencyNames, ", "))}
+}
+
+func containsTrimmed(values []string, needle string) bool {
+	needle = strings.TrimSpace(needle)
+	for _, value := range values {
+		if strings.TrimSpace(value) == needle {
+			return true
+		}
+	}
+	return false
 }
 
 func validateAuthoredToolInputs(inputs []AuthoredToolInput) []error {

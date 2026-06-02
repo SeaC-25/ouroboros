@@ -5346,6 +5346,7 @@ func newToolchainCommand(out io.Writer) *cobra.Command {
 	cmd.AddCommand(newToolchainAuthoredToolValidateCommand(out))
 	cmd.AddCommand(newToolchainAuthoredToolWriteCommand(out))
 	cmd.AddCommand(newToolchainAuthoredToolsCommand(out))
+	cmd.AddCommand(newToolchainAuthoredToolRegistryCommand(out))
 	cmd.AddCommand(newToolchainManagedBundlesCommand(out))
 	cmd.AddCommand(newToolchainManagedInstallPlanCommand(out))
 	cmd.AddCommand(newToolchainManagedInstallCommand(out))
@@ -10521,6 +10522,75 @@ func printAuthoredToolArtifact(out io.Writer, artifact app.AuthoredToolArtifact)
 		artifact.ManifestPath,
 	)
 	return err
+}
+
+func newToolchainAuthoredToolRegistryCommand(out io.Writer) *cobra.Command {
+	return &cobra.Command{
+		Use:   "authored-tool-registry",
+		Short: "List registered authored native tool adapters, operations, and parsers",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			registry := toolchain.DefaultAuthoredToolRegistry()
+			for _, adapter := range registry.Adapters() {
+				if _, err := fmt.Fprintf(out, "adapter: id=%s operations=%d\n", adapter.ID, len(adapter.Operations)); err != nil {
+					return err
+				}
+				for _, operation := range adapter.Operations {
+					if _, err := fmt.Fprintf(
+						out,
+						"operation: adapter=%s id=%s inputs=%s parsers=%s dependencies=%s\n",
+						adapter.ID,
+						operation.ID,
+						formatRegistryInputContracts(operation.RequiredInputs),
+						formatRegistryStringList(operation.SupportedParsers),
+						formatRegistryStringList(operation.DependencyNames),
+					); err != nil {
+						return err
+					}
+				}
+			}
+			for _, parser := range registry.Parsers() {
+				if _, err := fmt.Fprintf(out, "parser: id=%s format=%s\n", parser.ID, parser.Format); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	}
+}
+
+func formatRegistryInputContracts(inputs []toolchain.AuthoredToolInputContract) string {
+	if len(inputs) == 0 {
+		return "[]"
+	}
+	parts := make([]string, 0, len(inputs))
+	for _, input := range inputs {
+		name := strings.TrimSpace(input.Name)
+		if name == "" {
+			continue
+		}
+		parts = append(parts, name+":"+formatRegistryStringList(input.Types))
+	}
+	if len(parts) == 0 {
+		return "[]"
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ",")
+}
+
+func formatRegistryStringList(values []string) string {
+	compact := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			compact = append(compact, value)
+		}
+	}
+	if len(compact) == 0 {
+		return "[]"
+	}
+	sort.Strings(compact)
+	return strings.Join(compact, "|")
 }
 
 func newToolchainManagedBundlesCommand(out io.Writer) *cobra.Command {

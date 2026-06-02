@@ -1,6 +1,13 @@
 # Ouroboros Analysis Progress
 
 ## 2026-06-02
+- Continued authored tool execution-contract work in isolated worktree `.worktrees/typed-adapter-registry`.
+- Added RED tests proving model-authored specs did not yet have a typed adapter/parser registry and CLI registry discovery command.
+- Implemented `DefaultAuthoredToolRegistry` with the `managed_binary` adapter, high-value Web/API, Infra/Internal, and APK/mobile/artifact operations, required input contracts, supported parser ids, and dependency names.
+- Authored tool validation now rejects unknown adapter ids, unknown operations, unknown parsers, parser/operation mismatches, missing required operation inputs, incompatible required input types, and missing operation dependencies.
+- Added `ouro toolchain authored-tool-registry` so users and models can inspect allowed adapter operations and parser contracts instead of inventing scripts.
+- Preserved the explicit disabled safety close paths for target policy and isolation; they still require opt-in flags in authored specs and workspace authorization remains authoritative for strict gates.
+- Updated development docs and wrote `docs/progress/milestone-20-typed-authored-tool-registry.md`; remaining gaps are tool-level compiler plans, registered argv builders, parser dispatch, spec digests, and real bundled payloads.
 - Continued model-authored native tool contract hardening in isolated worktree `.worktrees/authored-tool-contracts`.
 - Added RED toolchain tests requiring authored specs to declare `adapter.id` and `adapter.operation`, rejecting dependency `health_command` / `install_command`, and rejecting unknown YAML fields.
 - Implemented strict authored spec YAML loading with known-field validation.

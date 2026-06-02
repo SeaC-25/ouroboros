@@ -81,6 +81,104 @@ func TestValidateAuthoredToolSpecRequiresNativeAdapterOperation(t *testing.T) {
 	}
 }
 
+func TestDefaultAuthoredToolRegistryIncludesPentestOperations(t *testing.T) {
+	registry := DefaultAuthoredToolRegistry()
+
+	for _, operation := range []string{
+		"http_probe",
+		"template_scan",
+		"path_fuzz",
+		"crawl",
+		"subdomain_discovery",
+		"port_scan",
+		"service_fingerprint",
+		"apk_decompile",
+		"static_code_scan",
+		"secret_scan",
+	} {
+		registered, ok := registry.AdapterOperation("managed_binary", operation)
+		if !ok {
+			t.Fatalf("expected managed_binary operation %s to be registered", operation)
+		}
+		if registered.ID != operation || len(registered.RequiredInputs) == 0 {
+			t.Fatalf("expected operation metadata for %s, got %#v", operation, registered)
+		}
+	}
+
+	for _, parser := range []string{
+		"web_api_parser",
+		"web_login_state_parser",
+		"route_observation_parser",
+		"service_observation_parser",
+		"artifact_analysis_parser",
+		"httpx_jsonl",
+		"nuclei_jsonl",
+		"ffuf_json",
+		"katana_jsonl",
+		"subfinder_jsonl",
+		"nmap_xml",
+		"naabu_jsonl",
+		"mobsfscan_json",
+		"semgrep_sarif",
+	} {
+		if !registry.ParserExists(parser) {
+			t.Fatalf("expected parser %s to be registered", parser)
+		}
+	}
+}
+
+func TestValidateAuthoredToolSpecRejectsUnknownRegistryContracts(t *testing.T) {
+	spec := validAuthoredToolSpec()
+	spec.Adapter = AuthoredToolAdapter{ID: "shell", Operation: "http_probe"}
+
+	err := ValidateAuthoredToolSpec(spec)
+	if err == nil || !strings.Contains(err.Error(), "adapter id is not registered: shell") {
+		t.Fatalf("expected unknown adapter rejection, got %v", err)
+	}
+
+	spec = validAuthoredToolSpec()
+	spec.Adapter = AuthoredToolAdapter{ID: "managed_binary", Operation: "curl_probe"}
+	err = ValidateAuthoredToolSpec(spec)
+	if err == nil || !strings.Contains(err.Error(), "adapter operation is not registered: managed_binary/curl_probe") {
+		t.Fatalf("expected unknown operation rejection, got %v", err)
+	}
+
+	spec = validAuthoredToolSpec()
+	spec.Adapter = AuthoredToolAdapter{ID: "managed_binary", Operation: "http_probe"}
+	spec.Parser = "bespoke_parser"
+	err = ValidateAuthoredToolSpec(spec)
+	if err == nil || !strings.Contains(err.Error(), "parser is not registered: bespoke_parser") {
+		t.Fatalf("expected unknown parser rejection, got %v", err)
+	}
+}
+
+func TestValidateAuthoredToolSpecChecksOperationInputsAndParserCompatibility(t *testing.T) {
+	spec := validAuthoredToolSpec()
+	spec.Adapter = AuthoredToolAdapter{ID: "managed_binary", Operation: "http_probe"}
+	spec.Inputs = []AuthoredToolInput{{Name: "target", Type: "url", Required: true}}
+
+	err := ValidateAuthoredToolSpec(spec)
+	if err == nil || !strings.Contains(err.Error(), "adapter operation http_probe requires input target_url") {
+		t.Fatalf("expected required input validation error, got %v", err)
+	}
+
+	spec = validAuthoredToolSpec()
+	spec.Adapter = AuthoredToolAdapter{ID: "managed_binary", Operation: "http_probe"}
+	spec.Inputs = []AuthoredToolInput{{Name: "target_url", Type: "string", Required: true}}
+	err = ValidateAuthoredToolSpec(spec)
+	if err == nil || !strings.Contains(err.Error(), "input target_url type must be one of url") {
+		t.Fatalf("expected input type validation error, got %v", err)
+	}
+
+	spec = validAuthoredToolSpec()
+	spec.Adapter = AuthoredToolAdapter{ID: "managed_binary", Operation: "template_scan"}
+	spec.Parser = "httpx_jsonl"
+	err = ValidateAuthoredToolSpec(spec)
+	if err == nil || !strings.Contains(err.Error(), "parser httpx_jsonl is not supported by adapter operation template_scan") {
+		t.Fatalf("expected parser compatibility validation error, got %v", err)
+	}
+}
+
 func TestValidateAuthoredToolSpecRejectsDependencyCommandArrays(t *testing.T) {
 	spec := validAuthoredToolSpec()
 	spec.Adapter = AuthoredToolAdapter{ID: "managed_binary", Operation: "http_probe"}
@@ -164,7 +262,7 @@ func validAuthoredToolSpec() AuthoredToolSpec {
 		Name:         "web-login-state-enumerator",
 		Version:      "0.1.0",
 		Capabilities: []string{"web.auth_state_tracking"},
-		Parser:       "web_login_state_parser",
+		Parser:       "httpx_jsonl",
 		Inputs: []AuthoredToolInput{
 			{Name: "target_url", Type: "url", Required: true},
 		},
@@ -174,6 +272,9 @@ func validAuthoredToolSpec() AuthoredToolSpec {
 		Safety: AuthoredToolSafety{
 			TargetPolicy: "enforce",
 			Isolation:    "process",
+		},
+		Dependencies: []Dependency{
+			{Name: "httpx", Kind: "binary", Optional: true, Source: "projectdiscovery/httpx"},
 		},
 	}
 }
