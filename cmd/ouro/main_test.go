@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -8356,6 +8358,93 @@ func TestToolchainAuthoredToolValidateRejectsRawScript(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "raw_script") {
 		t.Fatalf("expected raw script validation error, got %v output=%q", err, out.String())
 	}
+}
+
+func TestToolchainManagedBundleCommandsListPlanAndInstall(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	marker := filepath.Join(t.TempDir(), "managed-payload-ran")
+	payload := writeManagedBundleFixtureForCLITest(t, root, "httpx", "#!/bin/sh\ntouch "+marker+"\n")
+
+	var listOut bytes.Buffer
+	listCmd := newRootCommand(&listOut, new(bytes.Buffer))
+	listCmd.SetArgs([]string{"toolchain", "managed-bundles", root})
+	if err := listCmd.Execute(); err != nil {
+		t.Fatalf("execute managed-bundles: %v", err)
+	}
+	for _, want := range []string{"managed-bundle: name=httpx", "kind=binary", "payload=" + payload, "install=" + filepath.Join(root, "toolchain", "bin", "httpx")} {
+		if !strings.Contains(listOut.String(), want) {
+			t.Fatalf("expected managed-bundles output to contain %q, got %q", want, listOut.String())
+		}
+	}
+
+	var planOut bytes.Buffer
+	planCmd := newRootCommand(&planOut, new(bytes.Buffer))
+	planCmd.SetArgs([]string{"toolchain", "managed-install-plan", root, "web-api-pack", "httpx"})
+	if err := planCmd.Execute(); err != nil {
+		t.Fatalf("execute managed-install-plan: %v", err)
+	}
+	for _, want := range []string{"managed-install-plan: status=ready", "pack=web-api-pack", "dependency=httpx", "action=link", "payload=" + payload} {
+		if !strings.Contains(planOut.String(), want) {
+			t.Fatalf("expected managed-install-plan output to contain %q, got %q", want, planOut.String())
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(root, "toolchain", "bin", "httpx")); !os.IsNotExist(err) {
+		t.Fatalf("managed-install-plan must not create link, stat err=%v", err)
+	}
+
+	var dryRunOut bytes.Buffer
+	dryRunCmd := newRootCommand(&dryRunOut, new(bytes.Buffer))
+	dryRunCmd.SetArgs([]string{"toolchain", "managed-install", root, "web-api-pack", "httpx"})
+	err := dryRunCmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "--execute") {
+		t.Fatalf("expected managed-install to require --execute, got %v output=%q", err, dryRunOut.String())
+	}
+
+	var installOut bytes.Buffer
+	installCmd := newRootCommand(&installOut, new(bytes.Buffer))
+	installCmd.SetArgs([]string{"toolchain", "managed-install", root, "web-api-pack", "httpx", "--execute"})
+	if err := installCmd.Execute(); err != nil {
+		t.Fatalf("execute managed-install: %v", err)
+	}
+	for _, want := range []string{"managed-install: status=installed", "pack=web-api-pack", "dependency=httpx", "install=" + filepath.Join(root, "toolchain", "bin", "httpx")} {
+		if !strings.Contains(installOut.String(), want) {
+			t.Fatalf("expected managed-install output to contain %q, got %q", want, installOut.String())
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(root, "toolchain", "bin", "httpx")); err != nil {
+		t.Fatalf("expected managed install link: %v", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("managed-install must link payload without running it, marker stat err=%v", err)
+	}
+}
+
+func writeManagedBundleFixtureForCLITest(t *testing.T, root string, name string, payloadBody string) string {
+	t.Helper()
+	bundleDir := filepath.Join(root, "toolchain", "managed-bundles", name)
+	payloadDir := filepath.Join(bundleDir, "payload")
+	if err := os.MkdirAll(payloadDir, 0o755); err != nil {
+		t.Fatalf("create bundle payload dir: %v", err)
+	}
+	payloadPath := filepath.Join(payloadDir, name)
+	if err := os.WriteFile(payloadPath, []byte(payloadBody), 0o755); err != nil {
+		t.Fatalf("write bundle payload: %v", err)
+	}
+	digest := sha256.Sum256([]byte(payloadBody))
+	manifest := `name: ` + name + `
+kind: binary
+version: "1.3.0"
+source: projectdiscovery/` + name + `
+payload: payload/` + name + `
+sha256: ` + hex.EncodeToString(digest[:]) + `
+`
+	if err := os.WriteFile(filepath.Join(bundleDir, "bundle.yaml"), []byte(manifest), 0o644); err != nil {
+		t.Fatalf("write bundle manifest: %v", err)
+	}
+	return payloadPath
 }
 
 func validAuthoredToolSpecYAMLForCLITest() string {

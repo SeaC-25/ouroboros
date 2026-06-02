@@ -5346,6 +5346,9 @@ func newToolchainCommand(out io.Writer) *cobra.Command {
 	cmd.AddCommand(newToolchainAuthoredToolValidateCommand(out))
 	cmd.AddCommand(newToolchainAuthoredToolWriteCommand(out))
 	cmd.AddCommand(newToolchainAuthoredToolsCommand(out))
+	cmd.AddCommand(newToolchainManagedBundlesCommand(out))
+	cmd.AddCommand(newToolchainManagedInstallPlanCommand(out))
+	cmd.AddCommand(newToolchainManagedInstallCommand(out))
 	cmd.AddCommand(newToolchainCompilePreviewCommand(out))
 	cmd.AddCommand(newToolchainCompilePreviewReviewCommand(out))
 	cmd.AddCommand(newToolchainCompilePreviewReviewAnnotateCommand(out))
@@ -10508,6 +10511,123 @@ func printAuthoredToolArtifact(out io.Writer, artifact app.AuthoredToolArtifact)
 		len(artifact.Capabilities),
 		artifact.SpecPath,
 		artifact.ManifestPath,
+	)
+	return err
+}
+
+func newToolchainManagedBundlesCommand(out io.Writer) *cobra.Command {
+	return &cobra.Command{
+		Use:   "managed-bundles <workspace> [name]",
+		Short: "List or inspect workspace-local managed tool bundles",
+		Args:  cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 2 {
+				bundle, err := app.ReadManagedToolBundle(args[0], args[1])
+				if err != nil {
+					return err
+				}
+				return printManagedToolBundle(out, bundle)
+			}
+			bundles, err := app.ListManagedToolBundles(args[0])
+			if err != nil {
+				return err
+			}
+			sort.SliceStable(bundles, func(i, j int) bool {
+				return bundles[i].Name < bundles[j].Name
+			})
+			for _, bundle := range bundles {
+				if err := printManagedToolBundle(out, bundle); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	}
+}
+
+func newToolchainManagedInstallPlanCommand(out io.Writer) *cobra.Command {
+	return &cobra.Command{
+		Use:   "managed-install-plan <workspace> <pack> <dependency>",
+		Short: "Print a metadata-only managed bundle install plan",
+		Args:  cobra.ExactArgs(3),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			plan, err := app.CreateManagedToolBundleInstallPlan(args[0], args[1], args[2])
+			if err != nil {
+				return err
+			}
+			return printManagedToolBundleInstallPlan(out, plan)
+		},
+	}
+}
+
+func newToolchainManagedInstallCommand(out io.Writer) *cobra.Command {
+	var execute bool
+	cmd := &cobra.Command{
+		Use:   "managed-install <workspace> <pack> <dependency>",
+		Short: "Link a workspace-local managed tool bundle payload",
+		Args:  cobra.ExactArgs(3),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := app.ExecuteManagedToolBundleInstall(args[0], args[1], args[2], app.ManagedToolBundleInstallOptions{Execute: execute})
+			if err != nil {
+				return err
+			}
+			return printManagedToolBundleInstallResult(out, result)
+		},
+	}
+	cmd.Flags().BoolVar(&execute, "execute", false, "create the managed bundle workspace link")
+	return cmd
+}
+
+func printManagedToolBundle(out io.Writer, bundle app.ManagedToolBundle) error {
+	_, err := fmt.Fprintf(
+		out,
+		"managed-bundle: name=%s kind=%s version=%s source=%s sha256=%s payload=%s install=%s manifest=%s\n",
+		bundle.Name,
+		bundle.Kind,
+		bundle.Version,
+		bundle.Source,
+		bundle.SHA256,
+		bundle.PayloadPath,
+		bundle.InstallPath,
+		bundle.ManifestPath,
+	)
+	return err
+}
+
+func printManagedToolBundleInstallPlan(out io.Writer, plan app.ManagedToolBundleInstallPlan) error {
+	_, err := fmt.Fprintf(
+		out,
+		"managed-install-plan: status=%s mode=%s action=%s pack=%s dependency=%s kind=%s version=%s source=%s sha256=%s payload=%s install=%s\n",
+		plan.Status,
+		plan.Mode,
+		plan.Action,
+		plan.Pack,
+		plan.Dependency,
+		plan.Kind,
+		plan.Version,
+		plan.Source,
+		plan.SHA256,
+		plan.PayloadPath,
+		plan.InstallPath,
+	)
+	return err
+}
+
+func printManagedToolBundleInstallResult(out io.Writer, result app.ManagedToolBundleInstallResult) error {
+	_, err := fmt.Fprintf(
+		out,
+		"managed-install: status=%s mode=%s action=%s pack=%s dependency=%s kind=%s version=%s source=%s sha256=%s payload=%s install=%s\n",
+		result.Status,
+		result.Mode,
+		result.Action,
+		result.Pack,
+		result.Dependency,
+		result.Kind,
+		result.Version,
+		result.Source,
+		result.SHA256,
+		result.PayloadPath,
+		result.InstallPath,
 	)
 	return err
 }

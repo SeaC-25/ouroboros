@@ -22,7 +22,7 @@
 
 ## Missing
 - There is still no real native executor for authored tools.
-- Managed binary and rule-bundle installation is still an approval/dispatch contract, not a bundled installer.
+- Managed binary and rule-bundle installation is still incomplete. Milestone 16 adds workspace-local bundle discovery and link creation, but release-packaged real tool payloads are not bundled yet.
 - Persisted authored manifests are visible to `LoadManifests`, but runtime execution still needs native runner bindings, parser contracts, target-kind checks, and authorization-aware execution gates.
 - Parser bindings for real appsec output formats such as Nmap XML, nuclei JSONL, and httpx JSONL remain thin.
 

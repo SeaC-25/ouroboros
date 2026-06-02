@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -1261,6 +1263,134 @@ dependencies:
 		return
 	}
 	t.Fatalf("expected web-api-pack status in %#v", statuses)
+}
+
+func TestListManagedToolBundlesReadsWorkspaceBundleMetadata(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	payload := writeManagedBundleFixture(t, root, "httpx", "binary", "1.3.0", "#!/bin/sh\nexit 99\n")
+
+	bundles, err := ListManagedToolBundles(root)
+	if err != nil {
+		t.Fatalf("list managed tool bundles: %v", err)
+	}
+	if len(bundles) != 1 {
+		t.Fatalf("expected one bundle, got %#v", bundles)
+	}
+	bundle := bundles[0]
+	if bundle.Name != "httpx" || bundle.Kind != "binary" || bundle.Version != "1.3.0" {
+		t.Fatalf("unexpected managed bundle metadata: %#v", bundle)
+	}
+	if bundle.PayloadPath != payload || bundle.InstallPath != filepath.Join(root, "toolchain", "bin", "httpx") {
+		t.Fatalf("unexpected managed bundle paths: %#v", bundle)
+	}
+}
+
+func TestManagedToolBundleInstallPlanAndExecutionLinkPayloadWithoutRunningIt(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	marker := filepath.Join(t.TempDir(), "payload-ran")
+	payload := writeManagedBundleFixture(t, root, "httpx", "binary", "1.3.0", "#!/bin/sh\ntouch "+marker+"\n")
+
+	plan, err := CreateManagedToolBundleInstallPlan(root, "web-api-pack", "httpx")
+	if err != nil {
+		t.Fatalf("create managed install plan: %v", err)
+	}
+	if plan.Status != "ready" || plan.Mode != "metadata-only" || plan.Action != "link" {
+		t.Fatalf("unexpected managed install plan: %#v", plan)
+	}
+	if plan.PayloadPath != payload || plan.InstallPath != filepath.Join(root, "toolchain", "bin", "httpx") {
+		t.Fatalf("unexpected managed install plan paths: %#v", plan)
+	}
+	if _, err := os.Lstat(plan.InstallPath); !os.IsNotExist(err) {
+		t.Fatalf("managed install plan must not create link, stat err=%v", err)
+	}
+
+	_, err = ExecuteManagedToolBundleInstall(root, "web-api-pack", "httpx", ManagedToolBundleInstallOptions{})
+	if err == nil || !strings.Contains(err.Error(), "--execute") {
+		t.Fatalf("expected explicit execute requirement, got %v", err)
+	}
+	if _, err := os.Lstat(plan.InstallPath); !os.IsNotExist(err) {
+		t.Fatalf("managed install without execute must not create link, stat err=%v", err)
+	}
+
+	result, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "httpx", ManagedToolBundleInstallOptions{Execute: true})
+	if err != nil {
+		t.Fatalf("execute managed install: %v", err)
+	}
+	if result.Status != "installed" || result.InstallPath != plan.InstallPath || result.PayloadPath != payload {
+		t.Fatalf("unexpected managed install result: %#v", result)
+	}
+	info, err := os.Lstat(result.InstallPath)
+	if err != nil {
+		t.Fatalf("expected managed install link: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("expected managed install to create symlink, mode=%v", info.Mode())
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("managed install must link payload without running it, marker stat err=%v", err)
+	}
+}
+
+func TestManagedToolBundleRejectsPayloadOutsideBundleDirectory(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	bundleDir := filepath.Join(root, "toolchain", "managed-bundles", "httpx")
+	if err := os.MkdirAll(bundleDir, 0o755); err != nil {
+		t.Fatalf("create bundle dir: %v", err)
+	}
+	outsidePayload := filepath.Join(t.TempDir(), "httpx")
+	if err := os.WriteFile(outsidePayload, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write outside payload: %v", err)
+	}
+	payloadDigest := sha256.Sum256([]byte("#!/bin/sh\nexit 0\n"))
+	manifest := `name: httpx
+kind: binary
+version: "1.3.0"
+source: projectdiscovery/httpx
+payload: ` + outsidePayload + `
+sha256: ` + hex.EncodeToString(payloadDigest[:]) + `
+`
+	if err := os.WriteFile(filepath.Join(bundleDir, "bundle.yaml"), []byte(manifest), 0o644); err != nil {
+		t.Fatalf("write bundle manifest: %v", err)
+	}
+
+	_, err := CreateManagedToolBundleInstallPlan(root, "web-api-pack", "httpx")
+	if err == nil || !strings.Contains(err.Error(), "payload path must stay under") {
+		t.Fatalf("expected outside payload rejection, got %v", err)
+	}
+}
+
+func writeManagedBundleFixture(t *testing.T, root string, name string, kind string, version string, payloadBody string) string {
+	t.Helper()
+	bundleDir := filepath.Join(root, "toolchain", "managed-bundles", name)
+	payloadDir := filepath.Join(bundleDir, "payload")
+	if err := os.MkdirAll(payloadDir, 0o755); err != nil {
+		t.Fatalf("create bundle payload dir: %v", err)
+	}
+	payloadPath := filepath.Join(payloadDir, name)
+	if err := os.WriteFile(payloadPath, []byte(payloadBody), 0o755); err != nil {
+		t.Fatalf("write bundle payload: %v", err)
+	}
+	digest := sha256.Sum256([]byte(payloadBody))
+	manifest := `name: ` + name + `
+kind: ` + kind + `
+version: "` + version + `"
+source: projectdiscovery/` + name + `
+payload: payload/` + name + `
+sha256: ` + hex.EncodeToString(digest[:]) + `
+`
+	if err := os.WriteFile(filepath.Join(bundleDir, "bundle.yaml"), []byte(manifest), 0o644); err != nil {
+		t.Fatalf("write bundle manifest: %v", err)
+	}
+	return payloadPath
 }
 
 func containsString(values []string, want string) bool {

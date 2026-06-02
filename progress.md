@@ -1,6 +1,13 @@
 # Ouroboros Analysis Progress
 
 ## 2026-06-02
+- Continued the managed installer work in isolated worktree `.worktrees/managed-tool-bundles`.
+- Added RED app tests for workspace-local managed bundle discovery, metadata-only install planning, explicit `--execute` link creation, no payload execution, and outside-payload rejection.
+- Added RED CLI tests for `ouro toolchain managed-bundles`, `managed-install-plan`, and `managed-install --execute`.
+- Implemented managed bundle metadata under `workspace/toolchain/managed-bundles/<tool>/bundle.yaml` with payload path and SHA-256 validation.
+- Implemented `ListManagedToolBundles`, `CreateManagedToolBundleInstallPlan`, `ExecuteManagedToolBundleInstall`, and `ReadManagedToolBundle`.
+- Managed install currently creates only workspace-local links such as `workspace/toolchain/bin/httpx` and does not run payloads, fetch remotes, invoke package managers, contact targets, or use the arbitrary `install_command` execution path.
+- Updated README/development docs and wrote `docs/progress/milestone-16-managed-tool-bundles.md`; remaining gaps are release-packaged real tool payloads, rule-bundle directory integrity, PATH/native-runner integration, and parser bindings.
 - Continued the native authoring work in isolated worktree `.worktrees/authored-tool-workspace`.
 - Added RED app tests for writing a model-authored native spec into `workspace/toolchain/<tool-name>/authored-tool.yaml` plus generated `manifest.yaml`, then listing and reading it back.
 - Added RED CLI tests for `ouro toolchain authored-tool-validate`, `authored-tool-write`, and `authored-tools <workspace> [name]`, including raw-script rejection.

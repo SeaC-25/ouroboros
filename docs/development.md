@@ -66,6 +66,9 @@ GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro toolchain health ./workspace
 GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro toolchain authored-tool-validate ./authored-tool.yaml
 GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro toolchain authored-tool-write ./workspace ./authored-tool.yaml
 GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro toolchain authored-tools ./workspace
+GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro toolchain managed-bundles ./workspace
+GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro toolchain managed-install-plan ./workspace web-api-pack httpx
+GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro toolchain managed-install ./workspace web-api-pack httpx --execute
 ```
 
 `make release` writes a local tarball and `SHA256SUMS` under `dist/`. The release script respects `VERSION`, `DIST_DIR`, `GOOS`, `GOARCH`, and `GOPROXY`; it builds one target tuple and does not publish artifacts.
@@ -252,6 +255,26 @@ workspace/toolchain/<tool-name>/manifest.yaml
 ```
 
 The generated `manifest.yaml` uses `runner: native`, is loadable by the existing manifest loader, and contains no command array. Tool names must be direct path-safe segments; writes refuse traversal, symlinked toolchain paths, and existing tool directories. Read/list re-derive the manifest from `authored-tool.yaml` and reject drift, so a tampered manifest cannot silently change parser, runner, commands, capabilities, or dependencies. `ouro toolchain authored-tools <workspace> [name]` lists or reads those artifacts without executing tools, probing container runtimes, or contacting targets.
+
+Workspace-local managed tool bundles live under:
+
+```text
+workspace/toolchain/managed-bundles/<tool>/bundle.yaml
+workspace/toolchain/managed-bundles/<tool>/payload/<tool>
+```
+
+The minimal `bundle.yaml` contract is:
+
+```yaml
+name: httpx
+kind: binary
+version: "1.3.0"
+source: projectdiscovery/httpx
+payload: payload/httpx
+sha256: <hex sha256 of payload/httpx>
+```
+
+`ouro toolchain managed-bundles <workspace> [name]` lists or inspects those local bundle manifests. `ouro toolchain managed-install-plan <workspace> <pack> <dependency>` validates that the dependency exists in the selected pack manifest, resolves the matching local bundle, verifies the payload digest, and prints a metadata-only `action=link` plan. `ouro toolchain managed-install <workspace> <pack> <dependency> --execute` creates only a workspace-local link such as `workspace/toolchain/bin/httpx -> workspace/toolchain/managed-bundles/httpx/payload/httpx`; it does not run the payload, invoke package managers, fetch remotes, contact targets, dispatch workers, or execute health probes. Payload paths must stay under the bundle directory, payloads must not be symlinks, and binary payloads require a valid SHA-256 digest. This is the local bundle substrate for future release-packaged tools; actual release bundles for every tool are still a separate distribution task.
 
 `ouro toolchain install-plan <workspace>` prints only the non-executing remediation plan rows. It is intended for operators and future TUI dispatchers that need to inspect or copy the proposed command arrays without running them.
 
