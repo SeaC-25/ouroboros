@@ -1,6 +1,14 @@
 # Ouroboros Analysis Progress
 
 ## 2026-06-03
+- Continued parser evidence promotion work in isolated worktree `.worktrees/nmap-parser-evidence` from `main` commit `76c99da`.
+- Baseline validation passed before edits with `GOPROXY=https://goproxy.cn,direct go test ./... -count=1`.
+- Added RED parser and run-level tests for `nmap_xml` evidence promotion covering CIDR scope, host scope, output sanitization, out-of-scope CIDR hosts, closed/filtered/extraports filtering, scope-kind requirements, and parse failure behavior.
+- Implemented `internal/app/nmap_parser.go` and wired dispatcher case `nmap_xml`, promoting only open service facts from completed `nmap/service_fingerprint` runs while preserving parse-failure-as-parser-event behavior.
+- Parser facts now bind host scope to the scoped host target, promote only XML addresses inside CIDR scope, skip out-of-scope/unverifiable hosts, and whitelist only scoped service identity fields.
+- Focused GREEN validation passed for the new nmap parser tests and run-level fake managed nmap fixtures.
+- Parser regression passed across Nmap, Httpx, Nuclei, and Mobsfscan parser promotion tests.
+- Updated README, development docs, findings, task plan, and prepared `docs/progress/milestone-30-nmap-parser-evidence.md`.
 - Continued managed binary execution work in isolated worktree `.worktrees/managed-binary-argv-builders` from `main` commit `43d9a5f`.
 - Baseline validation passed before edits with `GOPROXY=https://goproxy.cn,direct go test ./... -count=1`.
 - Added RED app tests proving tool-level catalog nodes with installed `httpx` and `nmap` managed fixture binaries still stayed offline before registered argv builders existed, and proving excluded tool-level targets must fail before payload execution.
