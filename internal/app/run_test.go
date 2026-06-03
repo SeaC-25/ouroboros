@@ -4090,6 +4090,224 @@ execution:
 	}
 }
 
+func TestRunWorkspacePromotesNucleiJSONLToEvidenceFinding(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	scope := `version: 1
+scope:
+  target_policy: enforce
+  targets:
+    - kind: url
+      value: https://app.example
+  exclusions: []
+execution:
+  isolation: process
+  tool_concurrency: 1
+`
+	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
+		t.Fatalf("write URL scope: %v", err)
+	}
+	writeManagedBundleFixture(t, root, "nuclei", "binary", "3.3.0", `#!/usr/bin/env sh
+cat <<'JSONL'
+{"template-id":"exposure/admin-panel","info":{"name":"Exposed Admin Panel","description":"Administrative panel exposed","severity":"high","classification":{"cwe-id":["CWE-200"],"cve-id":["CVE-2024-1234"]}},"type":"http","matched-at":"https://app.example/admin","matcher-name":"word","curl-command":"curl https://app.example/admin -H 'Authorization: Bearer secret-token'","extracted-results":["secret-token"]}
+JSONL
+`)
+	writeManagedRuleBundleFixtureForRunTest(t, root, "nuclei-templates", "2026.06.03", map[string]string{
+		"http/exposure.yaml": "id: exposure-admin-panel\ninfo:\n  name: Exposed Admin Panel\n  severity: high\n",
+	})
+	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "nuclei", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed nuclei bundle: %v", err)
+	}
+	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "nuclei-templates", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed nuclei-templates bundle: %v", err)
+	}
+
+	result, err := RunWorkspaceWithOptions(ctx, root, RunOptions{
+		Action:                compiler.ActionGenerateCandidates,
+		DeferReportProjection: true,
+	})
+	if err != nil {
+		t.Fatalf("run workspace with nuclei parser: %v", err)
+	}
+	store, err := eventlog.OpenSQLite(filepath.Join(root, "replay", "events.db"))
+	if err != nil {
+		t.Fatalf("open event log: %v", err)
+	}
+	defer store.Close()
+	events, err := store.Replay(ctx, result.RunID)
+	if err != nil {
+		t.Fatalf("replay events: %v", err)
+	}
+	snapshot, err := eventlog.BuildReplaySnapshot(events)
+	if err != nil {
+		t.Fatalf("build replay snapshot: %v", err)
+	}
+
+	var findingID string
+	for _, fact := range snapshot.Blackboard.Facts {
+		if fact.Source != "parser.nuclei_jsonl" {
+			continue
+		}
+		findingID = fact.ID
+		if fact.Kind != "finding" {
+			t.Fatalf("expected nuclei parser fact kind finding, got %#v", fact)
+		}
+		for _, want := range []string{"nuclei", "exposure/admin-panel", "HIGH", "https://app.example/admin", "CWE-200", "CVE-2024-1234"} {
+			if !strings.Contains(fact.Statement, want) {
+				t.Fatalf("expected nuclei finding to contain %q, got %#v", want, fact)
+			}
+		}
+		if strings.Contains(fact.Statement, "secret-token") || strings.Contains(fact.Statement, "curl ") {
+			t.Fatalf("nuclei finding statement leaked redacted command/extracted data: %#v", fact)
+		}
+		if fact.Confidence < 0.85 {
+			t.Fatalf("expected high nuclei finding confidence, got %#v", fact)
+		}
+		break
+	}
+	if findingID == "" {
+		t.Fatalf("expected nuclei parser finding fact in replay snapshot, facts=%#v", snapshot.Blackboard.Facts)
+	}
+	node, ok := snapshot.Evidence.Node(findingID)
+	if !ok {
+		t.Fatalf("expected nuclei parser fact to project into evidence graph")
+	}
+	if node.Type != evidence.NodeFinding {
+		t.Fatalf("expected evidence finding node, got %#v", node)
+	}
+
+	foundFactEvent := false
+	foundParserEvent := false
+	for _, event := range events {
+		switch event.Type {
+		case eventlog.EventFact:
+			var payload struct {
+				FactID     string `json:"fact_id"`
+				Source     string `json:"source"`
+				TemplateID string `json:"template_id"`
+				Severity   string `json:"severity"`
+				MatchedURL string `json:"matched_url"`
+				TargetURL  string `json:"target_url"`
+				CWE        string `json:"cwe"`
+				CVE        string `json:"cve"`
+				ParserID   string `json:"parser_id"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatalf("decode fact event: %v", err)
+			}
+			if payload.FactID != findingID || payload.Source != "parser.nuclei_jsonl" {
+				continue
+			}
+			foundFactEvent = true
+			if payload.TemplateID != "exposure/admin-panel" || payload.Severity != "HIGH" || payload.MatchedURL != "https://app.example/admin" || payload.TargetURL != "https://app.example" || payload.CWE != "CWE-200" || payload.CVE != "CVE-2024-1234" || payload.ParserID != "nuclei_jsonl" {
+				t.Fatalf("expected structured nuclei fact metadata, got %#v", payload)
+			}
+		case eventlog.EventParser:
+			var payload struct {
+				Parser string `json:"parser"`
+				Status string `json:"status"`
+				ToolID string `json:"tool_id"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatalf("decode parser event: %v", err)
+			}
+			if payload.Parser == "nuclei_jsonl" && payload.Status == "parsed" && payload.ToolID == "nuclei" {
+				foundParserEvent = true
+			}
+		}
+	}
+	if !foundFactEvent {
+		t.Fatalf("expected raw nuclei fact event for %s", findingID)
+	}
+	if !foundParserEvent {
+		t.Fatalf("expected parsed nuclei parser event, events=%#v", events)
+	}
+}
+
+func TestRunWorkspaceRecordsNucleiParseFailureWithoutFinding(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	scope := `version: 1
+scope:
+  target_policy: enforce
+  targets:
+    - kind: url
+      value: https://app.example
+  exclusions: []
+execution:
+  isolation: process
+  tool_concurrency: 1
+`
+	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
+		t.Fatalf("write URL scope: %v", err)
+	}
+	writeManagedBundleFixture(t, root, "nuclei", "binary", "3.3.0", "#!/usr/bin/env sh\nprintf 'not-jsonl\\n'\n")
+	writeManagedRuleBundleFixtureForRunTest(t, root, "nuclei-templates", "2026.06.03", map[string]string{
+		"http/exposure.yaml": "id: exposure-admin-panel\ninfo:\n  name: Exposed Admin Panel\n  severity: high\n",
+	})
+	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "nuclei", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed nuclei bundle: %v", err)
+	}
+	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "nuclei-templates", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed nuclei-templates bundle: %v", err)
+	}
+
+	result, err := RunWorkspaceWithOptions(ctx, root, RunOptions{
+		Action:                compiler.ActionGenerateCandidates,
+		DeferReportProjection: true,
+	})
+	if err != nil {
+		t.Fatalf("parse failure should not fail completed nuclei run: %v", err)
+	}
+	store, err := eventlog.OpenSQLite(filepath.Join(root, "replay", "events.db"))
+	if err != nil {
+		t.Fatalf("open event log: %v", err)
+	}
+	defer store.Close()
+	events, err := store.Replay(ctx, result.RunID)
+	if err != nil {
+		t.Fatalf("replay events: %v", err)
+	}
+
+	foundParseFailure := false
+	for _, event := range events {
+		switch event.Type {
+		case eventlog.EventParser:
+			var payload struct {
+				Parser       string `json:"parser"`
+				Status       string `json:"status"`
+				ToolID       string `json:"tool_id"`
+				FindingCount int    `json:"finding_count"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatalf("decode parser event: %v", err)
+			}
+			if payload.Parser == "nuclei_jsonl" && payload.Status == "parse_failed" && payload.ToolID == "nuclei" && payload.FindingCount == 0 {
+				foundParseFailure = true
+			}
+		case eventlog.EventFact:
+			var payload struct {
+				Source string `json:"source"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatalf("decode fact event: %v", err)
+			}
+			if payload.Source == "parser.nuclei_jsonl" {
+				t.Fatalf("parse failure must not emit nuclei parser fact: %#v", payload)
+			}
+		}
+	}
+	if !foundParseFailure {
+		t.Fatalf("expected run-level nuclei parse_failed event, events=%#v", events)
+	}
+}
+
 func TestRunWorkspaceRejectsExcludedArtifactBeforeMobsfscanExecution(t *testing.T) {
 	ctx := context.Background()
 	root := filepath.Join(t.TempDir(), "workspace")

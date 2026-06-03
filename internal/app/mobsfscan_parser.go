@@ -18,18 +18,27 @@ const mobsfscanParserMaxOutputBytes = 1 << 20
 var unsafeFactIDChars = regexp.MustCompile(`[^A-Za-z0-9_.-]+`)
 
 func parserEventsForToolExecution(runID string, request ToolExecutionRequest, result ToolExecutionResult) []eventlog.Event {
-	if parserIDForRequest(request) != "mobsfscan_json" {
-		return nil
-	}
 	status := strings.TrimSpace(result.Status)
 	if status != "" && status != "completed" {
 		return nil
 	}
-	events, err := mobsfscanParserEvents(runID, request, result)
-	if err != nil {
-		return []eventlog.Event{parserStatusEvent(runID, request, result, "parse_failed", err.Error(), 0)}
+	parserID := parserIDForRequest(request)
+	switch parserID {
+	case "mobsfscan_json":
+		events, err := mobsfscanParserEvents(runID, request, result)
+		if err != nil {
+			return []eventlog.Event{parserStatusEvent(runID, request, result, parserID, "parse_failed", err.Error(), 0)}
+		}
+		return events
+	case "nuclei_jsonl":
+		events, err := nucleiParserEvents(runID, request, result)
+		if err != nil {
+			return []eventlog.Event{parserStatusEvent(runID, request, result, parserID, "parse_failed", err.Error(), 0)}
+		}
+		return events
+	default:
+		return nil
 	}
-	return events
 }
 
 func mobsfscanParserEvents(runID string, request ToolExecutionRequest, result ToolExecutionResult) ([]eventlog.Event, error) {
@@ -44,7 +53,7 @@ func mobsfscanParserEvents(runID string, request ToolExecutionRequest, result To
 	if err != nil {
 		return nil, err
 	}
-	events := []eventlog.Event{parserStatusEvent(runID, request, result, "parsed", "", len(parsed))}
+	events := []eventlog.Event{parserStatusEvent(runID, request, result, "mobsfscan_json", "parsed", "", len(parsed))}
 	for index, finding := range parsed {
 		events = append(events, mobsfscanFindingFactEvent(runID, request, result, finding, index))
 	}
@@ -161,10 +170,11 @@ func mobsfscanFindingFactEvent(runID string, request ToolExecutionRequest, resul
 	}
 }
 
-func parserStatusEvent(runID string, request ToolExecutionRequest, result ToolExecutionResult, status string, message string, findingCount int) eventlog.Event {
+func parserStatusEvent(runID string, request ToolExecutionRequest, result ToolExecutionResult, parserID string, status string, message string, findingCount int) eventlog.Event {
+	parserID = strings.TrimSpace(parserID)
 	payload := map[string]any{
-		"parser":        "mobsfscan_json",
-		"parser_id":     "mobsfscan_json",
+		"parser":        parserID,
+		"parser_id":     parserID,
 		"status":        strings.TrimSpace(status),
 		"plan_node_id":  request.Node.ID,
 		"tool":          request.Node.ManifestName,
