@@ -75,6 +75,8 @@ GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro toolchain managed-install ./
 
 `scripts/install.sh` installs only from a local release archive or extracted release directory. It deliberately rejects HTTP(S) sources, writes to `${PREFIX:-$HOME/.local}/bin/ouro`, and requires no network access. When installing a `.tar.gz` archive and a `SHA256SUMS` file exists in the same directory, the installer requires a matching checksum entry for that archive before extraction.
 
+Release archives include `toolchains/managed-bundles/nuclei-templates/`, a minimal digest-verified managed rule-bundle seed. After installing a release, import it into a workspace with `ouro toolchain release-managed-install <workspace> "${PREFIX}/share/ouroboros" web-api-pack nuclei-templates --execute`; this copies the bundle under `workspace/toolchain/managed-bundles/` and links `workspace/toolchain/rules/nuclei-templates` without network access.
+
 `make doctor` creates a temporary workspace, initializes it, and runs `ouro doctor` against it. `make doctor-strict` runs the same initialized workspace through `ouro doctor --require-safety-authorization`, which is the CI-oriented safety-bypass gate.
 
 ## Provider Configuration

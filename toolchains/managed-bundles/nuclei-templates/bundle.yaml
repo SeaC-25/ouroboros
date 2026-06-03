@@ -1,0 +1,6 @@
+name: nuclei-templates
+kind: rule_bundle
+version: "2026.06.04-ouro-seed"
+source: ouroboros/release-managed-rule-bundle-seed
+payload: payload
+sha256: 169dfc9fb0b9470b8032307f6495278d81839afeaef7cd7a8247235177e1908f
