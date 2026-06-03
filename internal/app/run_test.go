@@ -3068,7 +3068,7 @@ execution:
 	t.Fatalf("expected native managed web.discovery execution event, got %#v", events)
 }
 
-func TestRunWorkspaceDoesNotExecuteToolLevelCatalogNodeBeforeAdapterArgvBuilder(t *testing.T) {
+func TestRunWorkspaceExecutesToolLevelCatalogNodeThroughRegisteredArgvBuilder(t *testing.T) {
 	ctx := context.Background()
 	root := filepath.Join(t.TempDir(), "workspace")
 	if err := InitWorkspace(root); err != nil {
@@ -3087,8 +3087,8 @@ execution:
 	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
 		t.Fatalf("write scope: %v", err)
 	}
-	marker := filepath.Join(t.TempDir(), "tool-level-catalog-native-ran")
-	writeManagedBundleFixture(t, root, "httpx", "binary", "1.3.0", "#!/usr/bin/env sh\nprintf 'unexpected-tool-level-native-output target=%s\\n' \"$1\"\ntouch "+marker+"\n")
+	marker := filepath.Join(t.TempDir(), "tool-level-catalog-httpx-ran")
+	writeManagedBundleFixture(t, root, "httpx", "binary", "1.3.0", "#!/usr/bin/env sh\nprintf 'tool-level-httpx-output args=%s target=%s tool_id=%s adapter=%s operation=%s parser=%s dep=%s target_kind=%s\\n' \"$*\" \"$OURO_TARGET\" \"$OURO_TOOL_ID\" \"$OURO_ADAPTER_ID\" \"$OURO_OPERATION\" \"$OURO_PARSER_ID\" \"$OURO_DEPENDENCY_NAME\" \"$OURO_TARGET_KIND\"\ntouch "+marker+"\n")
 	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "httpx", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
 		t.Fatalf("install managed httpx bundle: %v", err)
 	}
@@ -3097,8 +3097,8 @@ execution:
 	if err != nil {
 		t.Fatalf("run workspace: %v", err)
 	}
-	if _, err := os.Stat(marker); !os.IsNotExist(err) {
-		t.Fatalf("tool-level catalog node must not execute native payload before adapter argv builder, marker stat err=%v", err)
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("expected tool-level catalog payload to run through registered argv builder: %v", err)
 	}
 	store, err := eventlog.OpenSQLite(filepath.Join(root, "replay", "events.db"))
 	if err != nil {
@@ -3125,12 +3125,357 @@ execution:
 		if payload.Tool != "web-api-pack" || payload.Parser != "httpx_jsonl" || payload.ExecutionStatus == "" {
 			continue
 		}
-		if payload.ExecutionStatus != "completed" || !strings.Contains(payload.Transcript, "offline tool execution boundary") {
-			t.Fatalf("expected httpx tool-level node to stay offline, got %#v", payload)
+		if payload.ExecutionStatus != "completed" {
+			t.Fatalf("expected httpx tool-level node to complete, got %#v", payload)
+		}
+		for _, want := range []string{
+			"tool-level-httpx-output",
+			"args=-json -u https://app.example",
+			"target=https://app.example",
+			"tool_id=httpx",
+			"adapter=managed_binary",
+			"operation=http_probe",
+			"parser=httpx_jsonl",
+			"dep=httpx",
+			"target_kind=url",
+		} {
+			if !strings.Contains(payload.Transcript, want) {
+				t.Fatalf("expected httpx tool-level transcript to contain %q, got %#v", want, payload)
+			}
+		}
+		if strings.Contains(payload.Transcript, "offline tool execution boundary") {
+			t.Fatalf("httpx tool-level execution must not use offline runner, got %#v", payload)
 		}
 		return
 	}
 	t.Fatalf("expected httpx tool-level execution event, got %#v", events)
+}
+
+func TestRunWorkspaceToolLevelManagedBinaryRejectsExcludedScopeBeforeExecution(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	scope := `version: 1
+scope:
+  target_policy: enforce
+  targets:
+    - kind: url
+      value: https://app.example
+  exclusions:
+    - https://app.example
+execution:
+  isolation: process
+`
+	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
+		t.Fatalf("write scope: %v", err)
+	}
+	marker := filepath.Join(t.TempDir(), "excluded-tool-level-httpx-ran")
+	writeManagedBundleFixture(t, root, "httpx", "binary", "1.3.0", "#!/usr/bin/env sh\nprintf 'should-not-run-tool-level-httpx\\n'\ntouch "+marker+"\n")
+	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "httpx", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed httpx bundle: %v", err)
+	}
+	observed := []eventlog.Event{}
+
+	_, err := RunWorkspaceWithOptions(ctx, root, RunOptions{
+		OnEvent: func(event eventlog.Event) error {
+			observed = append(observed, event)
+			return nil
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "excluded") {
+		t.Fatalf("expected excluded tool-level managed execution failure, got %v", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("excluded tool-level payload must not run, marker stat err=%v", err)
+	}
+	if len(observed) == 0 {
+		t.Fatalf("expected persisted events before excluded tool-level managed failure")
+	}
+	store, err := eventlog.OpenSQLite(filepath.Join(root, "replay", "events.db"))
+	if err != nil {
+		t.Fatalf("open event log: %v", err)
+	}
+	defer store.Close()
+	events, err := store.Replay(ctx, observed[0].RunID)
+	if err != nil {
+		t.Fatalf("replay events: %v", err)
+	}
+	for _, event := range events {
+		if event.Type != eventlog.EventTool {
+			continue
+		}
+		var payload struct {
+			Tool            string `json:"tool"`
+			Parser          string `json:"parser"`
+			ExecutionStatus string `json:"execution_status"`
+			Transcript      string `json:"transcript"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatalf("decode tool payload: %v", err)
+		}
+		if payload.Tool == "web-api-pack" && payload.Parser == "httpx_jsonl" && payload.ExecutionStatus == "failed" {
+			if !strings.Contains(payload.Transcript, "excluded") {
+				t.Fatalf("expected exclusion transcript, got %#v", payload)
+			}
+			if strings.Contains(payload.Transcript, "should-not-run-tool-level-httpx") {
+				t.Fatalf("excluded tool-level command must not execute, got %#v", payload)
+			}
+			return
+		}
+	}
+	t.Fatalf("expected durable failed tool-level managed tool event for excluded target, got %#v", events)
+}
+
+func TestRunWorkspaceExecutesToolLevelNmapThroughRegisteredArgvBuilder(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	scope := `version: 1
+scope:
+  target_policy: enforce
+  targets:
+    - kind: cidr
+      value: 10.0.0.0/24
+  exclusions: []
+execution:
+  isolation: process
+`
+	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
+		t.Fatalf("write scope: %v", err)
+	}
+	marker := filepath.Join(t.TempDir(), "tool-level-catalog-nmap-ran")
+	writeManagedBundleFixture(t, root, "nmap", "binary", "7.95", "#!/usr/bin/env sh\nprintf 'tool-level-nmap-output args=%s target=%s tool_id=%s operation=%s parser=%s dep=%s target_kind=%s scope_target_kind=%s\\n' \"$*\" \"$OURO_TARGET\" \"$OURO_TOOL_ID\" \"$OURO_OPERATION\" \"$OURO_PARSER_ID\" \"$OURO_DEPENDENCY_NAME\" \"$OURO_TARGET_KIND\" \"$OURO_SCOPE_TARGET_KIND\"\ntouch "+marker+"\n")
+	if _, err := ExecuteManagedToolBundleInstall(root, "infra-pack", "nmap", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed nmap bundle: %v", err)
+	}
+
+	result, err := RunWorkspace(ctx, root)
+	if err != nil {
+		t.Fatalf("run workspace: %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("expected nmap tool-level payload to run through registered argv builder: %v", err)
+	}
+	store, err := eventlog.OpenSQLite(filepath.Join(root, "replay", "events.db"))
+	if err != nil {
+		t.Fatalf("open event log: %v", err)
+	}
+	defer store.Close()
+	events, err := store.Replay(ctx, result.RunID)
+	if err != nil {
+		t.Fatalf("replay events: %v", err)
+	}
+	for _, event := range events {
+		if event.Type != eventlog.EventTool {
+			continue
+		}
+		var payload struct {
+			Tool            string `json:"tool"`
+			Parser          string `json:"parser"`
+			ExecutionStatus string `json:"execution_status"`
+			Transcript      string `json:"transcript"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatalf("decode tool payload: %v", err)
+		}
+		if payload.Tool != "infra-pack" || payload.Parser != "nmap_xml" || payload.ExecutionStatus == "" {
+			continue
+		}
+		if payload.ExecutionStatus != "completed" {
+			t.Fatalf("expected nmap tool-level node to complete, got %#v", payload)
+		}
+		for _, want := range []string{
+			"tool-level-nmap-output",
+			"args=-oX - 10.0.0.0/24",
+			"target=10.0.0.0/24",
+			"tool_id=nmap",
+			"operation=service_fingerprint",
+			"parser=nmap_xml",
+			"dep=nmap",
+			"target_kind=host",
+			"scope_target_kind=cidr",
+		} {
+			if !strings.Contains(payload.Transcript, want) {
+				t.Fatalf("expected nmap tool-level transcript to contain %q, got %#v", want, payload)
+			}
+		}
+		if strings.Contains(payload.Transcript, "offline tool execution boundary") {
+			t.Fatalf("nmap tool-level execution must not use offline runner, got %#v", payload)
+		}
+		return
+	}
+	t.Fatalf("expected nmap tool-level execution event, got %#v", events)
+}
+
+func TestNativeManagedRunCommandKeepsUnknownToolLevelOperationOffline(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	writeManagedBundleFixture(t, root, "httpx", "binary", "1.3.0", "#!/usr/bin/env sh\nprintf 'should-not-run-unknown-operation\\n'\n")
+	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "httpx", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed httpx bundle: %v", err)
+	}
+	request := ToolExecutionRequest{
+		WorkspaceRoot: root,
+		Node: compiler.PlanNode{
+			ID:             "unknown-tool-level:01",
+			Capability:     "web.discovery",
+			ManifestName:   "web-api-pack",
+			ToolID:         "httpx",
+			AdapterID:      "managed_binary",
+			Operation:      "unknown_probe",
+			ParserID:       "generic_jsonl",
+			TargetKind:     "url",
+			DependencyName: "httpx",
+			DependencyKind: "binary",
+			Runner:         "native",
+		},
+		ScopeTargets:  []ScopeTarget{{Kind: "url", Value: "https://app.example"}},
+		IsolationMode: "process",
+	}
+
+	command, ok, err := nativeManagedRunCommand(request)
+	if err != nil || ok || len(command) > 0 {
+		t.Fatalf("unknown tool-level operation must stay offline, command=%#v ok=%v err=%v", command, ok, err)
+	}
+}
+
+func TestNativeManagedRunCommandRequiresWorkspaceManagedBinaryForToolLevelBuilder(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	request := ToolExecutionRequest{
+		WorkspaceRoot: root,
+		Node: compiler.PlanNode{
+			ID:             "missing-managed-binary:01",
+			Capability:     "web.discovery",
+			ManifestName:   "web-api-pack",
+			ToolID:         "httpx",
+			AdapterID:      "managed_binary",
+			Operation:      "http_probe",
+			ParserID:       "httpx_jsonl",
+			TargetKind:     "url",
+			DependencyName: "httpx",
+			DependencyKind: "binary",
+			Runner:         "native",
+		},
+		ScopeTargets:  []ScopeTarget{{Kind: "url", Value: "https://app.example"}},
+		IsolationMode: "process",
+	}
+
+	command, ok, err := nativeManagedRunCommand(request)
+	if err != nil || ok || len(command) > 0 {
+		t.Fatalf("tool-level builder must not fall through to ambient PATH, command=%#v ok=%v err=%v", command, ok, err)
+	}
+}
+
+func TestNativeManagedRunCommandUsesResolvedWorkspaceManagedBinaryForToolLevelBuilder(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	payloadPath := writeManagedBundleFixture(t, root, "httpx", "binary", "1.3.0", "#!/usr/bin/env sh\nprintf 'resolved-workspace-managed-binary\\n'\n")
+	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "httpx", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed httpx bundle: %v", err)
+	}
+	request := ToolExecutionRequest{
+		WorkspaceRoot: root,
+		Node: compiler.PlanNode{
+			ID:             "resolved-managed-binary:01",
+			Capability:     "web.discovery",
+			ManifestName:   "web-api-pack",
+			ToolID:         "httpx",
+			AdapterID:      "managed_binary",
+			Operation:      "http_probe",
+			ParserID:       "httpx_jsonl",
+			TargetKind:     "url",
+			DependencyName: "httpx",
+			DependencyKind: "binary",
+			Runner:         "native",
+		},
+		ScopeTargets:  []ScopeTarget{{Kind: "url", Value: "https://app.example"}},
+		IsolationMode: "process",
+	}
+
+	command, ok, err := nativeManagedRunCommand(request)
+	if err != nil || !ok {
+		t.Fatalf("expected tool-level builder command, command=%#v ok=%v err=%v", command, ok, err)
+	}
+	if len(command) == 0 || command[0] != payloadPath {
+		t.Fatalf("expected resolved workspace-managed binary path %q, got %#v", payloadPath, command)
+	}
+}
+
+func TestNativeManagedRunCommandKeepsToolLevelBuilderOfflineInContainerIsolation(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	writeManagedBundleFixture(t, root, "httpx", "binary", "1.3.0", "#!/usr/bin/env sh\nprintf 'should-not-run-container-tool-level-builder\\n'\n")
+	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "httpx", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed httpx bundle: %v", err)
+	}
+	request := ToolExecutionRequest{
+		WorkspaceRoot: root,
+		Node: compiler.PlanNode{
+			ID:             "container-tool-level:01",
+			Capability:     "web.discovery",
+			ManifestName:   "web-api-pack",
+			ToolID:         "httpx",
+			AdapterID:      "managed_binary",
+			Operation:      "http_probe",
+			ParserID:       "httpx_jsonl",
+			TargetKind:     "url",
+			DependencyName: "httpx",
+			DependencyKind: "binary",
+			Runner:         "native",
+		},
+		ScopeTargets:  []ScopeTarget{{Kind: "url", Value: "https://app.example"}},
+		IsolationMode: "container",
+	}
+
+	command, ok, err := nativeManagedRunCommand(request)
+	if err != nil || ok || len(command) > 0 {
+		t.Fatalf("container-mode tool-level builder must stay offline, command=%#v ok=%v err=%v", command, ok, err)
+	}
+}
+
+func TestNativeManagedRunCommandRequiresBinaryDependencyForToolLevelBuilder(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	writeManagedBundleFixture(t, root, "httpx", "binary", "1.3.0", "#!/usr/bin/env sh\nprintf 'should-not-run-without-dependency-contract\\n'\n")
+	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "httpx", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed httpx bundle: %v", err)
+	}
+	request := ToolExecutionRequest{
+		WorkspaceRoot: root,
+		Node: compiler.PlanNode{
+			ID:           "missing-dependency-contract:01",
+			Capability:   "web.discovery",
+			ManifestName: "web-api-pack",
+			ToolID:       "httpx",
+			AdapterID:    "managed_binary",
+			Operation:    "http_probe",
+			ParserID:     "httpx_jsonl",
+			TargetKind:   "url",
+			Runner:       "native",
+		},
+		ScopeTargets:  []ScopeTarget{{Kind: "url", Value: "https://app.example"}},
+		IsolationMode: "process",
+	}
+
+	command, ok, err := nativeManagedRunCommand(request)
+	if err != nil || ok || len(command) > 0 {
+		t.Fatalf("tool-level builder must require a binary dependency contract, command=%#v ok=%v err=%v", command, ok, err)
+	}
 }
 
 func TestRunWorkspaceNativeManagedBundleRejectsExcludedScopeBeforeExecution(t *testing.T) {

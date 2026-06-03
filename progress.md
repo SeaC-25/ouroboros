@@ -1,5 +1,20 @@
 # Ouroboros Analysis Progress
 
+## 2026-06-03
+- Continued managed binary execution work in isolated worktree `.worktrees/managed-binary-argv-builders` from `main` commit `43d9a5f`.
+- Baseline validation passed before edits with `GOPROXY=https://goproxy.cn,direct go test ./... -count=1`.
+- Added RED app tests proving tool-level catalog nodes with installed `httpx` and `nmap` managed fixture binaries still stayed offline before registered argv builders existed, and proving excluded tool-level targets must fail before payload execution.
+- Implemented the initial native `managed_binary` argv builder path for tool-level catalog nodes:
+  - `httpx` / `http_probe`: `httpx -json -u <target>`
+  - `nmap` / `service_fingerprint`: `nmap -oX - <target>`
+- Kept execution routed through the existing command runner so scope target checks, exclusions, argument validation, attempt directories, timeout handling, workspace-managed binary resolution, and isolation semantics stay centralized.
+- Added native command environment variables for tool-level identity: `OURO_TOOL_ID`, `OURO_ADAPTER_ID`, `OURO_OPERATION`, `OURO_PARSER_ID`, `OURO_TARGET_KIND`, `OURO_SCOPE_TARGET_KIND`, `OURO_DEPENDENCY_NAME`, and `OURO_DEPENDENCY_KIND`.
+- Added fail-closed regression coverage showing unknown tool-level operations, container isolation, missing binary dependency contracts, and missing workspace-managed binaries stay offline instead of falling through to generic native execution or ambient `PATH`; supported builders now hand command execution the resolved workspace-managed payload path rather than a bare binary name.
+- Focused GREEN validation passed with `GOPROXY=https://goproxy.cn,direct go test ./internal/app -run 'TestRunWorkspace(ExecutesToolLevelCatalogNodeThroughRegisteredArgvBuilder|ToolLevelManagedBinaryRejectsExcludedScopeBeforeExecution|ExecutesToolLevelNmapThroughRegisteredArgvBuilder)|TestNativeManagedRunCommand(KeepsUnknownToolLevelOperationOffline|RequiresWorkspaceManagedBinaryForToolLevelBuilder|UsesResolvedWorkspaceManagedBinaryForToolLevelBuilder|KeepsToolLevelBuilderOfflineInContainerIsolation|RequiresBinaryDependencyForToolLevelBuilder)' -count=1 -v`.
+- Updated README, development docs, and wrote `docs/progress/milestone-23-managed-binary-argv-builders.md`.
+- Broader validation passed with `GOPROXY=https://goproxy.cn,direct go test ./internal/app -count=1`, `GOPROXY=https://goproxy.cn,direct go test ./... -count=1`, `make doctor-strict`, and `git diff --check`; because this line updates `progress.md`, a final no-edit validation is being run afterward.
+- Remaining gaps are argv builders for the rest of the catalog, runtime parser dispatch, domain/host target derivation, container-mode managed execution, and real bundled production payloads.
+
 ## 2026-06-02
 - Continued tool-level compiler integration in isolated worktree `.worktrees/tool-level-compiler-plan`.
 - Added compiler support for expanding built-in pack manifests into concrete tool-level plan nodes with `ToolID`, `AdapterID`, `Operation`, `ParserID`, `TargetKind`, and dependency identity.

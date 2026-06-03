@@ -1642,7 +1642,21 @@ func nativeManagedRunCommand(request ToolExecutionRequest) ([]string, bool, erro
 		return nil, false, nil
 	}
 	if catalogToolLevelNodeRequiresAdapterArgvBuilder(request.Node) {
-		return nil, false, nil
+		command, ok, err := managedBinaryRunCommand(request)
+		if err != nil {
+			return nil, true, err
+		}
+		if !ok {
+			return nil, false, nil
+		}
+		if resolved, ok, err := workspaceToolchainExecutable(request.WorkspaceRoot, command[0]); err != nil {
+			return nil, true, err
+		} else if !ok {
+			return nil, false, nil
+		} else {
+			command[0] = resolved
+		}
+		return command, true, nil
 	}
 	candidates := nativeManagedToolCandidates(request)
 	for _, candidate := range candidates {
@@ -1662,6 +1676,74 @@ func nativeManagedRunCommand(request ToolExecutionRequest) ([]string, bool, erro
 func catalogToolLevelNodeRequiresAdapterArgvBuilder(node compiler.PlanNode) bool {
 	return strings.TrimSpace(node.ToolID) != "" &&
 		(strings.TrimSpace(node.AdapterID) != "" || strings.TrimSpace(node.Operation) != "")
+}
+
+func managedBinaryRunCommand(request ToolExecutionRequest) ([]string, bool, error) {
+	node := request.Node
+	if strings.TrimSpace(node.AdapterID) != "managed_binary" {
+		return nil, false, nil
+	}
+	operation, ok := toolchain.DefaultAuthoredToolRegistry().AdapterOperation(node.AdapterID, node.Operation)
+	if !ok {
+		return nil, false, nil
+	}
+	binary := managedBinaryDependencyName(node)
+	if binary == "" || !containsTrimmedValue(operation.DependencyNames, binary) {
+		return nil, false, nil
+	}
+	targetValue, hasTarget := managedBinaryTargetValue(request)
+	if !hasTarget {
+		return nil, false, nil
+	}
+	return managedBinaryCommandFor(binary, node.Operation, targetValue)
+}
+
+func managedBinaryDependencyName(node compiler.PlanNode) string {
+	if strings.TrimSpace(node.DependencyKind) == "binary" {
+		if dependency := strings.TrimSpace(node.DependencyName); dependency != "" {
+			return dependency
+		}
+	}
+	if dependency := singleNativeBinaryDependency(node.Dependencies); dependency != "" {
+		return dependency
+	}
+	return ""
+}
+
+func managedBinaryTargetValue(request ToolExecutionRequest) (string, bool) {
+	if target, ok := scopedTargetForNode(request.Node, request.ScopeTargets); ok {
+		return strings.TrimSpace(target.Value), true
+	}
+	return "", false
+}
+
+func managedBinaryCommandFor(binary string, operation string, targetValue string) ([]string, bool, error) {
+	binary = strings.TrimSpace(binary)
+	targetValue = strings.TrimSpace(targetValue)
+	if binary == "" || targetValue == "" {
+		return nil, false, nil
+	}
+	switch strings.TrimSpace(operation) {
+	case "http_probe":
+		if binary == "httpx" {
+			return []string{binary, "-json", "-u", targetValue}, true, nil
+		}
+	case "service_fingerprint":
+		if binary == "nmap" {
+			return []string{binary, "-oX", "-", targetValue}, true, nil
+		}
+	}
+	return nil, false, nil
+}
+
+func containsTrimmedValue(values []string, want string) bool {
+	want = strings.TrimSpace(want)
+	for _, value := range values {
+		if strings.TrimSpace(value) == want {
+			return true
+		}
+	}
+	return false
 }
 
 func nativeManagedToolCandidates(request ToolExecutionRequest) []string {
@@ -2301,12 +2383,30 @@ func commandContextEnvironmentFor(request ToolExecutionRequest, workspaceRoot st
 		"OURO_TOOLCHAIN_RULES=" + toolchainRules,
 	}
 	if target, ok := scopedTargetForNode(request.Node, request.ScopeTargets); ok {
+		targetKind := strings.TrimSpace(request.Node.TargetKind)
+		if targetKind == "" {
+			targetKind = target.Kind
+		}
 		env = append(env,
 			"OURO_TARGET="+target.Value,
-			"OURO_TARGET_KIND="+target.Kind,
+			"OURO_TARGET_KIND="+targetKind,
+			"OURO_SCOPE_TARGET_KIND="+target.Kind,
 		)
 	}
+	env = append(env, toolLevelCommandEnvironment(request)...)
 	return env
+}
+
+func toolLevelCommandEnvironment(request ToolExecutionRequest) []string {
+	node := request.Node
+	return []string{
+		"OURO_TOOL_ID=" + strings.TrimSpace(node.ToolID),
+		"OURO_ADAPTER_ID=" + strings.TrimSpace(node.AdapterID),
+		"OURO_OPERATION=" + strings.TrimSpace(node.Operation),
+		"OURO_PARSER_ID=" + strings.TrimSpace(node.ParserID),
+		"OURO_DEPENDENCY_NAME=" + strings.TrimSpace(node.DependencyName),
+		"OURO_DEPENDENCY_KIND=" + strings.TrimSpace(node.DependencyKind),
+	}
 }
 
 func prependPathValue(first string, rest string) string {
