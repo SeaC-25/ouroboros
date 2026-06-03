@@ -6117,6 +6117,117 @@ touch `+marker+`
 	}
 }
 
+func TestRunWorkspacePromotesSqlmapManagedOutputFileToEvidenceFinding(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	scope := `version: 1
+scope:
+  target_policy: enforce
+  targets:
+    - kind: url
+      value: https://app.example/search?q=hello
+  exclusions: []
+execution:
+  isolation: process
+  tool_concurrency: 1
+`
+	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
+		t.Fatalf("write URL scope: %v", err)
+	}
+	marker := filepath.Join(t.TempDir(), "tool-level-sqlmap-ran")
+	writeManagedBundleFixture(t, root, "sqlmap", "binary", "1.8.12", `#!/usr/bin/env sh
+out=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--output-dir" ]; then
+    shift
+    out="$1"
+  fi
+  shift
+done
+mkdir -p "$out"
+cat > "$out/ouro-sqlmap.json" <<'JSON'
+{
+  "findings": [{
+    "url": "https://app.example/search?q=secret-token#frag",
+    "parameter": "q",
+    "place": "GET",
+    "technique": "boolean-based blind",
+    "dbms": "PostgreSQL",
+    "title": "SQL injection vulnerability",
+    "vulnerable": true,
+    "payload": "secret-token",
+    "request": "Authorization: Bearer secret-token",
+    "response": "secret-token",
+    "dump": {"users": ["secret-token"]}
+  }]
+}
+JSON
+touch `+marker+`
+`)
+	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "sqlmap", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed sqlmap bundle: %v", err)
+	}
+
+	result, err := RunWorkspaceWithOptions(ctx, root, RunOptions{
+		Action:                compiler.ActionGenerateCandidates,
+		DeferReportProjection: true,
+	})
+	if err != nil {
+		t.Fatalf("run workspace with sqlmap parser: %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("expected sqlmap payload to run through registered argv builder: %v", err)
+	}
+	store, err := eventlog.OpenSQLite(filepath.Join(root, "replay", "events.db"))
+	if err != nil {
+		t.Fatalf("open event log: %v", err)
+	}
+	defer store.Close()
+	events, err := store.Replay(ctx, result.RunID)
+	if err != nil {
+		t.Fatalf("replay events: %v", err)
+	}
+	snapshot, err := eventlog.BuildReplaySnapshot(events)
+	if err != nil {
+		t.Fatalf("build replay snapshot: %v", err)
+	}
+
+	var findingID string
+	for _, fact := range snapshot.Blackboard.Facts {
+		if fact.Source != "parser.sqlmap_json" {
+			continue
+		}
+		findingID = fact.ID
+		if fact.Kind != "finding" {
+			t.Fatalf("expected sqlmap parser fact kind finding, got %#v", fact)
+		}
+		for _, want := range []string{"sqlmap", "https://app.example/search", "parameter=q", "boolean-based blind", "PostgreSQL"} {
+			if !strings.Contains(fact.Statement, want) {
+				t.Fatalf("expected sqlmap finding to contain %q, got %#v", want, fact)
+			}
+		}
+		for _, leaked := range []string{"secret-token", "Authorization", "payload", "request", "response", "dump", "?", "#frag"} {
+			if strings.Contains(fact.Statement, leaked) {
+				t.Fatalf("sqlmap finding statement leaked redacted output %q: %#v", leaked, fact)
+			}
+		}
+		break
+	}
+	if findingID == "" {
+		t.Fatalf("expected sqlmap parser finding fact in replay snapshot, facts=%#v", snapshot.Blackboard.Facts)
+	}
+	node, ok := snapshot.Evidence.Node(findingID)
+	if !ok {
+		t.Fatalf("expected sqlmap parser fact to project into evidence graph")
+	}
+	if node.Type != evidence.NodeFinding {
+		t.Fatalf("expected evidence finding node, got %#v", node)
+	}
+}
+
 func TestRunWorkspacePromotesURLListTextToEvidenceSurface(t *testing.T) {
 	ctx := context.Background()
 	root := filepath.Join(t.TempDir(), "workspace")
@@ -6239,6 +6350,144 @@ func TestNativeManagedRunCommandBuildsArjunParameterDiscoveryArgvForURLScope(t *
 	wantOutput := filepath.Join(root, "toolchain", "managed-outputs", "arjun", "arjun-url-scope-01.json")
 	if command[4] != wantOutput {
 		t.Fatalf("unexpected arjun managed output path: got %q want %q", command[4], wantOutput)
+	}
+}
+
+func TestNativeManagedRunCommandBuildsSqlmapInjectionTestArgvForURLScope(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	payloadPath := writeManagedBundleFixture(t, root, "sqlmap", "binary", "1.8.12", "#!/usr/bin/env sh\nprintf 'sqlmap-url\\n'\n")
+	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "sqlmap", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed sqlmap bundle: %v", err)
+	}
+	request := ToolExecutionRequest{
+		WorkspaceRoot: root,
+		Node: compiler.PlanNode{
+			ID:             "sqlmap-url-scope:01",
+			Capability:     "web.candidate_generation",
+			ManifestName:   "web-api-pack",
+			ToolID:         "sqlmap",
+			AdapterID:      "managed_binary",
+			Operation:      "injection_test",
+			ParserID:       "sqlmap_json",
+			TargetKind:     "url",
+			DependencyName: "sqlmap",
+			DependencyKind: "binary",
+			Runner:         "native",
+		},
+		ScopeTargets:      []ScopeTarget{{Kind: "url", Value: "https://app.example/search?q=hello"}},
+		ScopeTargetPolicy: "enforce",
+		IsolationMode:     "process",
+	}
+
+	command, target, ok, err := nativeManagedRunCommandWithTarget(request)
+	if err != nil || !ok {
+		t.Fatalf("expected sqlmap command for URL scope, command=%#v target=%#v ok=%v err=%v", command, target, ok, err)
+	}
+	if target.Kind != "url" || target.Value != "https://app.example/search?q=hello" {
+		t.Fatalf("expected selected URL target, got %#v", target)
+	}
+	if len(command) != 11 {
+		t.Fatalf("unexpected sqlmap argv length: %#v", command)
+	}
+	if command[0] != payloadPath || command[1] != "-u" || command[2] != "https://app.example/search?q=hello" || command[3] != "--batch" || command[4] != "--level=1" || command[5] != "--risk=1" || command[6] != "--technique=BEU" || command[7] != "--disable-coloring" || command[8] != "--output-dir" {
+		t.Fatalf("unexpected sqlmap argv: %#v", command)
+	}
+	wantOutputDir := filepath.Join(root, "toolchain", "managed-outputs", "sqlmap", "sqlmap-url-scope-01")
+	if command[9] != wantOutputDir || command[10] != "--flush-session" {
+		t.Fatalf("unexpected sqlmap managed output/control args: %#v", command)
+	}
+	for _, forbidden := range []string{"--dump", "--dbs", "--tables", "--columns", "--schema", "--forms", "--crawl", "--os-shell", "--file-read", "--sql-shell", "--threads=2", "--risk=2", "--level=2"} {
+		for _, arg := range command {
+			if arg == forbidden {
+				t.Fatalf("sqlmap argv must not include unsafe option %q: %#v", forbidden, command)
+			}
+		}
+	}
+}
+
+func TestNativeManagedRunCommandKeepsSqlmapOfflineForNonURLScope(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	writeManagedBundleFixture(t, root, "sqlmap", "binary", "1.8.12", "#!/usr/bin/env sh\nprintf 'sqlmap-non-url\\n'\n")
+	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "sqlmap", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed sqlmap bundle: %v", err)
+	}
+	for _, scopeTarget := range []ScopeTarget{
+		{Kind: "domain", Value: "example.com"},
+		{Kind: "host", Value: "www.example.com"},
+		{Kind: "cidr", Value: "10.0.0.0/24"},
+	} {
+		t.Run(scopeTarget.Kind, func(t *testing.T) {
+			request := ToolExecutionRequest{
+				WorkspaceRoot: root,
+				Node: compiler.PlanNode{
+					ID:             "sqlmap-non-url:01",
+					Capability:     "web.candidate_generation",
+					ManifestName:   "web-api-pack",
+					ToolID:         "sqlmap",
+					AdapterID:      "managed_binary",
+					Operation:      "injection_test",
+					ParserID:       "sqlmap_json",
+					TargetKind:     "url",
+					DependencyName: "sqlmap",
+					DependencyKind: "binary",
+					Runner:         "native",
+				},
+				ScopeTargets:      []ScopeTarget{scopeTarget},
+				ScopeTargetPolicy: "enforce",
+				IsolationMode:     "process",
+			}
+
+			command, ok, err := nativeManagedRunCommand(request)
+			if err != nil || ok || len(command) > 0 {
+				t.Fatalf("sqlmap must stay offline for non-URL scope %#v, command=%#v ok=%v err=%v", scopeTarget, command, ok, err)
+			}
+		})
+	}
+}
+
+func TestNativeManagedRunCommandRejectsExcludedSqlmapURLBeforeOutputDir(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	writeManagedBundleFixture(t, root, "sqlmap", "binary", "1.8.12", "#!/usr/bin/env sh\nprintf 'sqlmap-excluded\\n'")
+	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "sqlmap", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed sqlmap bundle: %v", err)
+	}
+	request := ToolExecutionRequest{
+		WorkspaceRoot: root,
+		Node: compiler.PlanNode{
+			ID:             "sqlmap-excluded-url:01",
+			Capability:     "web.candidate_generation",
+			ManifestName:   "web-api-pack",
+			ToolID:         "sqlmap",
+			AdapterID:      "managed_binary",
+			Operation:      "injection_test",
+			ParserID:       "sqlmap_json",
+			TargetKind:     "url",
+			DependencyName: "sqlmap",
+			DependencyKind: "binary",
+			Runner:         "native",
+		},
+		ScopeTargets:      []ScopeTarget{{Kind: "url", Value: "https://app.example/search?q=hello"}},
+		ScopeExclusions:   []string{"https://app.example/search"},
+		ScopeTargetPolicy: "enforce",
+		IsolationMode:     "process",
+	}
+
+	command, ok, err := nativeManagedRunCommand(request)
+	if err == nil || !strings.Contains(err.Error(), "excluded") || !ok || len(command) > 0 {
+		t.Fatalf("expected excluded sqlmap URL to fail before argv, command=%#v ok=%v err=%v", command, ok, err)
+	}
+	outputDir := filepath.Join(root, "toolchain", "managed-outputs", "sqlmap")
+	if _, statErr := os.Stat(outputDir); !os.IsNotExist(statErr) {
+		t.Fatalf("excluded sqlmap URL should fail before creating output dir, stat err=%v", statErr)
 	}
 }
 

@@ -1778,6 +1778,10 @@ func managedBinaryTargetKinds(binary string, operation string, node compiler.Pla
 		if binary == "dalfox" {
 			return []string{string(domain.TargetURL)}
 		}
+	case "injection_test":
+		if binary == "sqlmap" {
+			return []string{string(domain.TargetURL)}
+		}
 	case "parameter_discovery":
 		if binary == "arjun" {
 			return []string{string(domain.TargetURL)}
@@ -1879,6 +1883,23 @@ func managedBinaryCommandFor(request ToolExecutionRequest, binary string, operat
 				return nil, true, fmt.Errorf("dalfox command requires valid url scope target")
 			}
 			return []string{binary, "url", target.Value, "--format", "json", "--silence", "--no-color", "--no-spinner"}, true, nil
+		}
+	case "injection_test":
+		if binary == "sqlmap" {
+			if target.Kind != string(domain.TargetURL) {
+				return nil, false, nil
+			}
+			if !targetPolicyDisabled(request.ScopeTargetPolicy) && scopeTargetExcludedForRequest(request, target) {
+				return nil, true, fmt.Errorf("scope target %s is excluded for capability %s", target.Value, request.Node.Capability)
+			}
+			if parsedWebURL(target.Value) == nil {
+				return nil, true, fmt.Errorf("sqlmap command requires valid url scope target")
+			}
+			outputDir, err := managedOutputDirForRequest(request, binary)
+			if err != nil {
+				return nil, true, err
+			}
+			return []string{binary, "-u", target.Value, "--batch", "--level=1", "--risk=1", "--technique=BEU", "--disable-coloring", "--output-dir", outputDir, "--flush-session"}, true, nil
 		}
 	case "parameter_discovery":
 		if binary == "arjun" {
@@ -2037,8 +2058,46 @@ func managedOutputPathForRequest(request ToolExecutionRequest, binary string) (s
 	return filepath.Join(outputDir, safeFactIDPart(request.Node.ID)+".json"), nil
 }
 
+func managedOutputDirForRequest(request ToolExecutionRequest, binary string) (string, error) {
+	root := strings.TrimSpace(request.WorkspaceRoot)
+	if root == "" {
+		return "", fmt.Errorf("%s command requires workspace root", binary)
+	}
+	name, err := validateAuthoredToolName(binary)
+	if err != nil {
+		return "", err
+	}
+	outputDir := filepath.Join(root, "toolchain", "managed-outputs", name, safeFactIDPart(request.Node.ID))
+	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+		return "", fmt.Errorf("create %s managed output directory: %w", name, err)
+	}
+	return outputDir, nil
+}
+
+func managedOutputFileInDirForRequest(request ToolExecutionRequest, binary string, filename string) (string, error) {
+	filename = strings.TrimSpace(filename)
+	if filename == "" || filepath.Base(filename) != filename {
+		return "", fmt.Errorf("%s managed output filename is invalid", binary)
+	}
+	outputDir, err := managedOutputDirForRequest(request, binary)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(outputDir, filename), nil
+}
+
 func managedOutputTranscriptForRequest(request ToolExecutionRequest) (string, bool, error) {
 	binary := managedBinaryDependencyName(request.Node)
+	if strings.TrimSpace(request.Node.ParserID) == "sqlmap_json" {
+		if binary != "sqlmap" {
+			return "", false, nil
+		}
+		outputPath, err := managedOutputFileInDirForRequest(request, binary, "ouro-sqlmap.json")
+		if err != nil {
+			return "", true, err
+		}
+		return managedOutputTranscriptFromPath(binary, outputPath)
+	}
 	switch strings.TrimSpace(request.Node.ParserID) {
 	case "amass_json":
 		if binary != "amass" {
@@ -2059,6 +2118,10 @@ func managedOutputTranscriptForRequest(request ToolExecutionRequest) (string, bo
 	if err != nil {
 		return "", true, err
 	}
+	return managedOutputTranscriptFromPath(binary, outputPath)
+}
+
+func managedOutputTranscriptFromPath(binary string, outputPath string) (string, bool, error) {
 	info, err := os.Lstat(outputPath)
 	if err != nil {
 		if os.IsNotExist(err) {
