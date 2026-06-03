@@ -10724,6 +10724,44 @@ providers:
 	}
 }
 
+func TestRunWorkspaceRejectsOpenAICompatibleProviderNegativeCostMetadata(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	called := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	providers := fmt.Sprintf(`version: 1
+providers:
+  - name: local-openai
+    type: openai_compatible
+    model: gpt-test
+    base_url: %s
+    context_window_tokens: -1
+    input_price_per_million_tokens: -0.01
+    output_price_per_million_tokens: -0.01
+    enabled: true
+`, server.URL)
+	if err := os.WriteFile(filepath.Join(root, "providers.yaml"), []byte(providers), 0o644); err != nil {
+		t.Fatalf("write providers: %v", err)
+	}
+
+	_, err := RunWorkspace(context.Background(), root)
+	if err == nil {
+		t.Fatalf("expected negative provider cost metadata to fail")
+	}
+	if called {
+		t.Fatalf("expected invalid provider metadata to fail before HTTP")
+	}
+	if !strings.Contains(err.Error(), "context_window_tokens") {
+		t.Fatalf("expected context window validation error, got %v", err)
+	}
+}
+
 func TestRunWorkspaceRejectsInvalidScope(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
 	if err := InitWorkspace(root); err != nil {

@@ -9,8 +9,11 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
+
+	"github.com/ouroboros/ouroboros/internal/modelruntime"
 )
 
 type ProviderGenerationRequest struct {
@@ -20,13 +23,17 @@ type ProviderGenerationRequest struct {
 }
 
 type ProviderGenerationResult struct {
-	ProviderName string
-	Model        string
-	Text         string
-	InputTokens  int
-	OutputTokens int
-	TotalTokens  int
-	Latency      time.Duration
+	ProviderName           string
+	Model                  string
+	Text                   string
+	InputTokens            int
+	OutputTokens           int
+	TotalTokens            int
+	Latency                time.Duration
+	ContextWindowTokens    int
+	Capabilities           []string
+	EstimatedCostUSD       float64
+	EstimatedCostAvailable bool
 }
 
 func GenerateProviderMessage(ctx context.Context, root string, request ProviderGenerationRequest) (ProviderGenerationResult, error) {
@@ -113,15 +120,54 @@ func generateOpenAICompatibleMessage(ctx context.Context, provider Provider, req
 	if totalTokens == 0 {
 		totalTokens = decoded.Usage.PromptTokens + decoded.Usage.CompletionTokens
 	}
+	inputPrice, outputPrice, costAvailable := providerGenerationPricing(provider)
+	estimatedCost := 0.0
+	if costAvailable {
+		estimatedCost = modelruntime.EstimateTokenCost(decoded.Usage.PromptTokens, decoded.Usage.CompletionTokens, inputPrice, outputPrice)
+	}
 	return ProviderGenerationResult{
-		ProviderName: strings.TrimSpace(provider.Name),
-		Model:        strings.TrimSpace(provider.Model),
-		Text:         text,
-		InputTokens:  decoded.Usage.PromptTokens,
-		OutputTokens: decoded.Usage.CompletionTokens,
-		TotalTokens:  totalTokens,
-		Latency:      latency,
+		ProviderName:           strings.TrimSpace(provider.Name),
+		Model:                  strings.TrimSpace(provider.Model),
+		Text:                   text,
+		InputTokens:            decoded.Usage.PromptTokens,
+		OutputTokens:           decoded.Usage.CompletionTokens,
+		TotalTokens:            totalTokens,
+		Latency:                latency,
+		ContextWindowTokens:    provider.ContextWindowTokens,
+		Capabilities:           normalizeProviderCapabilities(provider.Capabilities),
+		EstimatedCostUSD:       estimatedCost,
+		EstimatedCostAvailable: costAvailable,
 	}, nil
+}
+
+func providerGenerationPricing(provider Provider) (float64, float64, bool) {
+	inputPrice := 0.0
+	outputPrice := 0.0
+	available := false
+	if provider.InputPricePerMillionTokens != nil {
+		inputPrice = *provider.InputPricePerMillionTokens
+		available = true
+	}
+	if provider.OutputPricePerMillionTokens != nil {
+		outputPrice = *provider.OutputPricePerMillionTokens
+		available = true
+	}
+	return inputPrice, outputPrice, available
+}
+
+func normalizeProviderCapabilities(capabilities []string) []string {
+	seen := map[string]bool{}
+	normalized := make([]string, 0, len(capabilities))
+	for _, capability := range capabilities {
+		capability = strings.TrimSpace(capability)
+		if capability == "" || seen[capability] {
+			continue
+		}
+		seen[capability] = true
+		normalized = append(normalized, capability)
+	}
+	sort.Strings(normalized)
+	return normalized
 }
 
 type openAICompatibleChatCompletionRequest struct {

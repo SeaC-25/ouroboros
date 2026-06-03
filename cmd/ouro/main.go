@@ -297,9 +297,20 @@ func printProviderGenerationResult(out io.Writer, result app.ProviderGenerationR
 		fmt.Sprintf("input_tokens=%d", result.InputTokens),
 		fmt.Sprintf("output_tokens=%d", result.OutputTokens),
 		fmt.Sprintf("total_tokens=%d", result.TotalTokens),
+	}
+	if result.ContextWindowTokens > 0 {
+		lines = append(lines, fmt.Sprintf("context_window_tokens=%d", result.ContextWindowTokens))
+	}
+	if result.EstimatedCostAvailable {
+		lines = append(lines, fmt.Sprintf("estimated_cost_usd=%.6f", result.EstimatedCostUSD))
+	}
+	if len(result.Capabilities) > 0 {
+		lines = append(lines, fmt.Sprintf("capabilities=%s", strings.Join(result.Capabilities, "|")))
+	}
+	lines = append(lines,
 		fmt.Sprintf("latency_ms=%d", result.Latency.Milliseconds()),
 		fmt.Sprintf("text=%s", compactProviderText(result.Text)),
-	}
+	)
 	for _, line := range lines {
 		if _, err := fmt.Fprintln(out, line); err != nil {
 			return err
