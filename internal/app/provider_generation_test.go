@@ -86,6 +86,55 @@ providers:
 	}
 }
 
+func TestGenerateProviderMessageReportsMetadataAndEstimatedCost(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"choices": [{"message": {"role": "assistant", "content": "Use the scoped plan."}}],
+			"usage": {"prompt_tokens": 1000, "completion_tokens": 500, "total_tokens": 1500}
+		}`))
+	}))
+	defer server.Close()
+	t.Setenv("OURO_TEST_PROVIDER_KEY", "secret-value")
+	providers := fmt.Sprintf(`version: 1
+providers:
+  - name: local-openai
+    type: openai_compatible
+    model: gpt-test
+    base_url: %s/v1
+    api_key_env: OURO_TEST_PROVIDER_KEY
+    context_window_tokens: 128000
+    input_price_per_million_tokens: 2.50
+    output_price_per_million_tokens: 10.00
+    capabilities:
+      - tool_planning
+      - json_mode
+      - tool_planning
+    enabled: true
+`, server.URL)
+	if err := os.WriteFile(filepath.Join(root, "providers.yaml"), []byte(providers), 0o644); err != nil {
+		t.Fatalf("write providers: %v", err)
+	}
+
+	result, err := GenerateProviderMessage(context.Background(), root, ProviderGenerationRequest{UserPrompt: "hello"})
+	if err != nil {
+		t.Fatalf("generate provider message: %v", err)
+	}
+	if result.ContextWindowTokens != 128000 {
+		t.Fatalf("expected context window, got %#v", result)
+	}
+	if !result.EstimatedCostAvailable || result.EstimatedCostUSD != 0.0075 {
+		t.Fatalf("unexpected estimated cost: %#v", result)
+	}
+	if strings.Join(result.Capabilities, "|") != "json_mode|tool_planning" {
+		t.Fatalf("unexpected capabilities: %#v", result.Capabilities)
+	}
+}
+
 func TestGenerateProviderMessageRejectsOfflineProvider(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
 	if err := InitWorkspace(root); err != nil {

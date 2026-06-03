@@ -104,12 +104,18 @@ providers:
     base_url: http://127.0.0.1:8000/v1
     api_key_env: OURO_OPENAI_COMPATIBLE_API_KEY
     timeout_ms: 5000
+    context_window_tokens: 128000
+    input_price_per_million_tokens: 2.50
+    output_price_per_million_tokens: 10.00
+    capabilities:
+      - chat
+      - json_mode
     enabled: true
 ```
 
-The run preflight performs `GET <base_url>/models/<model>` and accepts only 2xx responses. When `api_key_env` is set, the environment variable must exist and is sent as a bearer token; the token value is not persisted in provider config, run events, provider errors, or CLI preview output. `base_url` must be an absolute `http` or `https` URL without query, fragment, or userinfo. `timeout_ms` defaults to 5000 when omitted. This path validates provider reachability and records the configured provider/model in replay model usage; it still does not call model generation APIs during `ouro run` or implement provider failover.
+The run preflight performs `GET <base_url>/models/<model>` and accepts only 2xx responses. When `api_key_env` is set, the environment variable must exist and is sent as a bearer token; the token value is not persisted in provider config, run events, provider errors, or CLI preview output. `base_url` must be an absolute `http` or `https` URL without query, fragment, or userinfo. `timeout_ms` defaults to 5000 when omitted. `context_window_tokens`, `input_price_per_million_tokens`, `output_price_per_million_tokens`, and `capabilities` are optional metadata for operator visibility; numeric values must be non-negative, and missing price fields mean no cost estimate is printed. This path validates provider reachability and records the configured provider/model in replay model usage; it still does not call model generation APIs during `ouro run` or implement provider failover.
 
-`ouro provider generate <workspace> --prompt "..." [--system "..."] [--max-tokens N]` is a separate manual generation preview for `openai_compatible` providers. It performs `POST <base_url>/chat/completions`, sends the bearer token only from `api_key_env`, parses the first assistant text plus `prompt_tokens`, `completion_tokens`, and `total_tokens`, and reports provider/status failures without response bodies or token values.
+`ouro provider generate <workspace> --prompt "..." [--system "..."] [--max-tokens N]` is a separate manual generation preview for `openai_compatible` providers. It performs `POST <base_url>/chat/completions`, sends the bearer token only from `api_key_env`, parses the first assistant text plus `prompt_tokens`, `completion_tokens`, and `total_tokens`, prints optional context window and normalized capabilities, estimates cost only when input or output pricing metadata is configured, and reports provider/status failures without response bodies or token values.
 
 This preview does not run workspace tools, dispatch workers, contact scoped targets, mutate replay events, write reports, mediate tool calls, stream model output, perform provider failover, or attach model generation to the autonomous run loop.
 

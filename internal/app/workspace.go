@@ -69,13 +69,17 @@ type ProviderConfig struct {
 const providerTypeOpenAICompatible = "openai_compatible"
 
 type Provider struct {
-	Name      string `yaml:"name"`
-	Type      string `yaml:"type"`
-	Model     string `yaml:"model"`
-	BaseURL   string `yaml:"base_url,omitempty"`
-	APIKeyEnv string `yaml:"api_key_env,omitempty"`
-	TimeoutMS int    `yaml:"timeout_ms,omitempty"`
-	Enabled   bool   `yaml:"enabled"`
+	Name                        string   `yaml:"name"`
+	Type                        string   `yaml:"type"`
+	Model                       string   `yaml:"model"`
+	BaseURL                     string   `yaml:"base_url,omitempty"`
+	APIKeyEnv                   string   `yaml:"api_key_env,omitempty"`
+	TimeoutMS                   int      `yaml:"timeout_ms,omitempty"`
+	ContextWindowTokens         int      `yaml:"context_window_tokens,omitempty"`
+	InputPricePerMillionTokens  *float64 `yaml:"input_price_per_million_tokens,omitempty"`
+	OutputPricePerMillionTokens *float64 `yaml:"output_price_per_million_tokens,omitempty"`
+	Capabilities                []string `yaml:"capabilities,omitempty"`
+	Enabled                     bool     `yaml:"enabled"`
 }
 
 type AuthorizationConfig struct {
@@ -464,6 +468,15 @@ func ValidateProviderConfig(config ProviderConfig) error {
 			}
 			if provider.TimeoutMS < 0 {
 				return fmt.Errorf("provider %s timeout_ms must be non-negative", provider.Name)
+			}
+			if provider.ContextWindowTokens < 0 {
+				return fmt.Errorf("provider %s context_window_tokens must be non-negative", provider.Name)
+			}
+			if provider.InputPricePerMillionTokens != nil && *provider.InputPricePerMillionTokens < 0 {
+				return fmt.Errorf("provider %s input_price_per_million_tokens must be non-negative", provider.Name)
+			}
+			if provider.OutputPricePerMillionTokens != nil && *provider.OutputPricePerMillionTokens < 0 {
+				return fmt.Errorf("provider %s output_price_per_million_tokens must be non-negative", provider.Name)
 			}
 		}
 		if provider.Enabled {
