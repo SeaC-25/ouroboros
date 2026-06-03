@@ -91,6 +91,14 @@ func TestInstallScriptInstallsFromLocalArchiveWithoutNetwork(t *testing.T) {
 		filepath.Base(payloadDir)+"/toolchains/managed-bundles/httpx/bundle.yaml",
 		filepath.Base(payloadDir)+"/toolchains/managed-bundles/httpx/payload/httpx",
 	)
+	archiveBytes, err := os.ReadFile(archivePath)
+	if err != nil {
+		t.Fatalf("read archive for checksum: %v", err)
+	}
+	archiveDigest := sha256.Sum256(archiveBytes)
+	if err := os.WriteFile(filepath.Join(releaseRoot, "SHA256SUMS"), []byte(hex.EncodeToString(archiveDigest[:])+"  "+filepath.Base(archivePath)+"\n"), 0o644); err != nil {
+		t.Fatalf("write SHA256SUMS: %v", err)
+	}
 
 	prefix := filepath.Join(t.TempDir(), "prefix")
 	cmd := exec.Command("sh", "./scripts/install.sh", archivePath)
@@ -110,6 +118,83 @@ func TestInstallScriptInstallsFromLocalArchiveWithoutNetwork(t *testing.T) {
 	installedBundle := filepath.Join(prefix, "share", "ouroboros", "toolchains", "managed-bundles", "httpx", "bundle.yaml")
 	if _, err := os.Stat(installedBundle); err != nil {
 		t.Fatalf("expected installed managed bundle metadata %s: %v\noutput:\n%s", installedBundle, err, output)
+	}
+}
+
+func TestInstallScriptRejectsArchiveChecksumMismatch(t *testing.T) {
+	releaseRoot, archivePath := createInstallScriptArchive(t)
+	wrongDigest := strings.Repeat("0", sha256.Size*2)
+	if err := os.WriteFile(filepath.Join(releaseRoot, "SHA256SUMS"), []byte(wrongDigest+"  "+filepath.Base(archivePath)+"\n"), 0o644); err != nil {
+		t.Fatalf("write SHA256SUMS: %v", err)
+	}
+
+	prefix := filepath.Join(t.TempDir(), "prefix")
+	cmd := exec.Command("sh", "./scripts/install.sh", archivePath)
+	cmd.Env = append(os.Environ(), "PREFIX="+prefix)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected checksum mismatch to fail, got output:\n%s", output)
+	}
+	if !strings.Contains(string(output), "checksum mismatch") {
+		t.Fatalf("expected checksum mismatch error, got:\n%s", output)
+	}
+	if _, statErr := os.Stat(filepath.Join(prefix, "bin", "ouro")); !os.IsNotExist(statErr) {
+		t.Fatalf("checksum mismatch must not install binary, stat err=%v output:\n%s", statErr, output)
+	}
+}
+
+func TestInstallScriptRejectsArchiveChecksumMissingEntry(t *testing.T) {
+	releaseRoot, archivePath := createInstallScriptArchive(t)
+	digest := strings.Repeat("1", sha256.Size*2)
+	if err := os.WriteFile(filepath.Join(releaseRoot, "SHA256SUMS"), []byte(digest+"  other_archive.tar.gz\n"), 0o644); err != nil {
+		t.Fatalf("write SHA256SUMS: %v", err)
+	}
+
+	prefix := filepath.Join(t.TempDir(), "prefix")
+	cmd := exec.Command("sh", "./scripts/install.sh", archivePath)
+	cmd.Env = append(os.Environ(), "PREFIX="+prefix)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected missing checksum entry to fail, got output:\n%s", output)
+	}
+	if !strings.Contains(string(output), "checksum entry not found") {
+		t.Fatalf("expected missing checksum entry error, got:\n%s", output)
+	}
+	if _, statErr := os.Stat(filepath.Join(prefix, "bin", "ouro")); !os.IsNotExist(statErr) {
+		t.Fatalf("missing checksum entry must not install binary, stat err=%v output:\n%s", statErr, output)
+	}
+}
+
+func TestInstallScriptRejectsArchiveChecksumWithoutChecksumTool(t *testing.T) {
+	releaseRoot, archivePath := createInstallScriptArchive(t)
+	digest := strings.Repeat("1", sha256.Size*2)
+	if err := os.WriteFile(filepath.Join(releaseRoot, "SHA256SUMS"), []byte(digest+"  "+filepath.Base(archivePath)+"\n"), 0o644); err != nil {
+		t.Fatalf("write SHA256SUMS: %v", err)
+	}
+
+	toolBin := t.TempDir()
+	for _, name := range []string{"awk", "basename", "dirname"} {
+		path, err := exec.LookPath(name)
+		if err != nil {
+			t.Fatalf("find %s: %v", name, err)
+		}
+		if err := os.Symlink(path, filepath.Join(toolBin, name)); err != nil {
+			t.Fatalf("link %s: %v", name, err)
+		}
+	}
+
+	prefix := filepath.Join(t.TempDir(), "prefix")
+	cmd := exec.Command("/bin/sh", "./scripts/install.sh", archivePath)
+	cmd.Env = append(os.Environ(), "PREFIX="+prefix, "PATH="+toolBin)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected missing checksum tool to fail, got output:\n%s", output)
+	}
+	if !strings.Contains(string(output), "sha256sum or shasum is required to verify checksums") {
+		t.Fatalf("expected missing checksum tool error, got:\n%s", output)
+	}
+	if _, statErr := os.Stat(filepath.Join(prefix, "bin", "ouro")); !os.IsNotExist(statErr) {
+		t.Fatalf("missing checksum tool must not install binary, stat err=%v output:\n%s", statErr, output)
 	}
 }
 
@@ -205,10 +290,14 @@ execution:
 }
 
 func TestMakeReleaseSupportsRelativeDistDir(t *testing.T) {
-	relativeDist := "dist-test-release-scripts"
-	t.Cleanup(func() {
-		_ = os.RemoveAll(relativeDist)
-	})
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("get working directory: %v", err)
+	}
+	relativeDist, err := filepath.Rel(cwd, filepath.Join(t.TempDir(), "dist-test-release-scripts"))
+	if err != nil {
+		t.Fatalf("create relative dist path: %v", err)
+	}
 	version := "0.1.0-make-test"
 	cmd := exec.Command("make", "release")
 	cmd.Env = append(os.Environ(),
@@ -289,6 +378,22 @@ func createTarGz(t *testing.T, archivePath string, root string, names ...string)
 			t.Fatalf("write tar member: %v", err)
 		}
 	}
+}
+
+func createInstallScriptArchive(t *testing.T) (string, string) {
+	t.Helper()
+	releaseRoot := t.TempDir()
+	payloadDir := filepath.Join(releaseRoot, "ouro_0.1.0-test_linux_amd64")
+	if err := os.MkdirAll(payloadDir, 0o755); err != nil {
+		t.Fatalf("mkdir payload: %v", err)
+	}
+	binary := filepath.Join(payloadDir, "ouro")
+	if err := os.WriteFile(binary, []byte("#!/usr/bin/env sh\nprintf 'fake ouro\\n'\n"), 0o755); err != nil {
+		t.Fatalf("write fake binary: %v", err)
+	}
+	archivePath := filepath.Join(releaseRoot, "ouro_0.1.0-test_linux_amd64.tar.gz")
+	createTarGz(t, archivePath, releaseRoot, filepath.Base(payloadDir)+"/ouro")
+	return releaseRoot, archivePath
 }
 
 func writeReleaseScriptManagedBundleFixture(t *testing.T, name string) {
