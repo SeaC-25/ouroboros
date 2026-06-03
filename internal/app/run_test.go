@@ -4510,6 +4510,340 @@ execution:
 	}
 }
 
+func TestRunWorkspacePromotesNmapXMLToEvidenceSurfaceFromCIDR(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	scope := `version: 1
+scope:
+  target_policy: enforce
+  targets:
+    - kind: cidr
+      value: 10.0.0.0/24
+  exclusions: []
+execution:
+  isolation: process
+  tool_concurrency: 1
+`
+	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
+		t.Fatalf("write CIDR scope: %v", err)
+	}
+	writeManagedBundleFixture(t, root, "nmap", "binary", "7.95", `#!/usr/bin/env sh
+cat <<'XML'
+<?xml version="1.0"?>
+<nmaprun scanner="nmap" args="nmap -oX - 10.0.0.0/24 --script secret-token" version="7.95">
+  <host>
+    <address addr="10.0.0.8" addrtype="ipv4"/>
+    <hostnames><hostname name="ptr.evil.example" type="PTR"/></hostnames>
+    <ports>
+      <port protocol="tcp" portid="443">
+        <state state="open" reason="syn-ack" reason_ttl="0"/>
+        <service name="https" tunnel="ssl" conf="10" product="nginx" version="1.27" extrainfo="secret-token"/>
+      </port>
+      <port protocol="tcp" portid="80"><state state="closed"/><service name="http"/></port>
+    </ports>
+  </host>
+  <host>
+    <address addr="10.0.1.8" addrtype="ipv4"/>
+    <ports>
+      <port protocol="tcp" portid="22"><state state="open"/><service name="ssh" product="OpenSSH"/></port>
+    </ports>
+  </host>
+</nmaprun>
+XML
+`)
+	if _, err := ExecuteManagedToolBundleInstall(root, "infra-pack", "nmap", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed nmap bundle: %v", err)
+	}
+
+	result, err := RunWorkspaceWithOptions(ctx, root, RunOptions{DeferReportProjection: true})
+	if err != nil {
+		t.Fatalf("run workspace with nmap parser: %v", err)
+	}
+	store, err := eventlog.OpenSQLite(filepath.Join(root, "replay", "events.db"))
+	if err != nil {
+		t.Fatalf("open event log: %v", err)
+	}
+	defer store.Close()
+	events, err := store.Replay(ctx, result.RunID)
+	if err != nil {
+		t.Fatalf("replay events: %v", err)
+	}
+	snapshot, err := eventlog.BuildReplaySnapshot(events)
+	if err != nil {
+		t.Fatalf("build replay snapshot: %v", err)
+	}
+
+	var surfaceID string
+	for _, fact := range snapshot.Blackboard.Facts {
+		if fact.Source != "parser.nmap_xml" {
+			continue
+		}
+		surfaceID = fact.ID
+		if fact.Kind != "surface" {
+			t.Fatalf("expected nmap parser fact kind surface, got %#v", fact)
+		}
+		if fact.Statement != "nmap | 10.0.0.8 | tcp/443 | open | service=https" {
+			t.Fatalf("unexpected nmap surface statement: %#v", fact)
+		}
+		if strings.Contains(fact.Statement, "10.0.1.8") || strings.Contains(fact.Statement, "ptr.evil.example") || strings.Contains(fact.Statement, "secret-token") || strings.Contains(fact.Statement, "nginx") {
+			t.Fatalf("nmap surface statement leaked untrusted XML: %#v", fact)
+		}
+		if fact.Confidence < 0.7 {
+			t.Fatalf("expected nmap surface confidence, got %#v", fact)
+		}
+		break
+	}
+	if surfaceID == "" {
+		t.Fatalf("expected nmap parser surface fact in replay snapshot, facts=%#v", snapshot.Blackboard.Facts)
+	}
+	node, ok := snapshot.Evidence.Node(surfaceID)
+	if !ok {
+		t.Fatalf("expected nmap parser fact to project into evidence graph")
+	}
+	if node.Type != evidence.NodeSurface {
+		t.Fatalf("expected evidence surface node, got %#v", node)
+	}
+
+	foundFactEvent := false
+	foundParserEvent := false
+	for _, event := range events {
+		switch event.Type {
+		case eventlog.EventFact:
+			var payload struct {
+				FactID      string `json:"fact_id"`
+				Source      string `json:"source"`
+				ScopeKind   string `json:"scope_kind"`
+				ScopeTarget string `json:"scope_target"`
+				Host        string `json:"host"`
+				Address     string `json:"address"`
+				Protocol    string `json:"protocol"`
+				Port        int    `json:"port"`
+				ServiceName string `json:"service_name"`
+				ParserID    string `json:"parser_id"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatalf("decode fact event: %v", err)
+			}
+			if payload.FactID != surfaceID || payload.Source != "parser.nmap_xml" {
+				continue
+			}
+			foundFactEvent = true
+			if payload.ScopeKind != "cidr" || payload.ScopeTarget != "10.0.0.0/24" || payload.Host != "10.0.0.8" || payload.Address != "10.0.0.8" || payload.Protocol != "tcp" || payload.Port != 443 || payload.ServiceName != "https" || payload.ParserID != "nmap_xml" {
+				t.Fatalf("expected structured nmap CIDR fact metadata, got %#v", payload)
+			}
+			for _, leaked := range []string{"10.0.1.8", "ptr.evil.example", "secret-token", "nginx", "OpenSSH", "reason_ttl"} {
+				if strings.Contains(string(event.Payload), leaked) {
+					t.Fatalf("nmap fact payload leaked untrusted XML %q: %s", leaked, string(event.Payload))
+				}
+			}
+		case eventlog.EventParser:
+			var payload struct {
+				Parser string `json:"parser"`
+				Status string `json:"status"`
+				ToolID string `json:"tool_id"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatalf("decode parser event: %v", err)
+			}
+			if payload.Parser == "nmap_xml" && payload.Status == "parsed" && payload.ToolID == "nmap" {
+				foundParserEvent = true
+			}
+		}
+	}
+	if !foundFactEvent {
+		t.Fatalf("expected raw nmap fact event for %s", surfaceID)
+	}
+	if !foundParserEvent {
+		t.Fatalf("expected parsed nmap parser event, events=%#v", events)
+	}
+}
+
+func TestRunWorkspacePromotesNmapXMLToEvidenceSurfaceFromHost(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	scope := `version: 1
+scope:
+  target_policy: enforce
+  targets:
+    - kind: host
+      value: api.example.com
+  exclusions: []
+execution:
+  isolation: process
+  tool_concurrency: 1
+`
+	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
+		t.Fatalf("write host scope: %v", err)
+	}
+	writeManagedBundleFixture(t, root, "nmap", "binary", "7.95", `#!/usr/bin/env sh
+cat <<'XML'
+<?xml version="1.0"?>
+<nmaprun>
+  <host>
+    <address addr="203.0.113.10" addrtype="ipv4"/>
+    <hostnames><hostname name="ptr.evil.example" type="PTR"/></hostnames>
+    <ports>
+      <port protocol="tcp" portid="22">
+        <state state="open"/>
+        <service name="ssh" conf="10" product="OpenSSH" version="9.6"/>
+      </port>
+    </ports>
+  </host>
+</nmaprun>
+XML
+`)
+	if _, err := ExecuteManagedToolBundleInstall(root, "infra-pack", "nmap", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed nmap bundle: %v", err)
+	}
+
+	result, err := RunWorkspaceWithOptions(ctx, root, RunOptions{DeferReportProjection: true})
+	if err != nil {
+		t.Fatalf("run workspace with host-scoped nmap parser: %v", err)
+	}
+	store, err := eventlog.OpenSQLite(filepath.Join(root, "replay", "events.db"))
+	if err != nil {
+		t.Fatalf("open event log: %v", err)
+	}
+	defer store.Close()
+	events, err := store.Replay(ctx, result.RunID)
+	if err != nil {
+		t.Fatalf("replay events: %v", err)
+	}
+	snapshot, err := eventlog.BuildReplaySnapshot(events)
+	if err != nil {
+		t.Fatalf("build replay snapshot: %v", err)
+	}
+
+	var surfaceID string
+	for _, fact := range snapshot.Blackboard.Facts {
+		if fact.Source != "parser.nmap_xml" {
+			continue
+		}
+		surfaceID = fact.ID
+		if fact.Kind != "surface" || fact.Statement != "nmap | api.example.com | tcp/22 | open | service=ssh" {
+			t.Fatalf("unexpected host-scoped nmap surface fact: %#v", fact)
+		}
+		if strings.Contains(fact.Statement, "ptr.evil.example") || strings.Contains(fact.Statement, "OpenSSH") || strings.Contains(fact.Statement, "9.6") {
+			t.Fatalf("host-scoped nmap statement leaked untrusted XML: %#v", fact)
+		}
+		break
+	}
+	if surfaceID == "" {
+		t.Fatalf("expected host-scoped nmap parser surface fact in replay snapshot, facts=%#v", snapshot.Blackboard.Facts)
+	}
+	node, ok := snapshot.Evidence.Node(surfaceID)
+	if !ok || node.Type != evidence.NodeSurface {
+		t.Fatalf("expected host-scoped nmap surface evidence node, ok=%v node=%#v", ok, node)
+	}
+
+	for _, event := range events {
+		if event.Type != eventlog.EventFact {
+			continue
+		}
+		var payload struct {
+			FactID      string `json:"fact_id"`
+			Source      string `json:"source"`
+			ScopeKind   string `json:"scope_kind"`
+			ScopeTarget string `json:"scope_target"`
+			Host        string `json:"host"`
+			Address     string `json:"address"`
+			Protocol    string `json:"protocol"`
+			Port        int    `json:"port"`
+			ServiceName string `json:"service_name"`
+			ParserID    string `json:"parser_id"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatalf("decode fact event: %v", err)
+		}
+		if payload.FactID != surfaceID || payload.Source != "parser.nmap_xml" {
+			continue
+		}
+		if payload.ScopeKind != "host" || payload.ScopeTarget != "api.example.com" || payload.Host != "api.example.com" || payload.Address != "203.0.113.10" || payload.Protocol != "tcp" || payload.Port != 22 || payload.ServiceName != "ssh" || payload.ParserID != "nmap_xml" {
+			t.Fatalf("expected structured host-scoped nmap fact metadata, got %#v", payload)
+		}
+		return
+	}
+	t.Fatalf("expected raw host-scoped nmap fact event for %s", surfaceID)
+}
+
+func TestRunWorkspaceRecordsNmapParseFailureWithoutSurface(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	scope := `version: 1
+scope:
+  target_policy: enforce
+  targets:
+    - kind: cidr
+      value: 10.0.0.0/24
+  exclusions: []
+execution:
+  isolation: process
+  tool_concurrency: 1
+`
+	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
+		t.Fatalf("write CIDR scope: %v", err)
+	}
+	writeManagedBundleFixture(t, root, "nmap", "binary", "7.95", "#!/usr/bin/env sh\nprintf 'not-xml\\n'\n")
+	if _, err := ExecuteManagedToolBundleInstall(root, "infra-pack", "nmap", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed nmap bundle: %v", err)
+	}
+
+	result, err := RunWorkspaceWithOptions(ctx, root, RunOptions{DeferReportProjection: true})
+	if err != nil {
+		t.Fatalf("parse failure should not fail completed nmap run: %v", err)
+	}
+	store, err := eventlog.OpenSQLite(filepath.Join(root, "replay", "events.db"))
+	if err != nil {
+		t.Fatalf("open event log: %v", err)
+	}
+	defer store.Close()
+	events, err := store.Replay(ctx, result.RunID)
+	if err != nil {
+		t.Fatalf("replay events: %v", err)
+	}
+
+	foundParseFailure := false
+	for _, event := range events {
+		switch event.Type {
+		case eventlog.EventParser:
+			var payload struct {
+				Parser       string `json:"parser"`
+				Status       string `json:"status"`
+				ToolID       string `json:"tool_id"`
+				FindingCount int    `json:"finding_count"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatalf("decode parser event: %v", err)
+			}
+			if payload.Parser == "nmap_xml" && payload.Status == "parse_failed" && payload.ToolID == "nmap" && payload.FindingCount == 0 {
+				foundParseFailure = true
+			}
+		case eventlog.EventFact:
+			var payload struct {
+				Source string `json:"source"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatalf("decode fact event: %v", err)
+			}
+			if payload.Source == "parser.nmap_xml" {
+				t.Fatalf("parse failure must not emit nmap parser fact: %#v", payload)
+			}
+		}
+	}
+	if !foundParseFailure {
+		t.Fatalf("expected run-level nmap parse_failed event, events=%#v", events)
+	}
+}
+
 func TestRunWorkspaceRejectsExcludedArtifactBeforeMobsfscanExecution(t *testing.T) {
 	ctx := context.Background()
 	root := filepath.Join(t.TempDir(), "workspace")
