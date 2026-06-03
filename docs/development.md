@@ -62,6 +62,8 @@ GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro replay ./workspace <run-id>
 GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro replay ./workspace <run-id> --tui
 GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro replay ./workspace <run-id> --interactive
 GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro provider generate ./workspace --prompt "Summarize the scoped plan." --system "You are Ouroboros." --max-tokens 128
+GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro provider generate ./workspace --prompt "Summarize the scoped plan." --record-usage
+GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro provider usage ./workspace
 GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro toolchain list ./workspace
 GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro toolchain health ./workspace
 GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro toolchain authored-tool-validate ./authored-tool.yaml
@@ -117,7 +119,9 @@ The run preflight performs `GET <base_url>/models/<model>` and accepts only 2xx 
 
 `ouro provider generate <workspace> --prompt "..." [--system "..."] [--max-tokens N]` is a separate manual generation preview for `openai_compatible` providers. It performs `POST <base_url>/chat/completions`, sends the bearer token only from `api_key_env`, parses the first assistant text plus `prompt_tokens`, `completion_tokens`, and `total_tokens`, prints optional context window and normalized capabilities, estimates cost only when input or output pricing metadata is configured, and reports provider/status failures without response bodies or token values.
 
-This preview does not run workspace tools, dispatch workers, contact scoped targets, mutate replay events, write reports, mediate tool calls, stream model output, perform provider failover, or attach model generation to the autonomous run loop.
+By default, the preview does not write workspace state. `--record-usage` is the explicit metadata-only ledger write gate; after a successful preview it writes a JSON record under `workspace/runtime/model-usage/` containing provider/model identity, token counts, optional cost estimate, optional context window, and normalized capabilities. It does not persist prompt text, assistant text, bearer tokens, provider response bodies, or replay events. `ouro provider usage <workspace> [record]` lists or inspects those direct JSON records.
+
+This preview does not run workspace tools, dispatch workers, contact scoped targets, mutate replay events, write reports, mediate tool calls, stream model output, perform provider failover, enforce budgets, or attach model generation to the autonomous run loop.
 
 ## Run Event Streaming
 

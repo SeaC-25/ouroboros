@@ -257,6 +257,7 @@ func newProviderCommand(out io.Writer) *cobra.Command {
 		Short: "Run model provider preview commands",
 	}
 	cmd.AddCommand(newProviderGenerateCommand(out))
+	cmd.AddCommand(newProviderUsageCommand(out))
 	return cmd
 }
 
@@ -264,6 +265,7 @@ func newProviderGenerateCommand(out io.Writer) *cobra.Command {
 	var systemPrompt string
 	var userPrompt string
 	var maxTokens int
+	var recordUsage bool
 	cmd := &cobra.Command{
 		Use:   "generate <workspace>",
 		Short: "Generate a manual provider preview message",
@@ -280,13 +282,52 @@ func newProviderGenerateCommand(out io.Writer) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return printProviderGenerationResult(out, result)
+			if err := printProviderGenerationResult(out, result); err != nil {
+				return err
+			}
+			if recordUsage {
+				record, err := app.RecordProviderGenerationUsage(args[0], result, app.ProviderUsageRecordOptions{})
+				if err != nil {
+					return err
+				}
+				_, err = fmt.Fprintf(out, "usage_record=%s\n", record.Path)
+				return err
+			}
+			return nil
 		},
 	}
 	cmd.Flags().StringVar(&systemPrompt, "system", "", "system prompt for the provider preview")
 	cmd.Flags().StringVar(&userPrompt, "prompt", "", "user prompt for the provider preview")
 	cmd.Flags().IntVar(&maxTokens, "max-tokens", 0, "maximum completion tokens for the provider preview")
+	cmd.Flags().BoolVar(&recordUsage, "record-usage", false, "write a metadata-only provider usage record for this preview")
 	return cmd
+}
+
+func newProviderUsageCommand(out io.Writer) *cobra.Command {
+	return &cobra.Command{
+		Use:   "usage <workspace> [record]",
+		Short: "List or inspect provider usage records",
+		Args:  cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 2 {
+				record, err := app.ReadProviderUsageRecord(args[0], args[1])
+				if err != nil {
+					return err
+				}
+				return printProviderUsageRecord(out, record)
+			}
+			records, err := app.ListProviderUsageRecords(args[0])
+			if err != nil {
+				return err
+			}
+			for _, record := range records {
+				if err := printProviderUsageRecord(out, record); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	}
 }
 
 func printProviderGenerationResult(out io.Writer, result app.ProviderGenerationResult) error {
@@ -321,6 +362,32 @@ func printProviderGenerationResult(out io.Writer, result app.ProviderGenerationR
 
 func compactProviderText(text string) string {
 	return strings.Join(strings.Fields(text), " ")
+}
+
+func printProviderUsageRecord(out io.Writer, record app.ProviderUsageRecord) error {
+	parts := []string{
+		"provider-usage:",
+		fmt.Sprintf("path=%s", record.Path),
+		fmt.Sprintf("record=%s", record.RecordID),
+		fmt.Sprintf("source=%s", record.Source),
+		fmt.Sprintf("created_at=%s", record.CreatedAt),
+		fmt.Sprintf("provider=%s", compactProviderText(record.ProviderName)),
+		fmt.Sprintf("model=%s", compactProviderText(record.Model)),
+		fmt.Sprintf("input_tokens=%d", record.InputTokens),
+		fmt.Sprintf("output_tokens=%d", record.OutputTokens),
+		fmt.Sprintf("total_tokens=%d", record.TotalTokens),
+	}
+	if record.ContextWindowTokens > 0 {
+		parts = append(parts, fmt.Sprintf("context_window_tokens=%d", record.ContextWindowTokens))
+	}
+	if record.EstimatedCostAvailable {
+		parts = append(parts, fmt.Sprintf("estimated_cost_usd=%.6f", record.EstimatedCostUSD))
+	}
+	if len(record.Capabilities) > 0 {
+		parts = append(parts, fmt.Sprintf("capabilities=%s", strings.Join(record.Capabilities, "|")))
+	}
+	_, err := fmt.Fprintln(out, strings.Join(parts, " "))
+	return err
 }
 
 func newRunCommand(out io.Writer) *cobra.Command {
