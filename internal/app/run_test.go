@@ -1327,7 +1327,8 @@ func TestToolAdmissionLimiterDoesNotReserveResourcesWhileWaitingForGlobalSlot(t 
 }
 
 func TestRunWorkspaceStreamsToolCompletionBeforeAllWorkersFinish(t *testing.T) {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
 	root := filepath.Join(t.TempDir(), "workspace")
 	if err := InitWorkspace(root); err != nil {
 		t.Fatalf("init workspace: %v", err)
@@ -1344,9 +1345,11 @@ execution:
 	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
 		t.Fatalf("write scope: %v", err)
 	}
+	releaseSlow := make(chan struct{})
+	var releaseSlowOnce sync.Once
 	runner := &streamingCompletionToolExecutionRunner{
 		slowCapability: "infra.host_discovery",
-		slowDelay:      100 * time.Millisecond,
+		slowRelease:    releaseSlow,
 	}
 
 	var observedMu sync.Mutex
@@ -1362,6 +1365,9 @@ execution:
 					observedMu.Lock()
 					observedCompletedBeforeSlowDone = true
 					observedMu.Unlock()
+					releaseSlowOnce.Do(func() {
+						close(releaseSlow)
+					})
 				}
 			}
 			return nil
@@ -3309,6 +3315,449 @@ execution:
 		return
 	}
 	t.Fatalf("expected nmap tool-level execution event, got %#v", events)
+}
+
+func TestNativeManagedRunCommandBuildsNucleiTemplateScanArgvWithRules(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	payloadPath := writeManagedBundleFixture(t, root, "nuclei", "binary", "3.3.0", "#!/usr/bin/env sh\nprintf 'nuclei-fixture\\n'\n")
+	writeManagedRuleBundleFixtureForRunTest(t, root, "nuclei-templates", "2026.06.03", map[string]string{
+		"http/ouro-test.yaml": "id: ouro-test\ninfo:\n  name: Ouro Test\n  severity: info\n",
+	})
+	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "nuclei", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed nuclei bundle: %v", err)
+	}
+	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "nuclei-templates", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed nuclei-templates bundle: %v", err)
+	}
+	request := ToolExecutionRequest{
+		WorkspaceRoot: root,
+		Node: compiler.PlanNode{
+			ID:             "nuclei-template-scan:01",
+			Capability:     "web.candidate_generation",
+			ManifestName:   "web-api-pack",
+			ToolID:         "nuclei",
+			AdapterID:      "managed_binary",
+			Operation:      "template_scan",
+			ParserID:       "nuclei_jsonl",
+			TargetKind:     "url",
+			DependencyName: "nuclei",
+			DependencyKind: "binary",
+			Runner:         "native",
+			Dependencies: []toolchain.Dependency{
+				{Name: "nuclei", Kind: "binary"},
+				{Name: "nuclei-templates", Kind: "rule_bundle"},
+			},
+		},
+		ScopeTargets:  []ScopeTarget{{Kind: "url", Value: "https://app.example"}},
+		IsolationMode: "process",
+	}
+
+	command, ok, err := nativeManagedRunCommand(request)
+	if err != nil || !ok {
+		t.Fatalf("expected nuclei template-scan builder command, command=%#v ok=%v err=%v", command, ok, err)
+	}
+	wantRules := filepath.Join(root, "toolchain", "rules", "nuclei-templates")
+	want := []string{payloadPath, "-jsonl", "-silent", "-no-color", "-disable-update-check", "-no-stdin", "-ni", "-t", wantRules, "-u", "https://app.example"}
+	if !reflect.DeepEqual(command, want) {
+		t.Fatalf("unexpected nuclei argv\nwant=%#v\n got=%#v", want, command)
+	}
+}
+
+func TestNativeManagedRunCommandKeepsNucleiOfflineWithoutRuleBundle(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	writeManagedBundleFixture(t, root, "nuclei", "binary", "3.3.0", "#!/usr/bin/env sh\nprintf 'nuclei-without-rules\\n'\n")
+	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "nuclei", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed nuclei bundle: %v", err)
+	}
+	request := ToolExecutionRequest{
+		WorkspaceRoot: root,
+		Node: compiler.PlanNode{
+			ID:             "nuclei-missing-rules:01",
+			Capability:     "web.candidate_generation",
+			ManifestName:   "web-api-pack",
+			ToolID:         "nuclei",
+			AdapterID:      "managed_binary",
+			Operation:      "template_scan",
+			ParserID:       "nuclei_jsonl",
+			TargetKind:     "url",
+			DependencyName: "nuclei",
+			DependencyKind: "binary",
+			Runner:         "native",
+			Dependencies: []toolchain.Dependency{
+				{Name: "nuclei", Kind: "binary"},
+				{Name: "nuclei-templates", Kind: "rule_bundle"},
+			},
+		},
+		ScopeTargets:  []ScopeTarget{{Kind: "url", Value: "https://app.example"}},
+		IsolationMode: "process",
+	}
+
+	command, ok, err := nativeManagedRunCommand(request)
+	if err != nil || ok || len(command) > 0 {
+		t.Fatalf("nuclei must stay offline without installed templates, command=%#v ok=%v err=%v", command, ok, err)
+	}
+}
+
+func TestNativeManagedRunCommandRejectsEscapingNucleiRuleBundleSymlink(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	writeManagedBundleFixture(t, root, "nuclei", "binary", "3.3.0", "#!/usr/bin/env sh\nprintf 'nuclei-escaping-rules\\n'\n")
+	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "nuclei", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed nuclei bundle: %v", err)
+	}
+	outsideRules := filepath.Join(t.TempDir(), "outside-rules")
+	if err := os.MkdirAll(outsideRules, 0o755); err != nil {
+		t.Fatalf("create outside rules dir: %v", err)
+	}
+	rulesLink := filepath.Join(root, "toolchain", "rules", "nuclei-templates")
+	if err := os.MkdirAll(filepath.Dir(rulesLink), 0o755); err != nil {
+		t.Fatalf("create rules dir: %v", err)
+	}
+	if err := os.Symlink(outsideRules, rulesLink); err != nil {
+		t.Fatalf("write escaping rules symlink: %v", err)
+	}
+	request := ToolExecutionRequest{
+		WorkspaceRoot: root,
+		Node: compiler.PlanNode{
+			ID:             "nuclei-escaping-rules:01",
+			Capability:     "web.candidate_generation",
+			ManifestName:   "web-api-pack",
+			ToolID:         "nuclei",
+			AdapterID:      "managed_binary",
+			Operation:      "template_scan",
+			ParserID:       "nuclei_jsonl",
+			TargetKind:     "url",
+			DependencyName: "nuclei",
+			DependencyKind: "binary",
+			Runner:         "native",
+			Dependencies: []toolchain.Dependency{
+				{Name: "nuclei", Kind: "binary"},
+				{Name: "nuclei-templates", Kind: "rule_bundle"},
+			},
+		},
+		ScopeTargets:  []ScopeTarget{{Kind: "url", Value: "https://app.example"}},
+		IsolationMode: "process",
+	}
+
+	command, ok, err := nativeManagedRunCommand(request)
+	if err == nil || !strings.Contains(err.Error(), "rule bundle target must stay under") || !ok || len(command) > 0 {
+		t.Fatalf("expected escaping rule bundle symlink rejection, command=%#v ok=%v err=%v", command, ok, err)
+	}
+}
+
+func TestNativeManagedRunCommandKeepsNucleiOfflineWithoutRuleBundleDependencyContract(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	writeManagedBundleFixture(t, root, "nuclei", "binary", "3.3.0", "#!/usr/bin/env sh\nprintf 'nuclei-with-rules-without-contract\\n'\n")
+	writeManagedRuleBundleFixtureForRunTest(t, root, "nuclei-templates", "2026.06.03", map[string]string{
+		"http/ouro-test.yaml": "id: ouro-test\ninfo:\n  name: Ouro Test\n  severity: info\n",
+	})
+	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "nuclei", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed nuclei bundle: %v", err)
+	}
+	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "nuclei-templates", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed nuclei-templates bundle: %v", err)
+	}
+	request := ToolExecutionRequest{
+		WorkspaceRoot: root,
+		Node: compiler.PlanNode{
+			ID:             "nuclei-missing-rule-contract:01",
+			Capability:     "web.candidate_generation",
+			ManifestName:   "web-api-pack",
+			ToolID:         "nuclei",
+			AdapterID:      "managed_binary",
+			Operation:      "template_scan",
+			ParserID:       "nuclei_jsonl",
+			TargetKind:     "url",
+			DependencyName: "nuclei",
+			DependencyKind: "binary",
+			Runner:         "native",
+			Dependencies:   []toolchain.Dependency{{Name: "nuclei", Kind: "binary"}},
+		},
+		ScopeTargets:  []ScopeTarget{{Kind: "url", Value: "https://app.example"}},
+		IsolationMode: "process",
+	}
+
+	command, ok, err := nativeManagedRunCommand(request)
+	if err != nil || ok || len(command) > 0 {
+		t.Fatalf("nuclei must stay offline without declared templates dependency, command=%#v ok=%v err=%v", command, ok, err)
+	}
+}
+
+func TestNativeManagedRunCommandKeepsNucleiOfflineForNonURLScope(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	writeManagedBundleFixture(t, root, "nuclei", "binary", "3.3.0", "#!/usr/bin/env sh\nprintf 'nuclei-non-url\\n'\n")
+	writeManagedRuleBundleFixtureForRunTest(t, root, "nuclei-templates", "2026.06.03", map[string]string{
+		"http/ouro-test.yaml": "id: ouro-test\ninfo:\n  name: Ouro Test\n  severity: info\n",
+	})
+	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "nuclei", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed nuclei bundle: %v", err)
+	}
+	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "nuclei-templates", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed nuclei-templates bundle: %v", err)
+	}
+	request := ToolExecutionRequest{
+		WorkspaceRoot: root,
+		Node: compiler.PlanNode{
+			ID:             "nuclei-non-url-scope:01",
+			Capability:     "web.candidate_generation",
+			ManifestName:   "web-api-pack",
+			ToolID:         "nuclei",
+			AdapterID:      "managed_binary",
+			Operation:      "template_scan",
+			ParserID:       "nuclei_jsonl",
+			TargetKind:     "url",
+			DependencyName: "nuclei",
+			DependencyKind: "binary",
+			Runner:         "native",
+			Dependencies: []toolchain.Dependency{
+				{Name: "nuclei", Kind: "binary"},
+				{Name: "nuclei-templates", Kind: "rule_bundle"},
+			},
+		},
+		ScopeTargets:  []ScopeTarget{{Kind: "cidr", Value: "10.0.0.0/24"}},
+		IsolationMode: "process",
+	}
+
+	command, ok, err := nativeManagedRunCommand(request)
+	if err != nil || ok || len(command) > 0 {
+		t.Fatalf("nuclei must stay offline for non-URL scope, command=%#v ok=%v err=%v", command, ok, err)
+	}
+}
+
+func TestRunWorkspaceExecutesToolLevelNaabuThroughRegisteredArgvBuilder(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	scope := `version: 1
+scope:
+  target_policy: enforce
+  targets:
+    - kind: cidr
+      value: 10.0.0.0/24
+  exclusions: []
+execution:
+  isolation: process
+`
+	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
+		t.Fatalf("write scope: %v", err)
+	}
+	marker := filepath.Join(t.TempDir(), "tool-level-catalog-naabu-ran")
+	writeManagedBundleFixture(t, root, "naabu", "binary", "2.3.4", "#!/usr/bin/env sh\nprintf 'tool-level-naabu-output args=%s target=%s tool_id=%s operation=%s parser=%s dep=%s target_kind=%s scope_target_kind=%s\\n' \"$*\" \"$OURO_TARGET\" \"$OURO_TOOL_ID\" \"$OURO_OPERATION\" \"$OURO_PARSER_ID\" \"$OURO_DEPENDENCY_NAME\" \"$OURO_TARGET_KIND\" \"$OURO_SCOPE_TARGET_KIND\"\ntouch "+marker+"\n")
+	if _, err := ExecuteManagedToolBundleInstall(root, "infra-pack", "naabu", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed naabu bundle: %v", err)
+	}
+
+	result, err := RunWorkspace(ctx, root)
+	if err != nil {
+		t.Fatalf("run workspace: %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("expected naabu tool-level payload to run through registered argv builder: %v", err)
+	}
+	store, err := eventlog.OpenSQLite(filepath.Join(root, "replay", "events.db"))
+	if err != nil {
+		t.Fatalf("open event log: %v", err)
+	}
+	defer store.Close()
+	events, err := store.Replay(ctx, result.RunID)
+	if err != nil {
+		t.Fatalf("replay events: %v", err)
+	}
+	for _, event := range events {
+		if event.Type != eventlog.EventTool {
+			continue
+		}
+		var payload struct {
+			Tool            string `json:"tool"`
+			Parser          string `json:"parser"`
+			ExecutionStatus string `json:"execution_status"`
+			Transcript      string `json:"transcript"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatalf("decode tool payload: %v", err)
+		}
+		if payload.Tool != "infra-pack" || payload.Parser != "naabu_jsonl" || payload.ExecutionStatus == "" {
+			continue
+		}
+		if payload.ExecutionStatus != "completed" {
+			t.Fatalf("expected naabu tool-level node to complete, got %#v", payload)
+		}
+		for _, want := range []string{
+			"tool-level-naabu-output",
+			"args=-json -host 10.0.0.0/24",
+			"target=10.0.0.0/24",
+			"tool_id=naabu",
+			"operation=port_scan",
+			"parser=naabu_jsonl",
+			"dep=naabu",
+			"target_kind=host",
+			"scope_target_kind=cidr",
+		} {
+			if !strings.Contains(payload.Transcript, want) {
+				t.Fatalf("expected naabu tool-level transcript to contain %q, got %#v", want, payload)
+			}
+		}
+		if strings.Contains(payload.Transcript, "offline tool execution boundary") {
+			t.Fatalf("naabu tool-level execution must not use offline runner, got %#v", payload)
+		}
+		return
+	}
+	t.Fatalf("expected naabu tool-level execution event, got %#v", events)
+}
+
+func TestNativeManagedRunCommandKeepsNaabuOfflineForNonCIDRScope(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	writeManagedBundleFixture(t, root, "naabu", "binary", "2.3.4", "#!/usr/bin/env sh\nprintf 'naabu-non-cidr\\n'\n")
+	if _, err := ExecuteManagedToolBundleInstall(root, "infra-pack", "naabu", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed naabu bundle: %v", err)
+	}
+	request := ToolExecutionRequest{
+		WorkspaceRoot: root,
+		Node: compiler.PlanNode{
+			ID:             "naabu-non-cidr-scope:01",
+			Capability:     "infra.host_discovery",
+			ManifestName:   "infra-pack",
+			ToolID:         "naabu",
+			AdapterID:      "managed_binary",
+			Operation:      "port_scan",
+			ParserID:       "naabu_jsonl",
+			TargetKind:     "host",
+			DependencyName: "naabu",
+			DependencyKind: "binary",
+			Runner:         "native",
+		},
+		ScopeTargets:  []ScopeTarget{{Kind: "url", Value: "https://app.example"}},
+		IsolationMode: "process",
+	}
+
+	command, ok, err := nativeManagedRunCommand(request)
+	if err != nil || ok || len(command) > 0 {
+		t.Fatalf("naabu must stay offline for non-CIDR scope, command=%#v ok=%v err=%v", command, ok, err)
+	}
+}
+
+func TestNativeManagedRunCommandKeepsSubfinderOfflineForURLScope(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	writeManagedBundleFixture(t, root, "subfinder", "binary", "2.7.0", "#!/usr/bin/env sh\nprintf 'should-not-run-subfinder-from-url-scope\\n'\n")
+	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "subfinder", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed subfinder bundle: %v", err)
+	}
+	request := ToolExecutionRequest{
+		WorkspaceRoot: root,
+		Node: compiler.PlanNode{
+			ID:             "subfinder-url-scope:01",
+			Capability:     "web.discovery",
+			ManifestName:   "web-api-pack",
+			ToolID:         "subfinder",
+			AdapterID:      "managed_binary",
+			Operation:      "subdomain_discovery",
+			ParserID:       "subfinder_jsonl",
+			TargetKind:     "domain",
+			DependencyName: "subfinder",
+			DependencyKind: "binary",
+			Runner:         "native",
+		},
+		ScopeTargets:  []ScopeTarget{{Kind: "url", Value: "https://app.example"}},
+		IsolationMode: "process",
+	}
+
+	command, ok, err := nativeManagedRunCommand(request)
+	if err != nil || ok || len(command) > 0 {
+		t.Fatalf("subfinder must stay offline until domain scope is explicit, command=%#v ok=%v err=%v", command, ok, err)
+	}
+}
+
+func TestNativeManagedRunCommandKeepsDomainToolsOfflineForURLScope(t *testing.T) {
+	tests := []struct {
+		name       string
+		pack       string
+		capability string
+		toolID     string
+		operation  string
+		parserID   string
+	}{
+		{
+			name:       "amass",
+			pack:       "infra-pack",
+			capability: "infra.host_discovery",
+			toolID:     "amass",
+			operation:  "subdomain_discovery",
+			parserID:   "amass_json",
+		},
+		{
+			name:       "dnsx",
+			pack:       "infra-pack",
+			capability: "infra.host_discovery",
+			toolID:     "dnsx",
+			operation:  "dns_probe",
+			parserID:   "dnsx_jsonl",
+		},
+		{
+			name:       "dnsrecon",
+			pack:       "infra-pack",
+			capability: "infra.host_discovery",
+			toolID:     "dnsrecon",
+			operation:  "dns_probe",
+			parserID:   "dnsrecon_json",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "workspace")
+			if err := InitWorkspace(root); err != nil {
+				t.Fatalf("init workspace: %v", err)
+			}
+			writeManagedBundleFixture(t, root, tt.toolID, "binary", "1.0.0", "#!/usr/bin/env sh\nprintf 'should-not-run-domain-tool-from-url-scope\\n'\n")
+			if _, err := ExecuteManagedToolBundleInstall(root, tt.pack, tt.toolID, ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+				t.Fatalf("install managed %s bundle: %v", tt.toolID, err)
+			}
+			request := ToolExecutionRequest{
+				WorkspaceRoot: root,
+				Node: compiler.PlanNode{
+					ID:             tt.toolID + "-url-scope:01",
+					Capability:     tt.capability,
+					ManifestName:   tt.pack,
+					ToolID:         tt.toolID,
+					AdapterID:      "managed_binary",
+					Operation:      tt.operation,
+					ParserID:       tt.parserID,
+					TargetKind:     "domain",
+					DependencyName: tt.toolID,
+					DependencyKind: "binary",
+					Runner:         "native",
+				},
+				ScopeTargets:  []ScopeTarget{{Kind: "url", Value: "https://app.example"}},
+				IsolationMode: "process",
+			}
+
+			command, ok, err := nativeManagedRunCommand(request)
+			if err != nil || ok || len(command) > 0 {
+				t.Fatalf("%s must stay offline until domain scope is explicit, command=%#v ok=%v err=%v", tt.toolID, command, ok, err)
+			}
+		})
+	}
 }
 
 func TestNativeManagedRunCommandKeepsUnknownToolLevelOperationOffline(t *testing.T) {
@@ -6008,6 +6457,7 @@ type streamingCompletionToolExecutionRunner struct {
 	mu             sync.Mutex
 	slowCapability string
 	slowDelay      time.Duration
+	slowRelease    <-chan struct{}
 	slowDone       bool
 }
 
@@ -6016,10 +6466,18 @@ func (r *streamingCompletionToolExecutionRunner) Execute(ctx context.Context, re
 		return ToolExecutionResult{}, err
 	}
 	if request.Node.Capability == r.slowCapability {
-		select {
-		case <-ctx.Done():
-			return ToolExecutionResult{}, ctx.Err()
-		case <-time.After(r.slowDelay):
+		if r.slowRelease != nil {
+			select {
+			case <-ctx.Done():
+				return ToolExecutionResult{}, ctx.Err()
+			case <-r.slowRelease:
+			}
+		} else {
+			select {
+			case <-ctx.Done():
+				return ToolExecutionResult{}, ctx.Err()
+			case <-time.After(r.slowDelay):
+			}
 		}
 		r.mu.Lock()
 		r.slowDone = true

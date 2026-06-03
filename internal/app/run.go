@@ -1691,11 +1691,11 @@ func managedBinaryRunCommand(request ToolExecutionRequest) ([]string, bool, erro
 	if binary == "" || !containsTrimmedValue(operation.DependencyNames, binary) {
 		return nil, false, nil
 	}
-	targetValue, hasTarget := managedBinaryTargetValue(request)
+	target, hasTarget := managedBinaryTarget(request)
 	if !hasTarget {
 		return nil, false, nil
 	}
-	return managedBinaryCommandFor(binary, node.Operation, targetValue)
+	return managedBinaryCommandFor(request, binary, node.Operation, target)
 }
 
 func managedBinaryDependencyName(node compiler.PlanNode) string {
@@ -1710,30 +1710,64 @@ func managedBinaryDependencyName(node compiler.PlanNode) string {
 	return ""
 }
 
-func managedBinaryTargetValue(request ToolExecutionRequest) (string, bool) {
+func managedBinaryTarget(request ToolExecutionRequest) (ScopeTarget, bool) {
 	if target, ok := scopedTargetForNode(request.Node, request.ScopeTargets); ok {
-		return strings.TrimSpace(target.Value), true
+		target.Kind = strings.TrimSpace(target.Kind)
+		target.Value = strings.TrimSpace(target.Value)
+		return target, target.Value != ""
 	}
-	return "", false
+	return ScopeTarget{}, false
 }
 
-func managedBinaryCommandFor(binary string, operation string, targetValue string) ([]string, bool, error) {
+func managedBinaryCommandFor(request ToolExecutionRequest, binary string, operation string, target ScopeTarget) ([]string, bool, error) {
 	binary = strings.TrimSpace(binary)
-	targetValue = strings.TrimSpace(targetValue)
-	if binary == "" || targetValue == "" {
+	target.Kind = strings.TrimSpace(target.Kind)
+	target.Value = strings.TrimSpace(target.Value)
+	if binary == "" || target.Value == "" {
 		return nil, false, nil
 	}
 	switch strings.TrimSpace(operation) {
 	case "http_probe":
 		if binary == "httpx" {
-			return []string{binary, "-json", "-u", targetValue}, true, nil
+			return []string{binary, "-json", "-u", target.Value}, true, nil
+		}
+	case "template_scan":
+		if binary == "nuclei" {
+			if target.Kind != string(domain.TargetURL) || !managedBinaryHasRuleBundleDependency(request.Node, "nuclei-templates") {
+				return nil, false, nil
+			}
+			rulesPath, ok, err := workspaceToolchainRuleBundle(request.WorkspaceRoot, "nuclei-templates")
+			if err != nil {
+				return nil, true, err
+			}
+			if !ok {
+				return nil, false, nil
+			}
+			return []string{binary, "-jsonl", "-silent", "-no-color", "-disable-update-check", "-no-stdin", "-ni", "-t", rulesPath, "-u", target.Value}, true, nil
+		}
+	case "port_scan":
+		if binary == "naabu" {
+			if target.Kind != string(domain.TargetCIDR) {
+				return nil, false, nil
+			}
+			return []string{binary, "-json", "-host", target.Value}, true, nil
 		}
 	case "service_fingerprint":
 		if binary == "nmap" {
-			return []string{binary, "-oX", "-", targetValue}, true, nil
+			return []string{binary, "-oX", "-", target.Value}, true, nil
 		}
 	}
 	return nil, false, nil
+}
+
+func managedBinaryHasRuleBundleDependency(node compiler.PlanNode, name string) bool {
+	name = strings.TrimSpace(name)
+	for _, dependency := range node.Dependencies {
+		if strings.TrimSpace(dependency.Name) == name && dependencyKindForManagedInstall(dependency) == "rule_bundle" {
+			return true
+		}
+	}
+	return false
 }
 
 func containsTrimmedValue(values []string, want string) bool {
@@ -1832,6 +1866,35 @@ func workspaceToolchainExecutable(root string, command string) (string, bool, er
 	return candidate, true, nil
 }
 
+func workspaceToolchainRuleBundle(root string, name string) (string, bool, error) {
+	safeName, err := validateAuthoredToolName(name)
+	if err != nil {
+		return "", false, nil
+	}
+	candidate := filepath.Join(root, "toolchain", "rules", safeName)
+	info, err := os.Lstat(candidate)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("inspect workspace toolchain rule bundle: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		resolved, err := filepath.EvalSymlinks(candidate)
+		if err != nil {
+			return "", true, fmt.Errorf("resolve workspace toolchain rule bundle symlink: %w", err)
+		}
+		if err := requireWorkspaceManagedBundleDirectoryTarget(root, resolved); err != nil {
+			return "", true, err
+		}
+		return candidate, true, nil
+	}
+	if !info.IsDir() {
+		return "", true, fmt.Errorf("workspace toolchain rule bundle must be a directory or managed symlink: %s", candidate)
+	}
+	return candidate, true, nil
+}
+
 func requireWorkspaceManagedBundleTarget(root string, target string) error {
 	managedRoot, err := filepath.Abs(filepath.Join(root, "toolchain", "managed-bundles"))
 	if err != nil {
@@ -1854,6 +1917,32 @@ func requireWorkspaceManagedBundleTarget(root string, target string) error {
 	}
 	if info.IsDir() || !info.Mode().IsRegular() {
 		return fmt.Errorf("workspace toolchain binary target must be a regular file: %s", resolvedTarget)
+	}
+	return nil
+}
+
+func requireWorkspaceManagedBundleDirectoryTarget(root string, target string) error {
+	managedRoot, err := filepath.Abs(filepath.Join(root, "toolchain", "managed-bundles"))
+	if err != nil {
+		return fmt.Errorf("resolve managed bundle root: %w", err)
+	}
+	resolvedTarget, err := filepath.Abs(target)
+	if err != nil {
+		return fmt.Errorf("resolve workspace toolchain rule bundle target: %w", err)
+	}
+	rel, err := filepath.Rel(managedRoot, resolvedTarget)
+	if err != nil {
+		return fmt.Errorf("resolve workspace toolchain rule bundle target relative path: %w", err)
+	}
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+		return fmt.Errorf("workspace toolchain rule bundle target must stay under %s", managedRoot)
+	}
+	info, err := os.Stat(resolvedTarget)
+	if err != nil {
+		return fmt.Errorf("inspect workspace toolchain rule bundle target: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("workspace toolchain rule bundle target must be a directory: %s", resolvedTarget)
 	}
 	return nil
 }
