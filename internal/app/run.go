@@ -1665,9 +1665,7 @@ func nativeManagedRunCommand(request ToolExecutionRequest) ([]string, bool, erro
 }
 
 func nativeManagedRunCommandWithTarget(request ToolExecutionRequest) ([]string, ScopeTarget, bool, error) {
-	if executionIsolationMode(request.IsolationMode) == "container" {
-		return nil, ScopeTarget{}, false, nil
-	}
+	containerIsolation := executionIsolationMode(request.IsolationMode) == "container"
 	if catalogToolLevelNodeRequiresAdapterArgvBuilder(request.Node) {
 		command, target, ok, err := managedBinaryRunCommand(request)
 		if err != nil {
@@ -1675,6 +1673,9 @@ func nativeManagedRunCommandWithTarget(request ToolExecutionRequest) ([]string, 
 		}
 		if !ok {
 			return nil, ScopeTarget{}, false, nil
+		}
+		if containerIsolation {
+			return command, target, true, nil
 		}
 		if resolved, ok, err := workspaceToolchainExecutable(request.WorkspaceRoot, command[0]); err != nil {
 			return nil, target, true, err

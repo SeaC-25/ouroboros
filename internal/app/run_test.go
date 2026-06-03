@@ -8424,14 +8424,10 @@ func TestNativeManagedRunCommandUsesResolvedWorkspaceManagedBinaryForToolLevelBu
 	}
 }
 
-func TestNativeManagedRunCommandKeepsToolLevelBuilderOfflineInContainerIsolation(t *testing.T) {
+func TestNativeManagedRunCommandBuildsToolLevelBuilderForContainerIsolation(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
 	if err := InitWorkspace(root); err != nil {
 		t.Fatalf("init workspace: %v", err)
-	}
-	writeManagedBundleFixture(t, root, "httpx", "binary", "1.3.0", "#!/usr/bin/env sh\nprintf 'should-not-run-container-tool-level-builder\\n'\n")
-	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "httpx", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
-		t.Fatalf("install managed httpx bundle: %v", err)
 	}
 	request := ToolExecutionRequest{
 		WorkspaceRoot: root,
@@ -8453,8 +8449,12 @@ func TestNativeManagedRunCommandKeepsToolLevelBuilderOfflineInContainerIsolation
 	}
 
 	command, ok, err := nativeManagedRunCommand(request)
-	if err != nil || ok || len(command) > 0 {
-		t.Fatalf("container-mode tool-level builder must stay offline, command=%#v ok=%v err=%v", command, ok, err)
+	if err != nil || !ok {
+		t.Fatalf("expected container-mode tool-level builder command, command=%#v ok=%v err=%v", command, ok, err)
+	}
+	want := []string{"httpx", "-json", "-u", "https://app.example"}
+	if strings.Join(command, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("unexpected container-mode managed argv: got %#v want %#v", command, want)
 	}
 }
 
@@ -9983,6 +9983,89 @@ healthcheck: built_in
 		return
 	}
 	t.Fatalf("expected web.discovery execution event")
+}
+
+func TestRunWorkspaceExecutesManagedBinaryBuilderThroughContainerIsolation(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	engine := filepath.Join(t.TempDir(), "fake-container-engine")
+	engineScript := `#!/bin/sh
+printf 'engine-cwd=%s\n' "$PWD"
+printf 'engine-args=%s\n' "$*"
+`
+	if err := os.WriteFile(engine, []byte(engineScript), 0o755); err != nil {
+		t.Fatalf("write fake engine: %v", err)
+	}
+	scope := `version: 1
+scope:
+  target_policy: enforce
+  targets:
+    - kind: url
+      value: https://app.example
+  exclusions: []
+execution:
+  isolation: container
+  container:
+    engine: ` + engine + `
+    image: ouro-worker:test
+`
+	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
+		t.Fatalf("write scope: %v", err)
+	}
+
+	result, err := RunWorkspace(ctx, root)
+	if err != nil {
+		t.Fatalf("run workspace with container managed binary builder: %v", err)
+	}
+	store, err := eventlog.OpenSQLite(filepath.Join(root, "replay", "events.db"))
+	if err != nil {
+		t.Fatalf("open event log: %v", err)
+	}
+	defer store.Close()
+	events, err := store.Replay(ctx, result.RunID)
+	if err != nil {
+		t.Fatalf("replay events: %v", err)
+	}
+	for _, event := range events {
+		if event.Type != eventlog.EventTool {
+			continue
+		}
+		var payload struct {
+			ExecutionStatus string `json:"execution_status"`
+			Isolation       string `json:"isolation"`
+			ContainerEngine string `json:"container_engine"`
+			ContainerImage  string `json:"container_image"`
+			Transcript      string `json:"transcript"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatalf("decode tool payload: %v", err)
+		}
+		if !strings.Contains(payload.Transcript, "ouro-worker:test httpx -json -u https://app.example") {
+			continue
+		}
+		if payload.ExecutionStatus != "completed" || payload.Isolation != "container" {
+			t.Fatalf("expected completed container managed execution, got %#v", payload)
+		}
+		if payload.ContainerEngine != engine || payload.ContainerImage != "ouro-worker:test" {
+			t.Fatalf("expected container audit fields, got %#v", payload)
+		}
+		for _, want := range []string{
+			"engine-args=run --rm",
+			"--volume " + root + ":/workspace",
+			"--env OURO_TOOL_ID=httpx",
+			"--env OURO_OPERATION=http_probe",
+			"ouro-worker:test httpx -json -u https://app.example",
+		} {
+			if !strings.Contains(payload.Transcript, want) {
+				t.Fatalf("expected container managed execution transcript to contain %q, got:\n%s", want, payload.Transcript)
+			}
+		}
+		return
+	}
+	t.Fatalf("expected httpx managed binary container execution event")
 }
 
 func TestRunWorkspaceCommandRunnerAppliesContainerSandboxProfile(t *testing.T) {
