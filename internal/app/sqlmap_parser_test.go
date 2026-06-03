@@ -111,6 +111,79 @@ func TestParserEventsForToolExecutionPromotesSqlmapInjectionFinding(t *testing.T
 	}
 }
 
+func TestParserEventsForToolExecutionPromotesSqlmapLogFinding(t *testing.T) {
+	events := parserEventsForToolExecution("run-sqlmap-log-finding", ToolExecutionRequest{
+		Node: compiler.PlanNode{
+			ID:           "sqlmap-log-finding:01",
+			Capability:   "web.candidate_generation",
+			ManifestName: "web-api-pack",
+			ToolID:       "sqlmap",
+			Operation:    "injection_test",
+			ParserID:     "sqlmap_json",
+		},
+		ScopeTargets: []ScopeTarget{{Kind: "url", Value: "https://app.example/search?q=hello"}},
+	}, ToolExecutionResult{
+		ExecutionID: "native-sqlmap",
+		Status:      "completed",
+		Transcript: sqlmapJSONTranscriptFromLog(`---
+Parameter: q (GET)
+    Type: boolean-based blind
+    Title: AND boolean-based blind - WHERE or HAVING clause
+    Payload: q=secret-token AND 123=123
+
+    Type: error-based
+    Title: PostgreSQL AND error-based - WHERE or HAVING clause
+    Payload: q=secret-token AND 1=CAST(secret-token AS INT)
+---
+[INFO] the back-end DBMS is PostgreSQL
+web server operating system: Linux Ubuntu
+Cookie: session=secret-token
+Authorization: Bearer secret-token
+`, "https://app.example/search?q=hello"),
+	})
+
+	if len(events) != 2 {
+		t.Fatalf("expected parser event and one sqlmap log finding fact, got %#v", events)
+	}
+	var parserPayload struct {
+		Parser       string `json:"parser"`
+		Status       string `json:"status"`
+		FindingCount int    `json:"finding_count"`
+	}
+	if err := json.Unmarshal(events[0].Payload, &parserPayload); err != nil {
+		t.Fatalf("decode parser event: %v", err)
+	}
+	if parserPayload.Parser != "sqlmap_json" || parserPayload.Status != "parsed" || parserPayload.FindingCount != 1 {
+		t.Fatalf("unexpected sqlmap log parser payload: %#v", parserPayload)
+	}
+	payloadText := string(events[1].Payload)
+	for _, leaked := range []string{"secret-token", "Payload", "Cookie", "Authorization", "Bearer", "?", "web server operating system"} {
+		if strings.Contains(payloadText, leaked) {
+			t.Fatalf("sqlmap log finding fact leaked untrusted output %q: %s", leaked, payloadText)
+		}
+	}
+	var payload struct {
+		Source     string `json:"source"`
+		Kind       string `json:"kind"`
+		MatchedURL string `json:"matched_url"`
+		TargetURL  string `json:"target_url"`
+		Parameter  string `json:"parameter"`
+		Place      string `json:"place"`
+		Technique  string `json:"technique"`
+		DBMS       string `json:"dbms"`
+		Title      string `json:"title"`
+	}
+	if err := json.Unmarshal(events[1].Payload, &payload); err != nil {
+		t.Fatalf("decode sqlmap log fact: %v", err)
+	}
+	if payload.Source != "parser.sqlmap_json" || payload.Kind != "finding" || payload.MatchedURL != "https://app.example/search" || payload.TargetURL != "https://app.example/search" || payload.Parameter != "q" || payload.Place != "GET" {
+		t.Fatalf("unexpected sqlmap log finding identity: %#v", payload)
+	}
+	if payload.Technique != "boolean-based blind,error-based" || payload.DBMS != "PostgreSQL" || payload.Title != "AND boolean-based blind - WHERE or HAVING clause" {
+		t.Fatalf("unexpected sqlmap log finding metadata: %#v", payload)
+	}
+}
+
 func TestParserEventsForToolExecutionRequiresSqlmapURLScope(t *testing.T) {
 	events := parserEventsForToolExecution("run-sqlmap-no-url-scope", ToolExecutionRequest{
 		Node: compiler.PlanNode{

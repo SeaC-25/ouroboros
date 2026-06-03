@@ -92,6 +92,111 @@ func parseSqlmapJSON(output []byte, targetURL string, exclusions []string) ([]sq
 	return findings, nil
 }
 
+func sqlmapJSONTranscriptFromLog(logText string, targetURL string) string {
+	type logFinding struct {
+		URL        string   `json:"url"`
+		Parameter  string   `json:"parameter,omitempty"`
+		Place      string   `json:"place,omitempty"`
+		Techniques []string `json:"techniques,omitempty"`
+		DBMS       string   `json:"dbms,omitempty"`
+		Title      string   `json:"title,omitempty"`
+		Vulnerable bool     `json:"vulnerable"`
+	}
+	findings := []logFinding{}
+	var current *logFinding
+	globalDBMS := ""
+	flush := func() {
+		if current == nil {
+			return
+		}
+		if len(current.Techniques) > 0 || current.Title != "" || current.DBMS != "" {
+			if current.DBMS == "" {
+				current.DBMS = globalDBMS
+			}
+			current.URL = webEvidenceURL(targetURL)
+			current.Vulnerable = true
+			findings = append(findings, *current)
+		}
+		current = nil
+	}
+
+	for _, line := range strings.Split(logText, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || line == "---" {
+			continue
+		}
+		lower := strings.ToLower(line)
+		if strings.HasPrefix(lower, "parameter:") {
+			flush()
+			parameter, place := sqlmapParameterFromLogLine(line)
+			current = &logFinding{
+				Parameter: parameter,
+				Place:     place,
+				DBMS:      globalDBMS,
+			}
+			continue
+		}
+		if strings.HasPrefix(lower, "type:") {
+			if current == nil {
+				continue
+			}
+			technique := sqlmapCleanMetadataValue(strings.TrimSpace(line[len("Type:"):]), 120)
+			if technique != "" && !containsTrimmedValue(current.Techniques, technique) {
+				current.Techniques = append(current.Techniques, technique)
+			}
+			continue
+		}
+		if strings.HasPrefix(lower, "title:") {
+			if current == nil || current.Title != "" {
+				continue
+			}
+			current.Title = sqlmapCleanMetadataValue(strings.TrimSpace(line[len("Title:"):]), 120)
+			continue
+		}
+		if index := strings.Index(lower, "back-end dbms:"); index >= 0 {
+			globalDBMS = sqlmapCleanMetadataValue(strings.TrimSpace(line[index+len("back-end DBMS:"):]), 80)
+			if current != nil && current.DBMS == "" {
+				current.DBMS = globalDBMS
+			}
+			continue
+		}
+		if index := strings.Index(lower, "the back-end dbms is "); index >= 0 {
+			globalDBMS = sqlmapCleanMetadataValue(strings.TrimSpace(line[index+len("the back-end DBMS is "):]), 80)
+			if current != nil && current.DBMS == "" {
+				current.DBMS = globalDBMS
+			}
+			continue
+		}
+	}
+	flush()
+	for index := range findings {
+		if findings[index].DBMS == "" {
+			findings[index].DBMS = globalDBMS
+		}
+	}
+	data, err := json.Marshal(map[string]any{"findings": findings})
+	if err != nil {
+		return `{"findings":[]}`
+	}
+	return string(data)
+}
+
+func sqlmapParameterFromLogLine(line string) (string, string) {
+	value := strings.TrimSpace(line)
+	if strings.HasPrefix(strings.ToLower(value), "parameter:") {
+		value = strings.TrimSpace(value[len("Parameter:"):])
+	}
+	place := ""
+	if strings.HasSuffix(value, ")") {
+		open := strings.LastIndex(value, "(")
+		if open >= 0 {
+			place = sqlmapPlace(strings.TrimSpace(value[open+1 : len(value)-1]))
+			value = strings.TrimSpace(value[:open])
+		}
+	}
+	return arjunCleanParameterName(value), place
+}
+
 func sqlmapFindingRecords(raw json.RawMessage) ([]map[string]json.RawMessage, error) {
 	raw = bytes.TrimSpace(raw)
 	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {

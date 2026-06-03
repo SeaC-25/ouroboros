@@ -6228,6 +6228,115 @@ touch `+marker+`
 	}
 }
 
+func TestRunWorkspacePromotesSqlmapManagedLogToEvidenceFinding(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	scope := `version: 1
+scope:
+  target_policy: enforce
+  targets:
+    - kind: url
+      value: https://app.example/search?q=hello
+  exclusions: []
+execution:
+  isolation: process
+  tool_concurrency: 1
+`
+	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
+		t.Fatalf("write URL scope: %v", err)
+	}
+	marker := filepath.Join(t.TempDir(), "tool-level-sqlmap-log-ran")
+	writeManagedBundleFixture(t, root, "sqlmap", "binary", "1.8.12", `#!/usr/bin/env sh
+out=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--output-dir" ]; then
+    shift
+    out="$1"
+  fi
+  shift
+done
+mkdir -p "$out/app.example"
+cat > "$out/app.example/log" <<'LOG'
+---
+Parameter: q (GET)
+    Type: boolean-based blind
+    Title: AND boolean-based blind - WHERE or HAVING clause
+    Payload: q=secret-token AND 123=123
+
+    Type: error-based
+    Title: PostgreSQL AND error-based - WHERE or HAVING clause
+    Payload: q=secret-token AND 1=CAST(secret-token AS INT)
+---
+[INFO] the back-end DBMS is PostgreSQL
+Cookie: session=secret-token
+Authorization: Bearer secret-token
+LOG
+touch `+marker+`
+`)
+	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "sqlmap", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed sqlmap bundle: %v", err)
+	}
+
+	result, err := RunWorkspaceWithOptions(ctx, root, RunOptions{
+		Action:                compiler.ActionGenerateCandidates,
+		DeferReportProjection: true,
+	})
+	if err != nil {
+		t.Fatalf("run workspace with sqlmap log parser: %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("expected sqlmap payload to run through registered argv builder: %v", err)
+	}
+	store, err := eventlog.OpenSQLite(filepath.Join(root, "replay", "events.db"))
+	if err != nil {
+		t.Fatalf("open event log: %v", err)
+	}
+	defer store.Close()
+	events, err := store.Replay(ctx, result.RunID)
+	if err != nil {
+		t.Fatalf("replay events: %v", err)
+	}
+	snapshot, err := eventlog.BuildReplaySnapshot(events)
+	if err != nil {
+		t.Fatalf("build replay snapshot: %v", err)
+	}
+
+	var findingID string
+	for _, fact := range snapshot.Blackboard.Facts {
+		if fact.Source != "parser.sqlmap_json" {
+			continue
+		}
+		findingID = fact.ID
+		if fact.Kind != "finding" {
+			t.Fatalf("expected sqlmap log parser fact kind finding, got %#v", fact)
+		}
+		for _, want := range []string{"sqlmap", "https://app.example/search", "parameter=q", "boolean-based blind,error-based", "PostgreSQL"} {
+			if !strings.Contains(fact.Statement, want) {
+				t.Fatalf("expected sqlmap log finding to contain %q, got %#v", want, fact)
+			}
+		}
+		for _, leaked := range []string{"secret-token", "Authorization", "Cookie", "Payload", "?", "#frag"} {
+			if strings.Contains(fact.Statement, leaked) {
+				t.Fatalf("sqlmap log finding statement leaked redacted output %q: %#v", leaked, fact)
+			}
+		}
+		break
+	}
+	if findingID == "" {
+		t.Fatalf("expected sqlmap log parser finding fact in replay snapshot, facts=%#v", snapshot.Blackboard.Facts)
+	}
+	node, ok := snapshot.Evidence.Node(findingID)
+	if !ok {
+		t.Fatalf("expected sqlmap log parser fact to project into evidence graph")
+	}
+	if node.Type != evidence.NodeFinding {
+		t.Fatalf("expected evidence finding node, got %#v", node)
+	}
+}
+
 func TestRunWorkspacePromotesURLListTextToEvidenceSurface(t *testing.T) {
 	ctx := context.Background()
 	root := filepath.Join(t.TempDir(), "workspace")
@@ -6488,6 +6597,52 @@ func TestNativeManagedRunCommandRejectsExcludedSqlmapURLBeforeOutputDir(t *testi
 	outputDir := filepath.Join(root, "toolchain", "managed-outputs", "sqlmap")
 	if _, statErr := os.Stat(outputDir); !os.IsNotExist(statErr) {
 		t.Fatalf("excluded sqlmap URL should fail before creating output dir, stat err=%v", statErr)
+	}
+}
+
+func TestManagedSqlmapOutputTranscriptRejectsSymlinkedLog(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	request := ToolExecutionRequest{
+		WorkspaceRoot: root,
+		Node: compiler.PlanNode{
+			ID:             "sqlmap-symlink-log:01",
+			Capability:     "web.candidate_generation",
+			ManifestName:   "web-api-pack",
+			ToolID:         "sqlmap",
+			AdapterID:      "managed_binary",
+			Operation:      "injection_test",
+			ParserID:       "sqlmap_json",
+			TargetKind:     "url",
+			DependencyName: "sqlmap",
+			DependencyKind: "binary",
+			Runner:         "native",
+		},
+		ScopeTargets:      []ScopeTarget{{Kind: "url", Value: "https://app.example/search?q=hello"}},
+		ScopeTargetPolicy: "enforce",
+		IsolationMode:     "process",
+	}
+	outputDir, err := managedOutputDirForRequest(request, "sqlmap")
+	if err != nil {
+		t.Fatalf("create managed sqlmap output dir: %v", err)
+	}
+	targetDir := filepath.Join(outputDir, "app.example")
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		t.Fatalf("create sqlmap target dir: %v", err)
+	}
+	outside := filepath.Join(t.TempDir(), "outside-log")
+	if err := os.WriteFile(outside, []byte("Parameter: q (GET)\n"), 0o644); err != nil {
+		t.Fatalf("write outside log: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(targetDir, "log")); err != nil {
+		t.Fatalf("symlink log: %v", err)
+	}
+
+	transcript, ok, err := managedOutputTranscriptForRequest(request)
+	if err == nil || !strings.Contains(err.Error(), "symlink") || !ok || transcript != "" {
+		t.Fatalf("expected symlinked sqlmap log to fail closed, transcript=%q ok=%v err=%v", transcript, ok, err)
 	}
 }
 

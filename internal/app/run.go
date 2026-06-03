@@ -2092,11 +2092,7 @@ func managedOutputTranscriptForRequest(request ToolExecutionRequest) (string, bo
 		if binary != "sqlmap" {
 			return "", false, nil
 		}
-		outputPath, err := managedOutputFileInDirForRequest(request, binary, "ouro-sqlmap.json")
-		if err != nil {
-			return "", true, err
-		}
-		return managedOutputTranscriptFromPath(binary, outputPath)
+		return managedSqlmapOutputTranscriptForRequest(request, binary)
 	}
 	switch strings.TrimSpace(request.Node.ParserID) {
 	case "amass_json":
@@ -2119,6 +2115,72 @@ func managedOutputTranscriptForRequest(request ToolExecutionRequest) (string, bo
 		return "", true, err
 	}
 	return managedOutputTranscriptFromPath(binary, outputPath)
+}
+
+func managedSqlmapOutputTranscriptForRequest(request ToolExecutionRequest, binary string) (string, bool, error) {
+	outputDir, err := managedOutputDirForRequest(request, binary)
+	if err != nil {
+		return "", true, err
+	}
+	outputPath := filepath.Join(outputDir, "ouro-sqlmap.json")
+	transcript, ok, err := managedOutputTranscriptFromPath(binary, outputPath)
+	if err != nil || ok {
+		return transcript, ok, err
+	}
+	logPath, ok, err := managedSqlmapLogPath(outputDir)
+	if err != nil || !ok {
+		return "", ok, err
+	}
+	logText, ok, err := managedOutputTranscriptFromPath(binary, logPath)
+	if err != nil || !ok {
+		return "", ok, err
+	}
+	return sqlmapJSONTranscriptFromLog(logText, sqlmapTargetURL(request)), true, nil
+}
+
+func managedSqlmapLogPath(outputDir string) (string, bool, error) {
+	var logPath string
+	err := filepath.Walk(outputDir, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path == outputDir {
+			return nil
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			if filepath.Base(path) == "log" {
+				return fmt.Errorf("sqlmap managed log must not be a symlink: %s", path)
+			}
+			return nil
+		}
+		if info.IsDir() {
+			return nil
+		}
+		if filepath.Base(path) != "log" {
+			return nil
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("sqlmap managed log must be a regular file: %s", path)
+		}
+		if logPath != "" {
+			return fmt.Errorf("sqlmap managed output contains multiple log files")
+		}
+		logPath = path
+		return nil
+	})
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", true, err
+	}
+	if logPath == "" {
+		return "", false, nil
+	}
+	return logPath, true, nil
 }
 
 func managedOutputTranscriptFromPath(binary string, outputPath string) (string, bool, error) {

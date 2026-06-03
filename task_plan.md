@@ -14,6 +14,7 @@ Produce a phased Chinese architecture design document for Ouroboros by dissectin
 | Archive discovery managed argv and parser evidence promotion | complete | Added explicit-domain `gau/archive_discovery` and `waybackurls/archive_discovery` argv generation plus `url_list_text` archived route surface promotion with scoped URL redaction. |
 | Arjun managed argv and parser evidence promotion | complete | Added explicit-URL `arjun/parameter_discovery` argv generation through a workspace-confined output file plus `arjun_json` parameter surface promotion with scoped URL and raw output redaction. |
 | Sqlmap managed argv and parser evidence promotion | complete | Added explicit-URL `sqlmap/injection_test` detection-only argv generation through a workspace-confined output directory plus `sqlmap_json` SQL injection finding promotion with scoped URL and raw payload/output redaction. |
+| Sqlmap managed log artifact wrapper | complete | Added real sqlmap `log` fallback under the managed output directory, converting only parameter/type/title/DBMS lines into the existing `sqlmap_json` transcript while rejecting symlinked or ambiguous logs. |
 
 ## Phases
 | Phase | Status | Notes |
