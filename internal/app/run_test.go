@@ -5669,6 +5669,299 @@ execution:
 	}
 }
 
+func TestRunWorkspacePromotesKatanaJSONLToEvidenceSurface(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	scope := `version: 1
+scope:
+  target_policy: enforce
+  targets:
+    - kind: url
+      value: https://app.example
+  exclusions: []
+execution:
+  isolation: process
+  tool_concurrency: 1
+`
+	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
+		t.Fatalf("write URL scope: %v", err)
+	}
+	marker := filepath.Join(t.TempDir(), "tool-level-katana-ran")
+	writeManagedBundleFixture(t, root, "katana", "binary", "1.6.1", `#!/usr/bin/env sh
+cat <<'JSONL'
+{"url":"https://app.example/login?token=secret-token#frag","method":"GET","status_code":200,"content_length":6726,"depth":1,"raw":"secret-token","response":"secret-token","headers":{"Authorization":"Bearer secret-token"}}
+JSONL
+touch `+marker+`
+`)
+	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "katana", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed katana bundle: %v", err)
+	}
+
+	result, err := RunWorkspaceWithOptions(ctx, root, RunOptions{Action: compiler.ActionEnumeratePaths, DeferReportProjection: true})
+	if err != nil {
+		t.Fatalf("run workspace with katana parser: %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("expected katana payload to run through registered argv builder: %v", err)
+	}
+	store, err := eventlog.OpenSQLite(filepath.Join(root, "replay", "events.db"))
+	if err != nil {
+		t.Fatalf("open event log: %v", err)
+	}
+	defer store.Close()
+	events, err := store.Replay(ctx, result.RunID)
+	if err != nil {
+		t.Fatalf("replay events: %v", err)
+	}
+	snapshot, err := eventlog.BuildReplaySnapshot(events)
+	if err != nil {
+		t.Fatalf("build replay snapshot: %v", err)
+	}
+
+	var surfaceID string
+	for _, fact := range snapshot.Blackboard.Facts {
+		if fact.Source != "parser.katana_jsonl" {
+			continue
+		}
+		surfaceID = fact.ID
+		if fact.Kind != "surface" {
+			t.Fatalf("expected katana parser fact kind surface, got %#v", fact)
+		}
+		for _, want := range []string{"katana", "https://app.example/login", "method=GET", "status=200"} {
+			if !strings.Contains(fact.Statement, want) {
+				t.Fatalf("expected katana route surface to contain %q, got %#v", want, fact)
+			}
+		}
+		if strings.Contains(fact.Statement, "secret-token") || strings.Contains(fact.Statement, "Authorization") {
+			t.Fatalf("katana route statement leaked redacted output: %#v", fact)
+		}
+		if fact.Confidence < 0.6 {
+			t.Fatalf("expected completed katana route confidence, got %#v", fact)
+		}
+		break
+	}
+	if surfaceID == "" {
+		t.Fatalf("expected katana parser route fact in replay snapshot, facts=%#v", snapshot.Blackboard.Facts)
+	}
+	node, ok := snapshot.Evidence.Node(surfaceID)
+	if !ok {
+		t.Fatalf("expected katana parser fact to project into evidence graph")
+	}
+	if node.Type != evidence.NodeSurface {
+		t.Fatalf("expected evidence surface node, got %#v", node)
+	}
+
+	foundFactEvent := false
+	foundParserEvent := false
+	for _, event := range events {
+		switch event.Type {
+		case eventlog.EventFact:
+			var payload struct {
+				FactID        string `json:"fact_id"`
+				Source        string `json:"source"`
+				URL           string `json:"url"`
+				TargetURL     string `json:"target_url"`
+				Method        string `json:"method"`
+				StatusCode    int    `json:"status_code"`
+				ContentLength int64  `json:"content_length"`
+				Depth         int    `json:"depth"`
+				ParserID      string `json:"parser_id"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatalf("decode fact event: %v", err)
+			}
+			if payload.FactID != surfaceID || payload.Source != "parser.katana_jsonl" {
+				continue
+			}
+			foundFactEvent = true
+			if payload.URL != "https://app.example/login" || payload.TargetURL != "https://app.example" || payload.Method != "GET" || payload.StatusCode != 200 || payload.ContentLength != 6726 || payload.Depth != 1 || payload.ParserID != "katana_jsonl" {
+				t.Fatalf("expected structured katana route metadata, got %#v", payload)
+			}
+			if strings.Contains(string(event.Payload), "secret-token") || strings.Contains(string(event.Payload), "Authorization") {
+				t.Fatalf("katana route fact payload leaked redacted output: %s", string(event.Payload))
+			}
+		case eventlog.EventParser:
+			var payload struct {
+				Parser string `json:"parser"`
+				Status string `json:"status"`
+				ToolID string `json:"tool_id"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatalf("decode parser event: %v", err)
+			}
+			if payload.Parser == "katana_jsonl" && payload.Status == "parsed" && payload.ToolID == "katana" {
+				foundParserEvent = true
+			}
+		}
+	}
+	if !foundFactEvent {
+		t.Fatalf("expected raw katana fact event for %s", surfaceID)
+	}
+	if !foundParserEvent {
+		t.Fatalf("expected parsed katana parser event, events=%#v", events)
+	}
+}
+
+func TestRunWorkspaceRecordsKatanaParseFailureWithoutSurface(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	scope := `version: 1
+scope:
+  target_policy: enforce
+  targets:
+    - kind: url
+      value: https://app.example
+  exclusions: []
+execution:
+  isolation: process
+  tool_concurrency: 1
+`
+	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
+		t.Fatalf("write URL scope: %v", err)
+	}
+	writeManagedBundleFixture(t, root, "katana", "binary", "1.6.1", "#!/usr/bin/env sh\nprintf 'not-jsonl\\n'\n")
+	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "katana", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed katana bundle: %v", err)
+	}
+
+	result, err := RunWorkspaceWithOptions(ctx, root, RunOptions{Action: compiler.ActionEnumeratePaths, DeferReportProjection: true})
+	if err != nil {
+		t.Fatalf("parse failure should not fail completed katana run: %v", err)
+	}
+	store, err := eventlog.OpenSQLite(filepath.Join(root, "replay", "events.db"))
+	if err != nil {
+		t.Fatalf("open event log: %v", err)
+	}
+	defer store.Close()
+	events, err := store.Replay(ctx, result.RunID)
+	if err != nil {
+		t.Fatalf("replay events: %v", err)
+	}
+
+	foundParseFailure := false
+	for _, event := range events {
+		switch event.Type {
+		case eventlog.EventParser:
+			var payload struct {
+				Parser       string `json:"parser"`
+				Status       string `json:"status"`
+				ToolID       string `json:"tool_id"`
+				FindingCount int    `json:"finding_count"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatalf("decode parser event: %v", err)
+			}
+			if payload.Parser == "katana_jsonl" && payload.Status == "parse_failed" && payload.ToolID == "katana" && payload.FindingCount == 0 {
+				foundParseFailure = true
+			}
+		case eventlog.EventFact:
+			var payload struct {
+				Source string `json:"source"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatalf("decode fact event: %v", err)
+			}
+			if payload.Source == "parser.katana_jsonl" {
+				t.Fatalf("parse failure must not emit katana parser fact: %#v", payload)
+			}
+		}
+	}
+	if !foundParseFailure {
+		t.Fatalf("expected run-level katana parse_failed event, events=%#v", events)
+	}
+}
+
+func TestNativeManagedRunCommandBuildsKatanaCrawlArgvForURLScope(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	payloadPath := writeManagedBundleFixture(t, root, "katana", "binary", "1.6.1", "#!/usr/bin/env sh\nprintf 'katana-url\\n'\n")
+	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "katana", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed katana bundle: %v", err)
+	}
+	request := ToolExecutionRequest{
+		WorkspaceRoot: root,
+		Node: compiler.PlanNode{
+			ID:             "katana-url-scope:01",
+			Capability:     "web.route_enumeration",
+			ManifestName:   "web-api-pack",
+			ToolID:         "katana",
+			AdapterID:      "managed_binary",
+			Operation:      "crawl",
+			ParserID:       "katana_jsonl",
+			TargetKind:     "url",
+			DependencyName: "katana",
+			DependencyKind: "binary",
+			Runner:         "native",
+		},
+		ScopeTargets:      []ScopeTarget{{Kind: "url", Value: "https://app.example"}},
+		ScopeTargetPolicy: "enforce",
+		IsolationMode:     "process",
+	}
+
+	command, target, ok, err := nativeManagedRunCommandWithTarget(request)
+	if err != nil || !ok {
+		t.Fatalf("expected katana command for URL scope, command=%#v target=%#v ok=%v err=%v", command, target, ok, err)
+	}
+	if target.Kind != "url" || target.Value != "https://app.example" {
+		t.Fatalf("expected selected URL target, got %#v", target)
+	}
+	want := []string{payloadPath, "-u", "https://app.example", "-j", "-silent", "-or", "-ob", "-duc"}
+	if strings.Join(command, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("unexpected katana argv: got %#v want %#v", command, want)
+	}
+}
+
+func TestNativeManagedRunCommandKeepsKatanaOfflineForNonURLScope(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	writeManagedBundleFixture(t, root, "katana", "binary", "1.6.1", "#!/usr/bin/env sh\nprintf 'katana-non-url\\n'\n")
+	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "katana", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed katana bundle: %v", err)
+	}
+	for _, scopeTarget := range []ScopeTarget{
+		{Kind: "domain", Value: "example.com"},
+		{Kind: "host", Value: "app.example.com"},
+		{Kind: "cidr", Value: "10.0.0.0/24"},
+	} {
+		t.Run(scopeTarget.Kind, func(t *testing.T) {
+			request := ToolExecutionRequest{
+				WorkspaceRoot: root,
+				Node: compiler.PlanNode{
+					ID:             "katana-non-url-scope:01",
+					Capability:     "web.route_enumeration",
+					ManifestName:   "web-api-pack",
+					ToolID:         "katana",
+					AdapterID:      "managed_binary",
+					Operation:      "crawl",
+					ParserID:       "katana_jsonl",
+					TargetKind:     "url",
+					DependencyName: "katana",
+					DependencyKind: "binary",
+					Runner:         "native",
+				},
+				ScopeTargets:      []ScopeTarget{scopeTarget},
+				ScopeTargetPolicy: "enforce",
+				IsolationMode:     "process",
+			}
+
+			command, ok, err := nativeManagedRunCommand(request)
+			if err != nil || ok || len(command) > 0 {
+				t.Fatalf("katana must stay offline for non-URL scope %#v, command=%#v ok=%v err=%v", scopeTarget, command, ok, err)
+			}
+		})
+	}
+}
+
 func TestRunWorkspaceRejectsExcludedDomainBeforeDnsxExecution(t *testing.T) {
 	ctx := context.Background()
 	root := filepath.Join(t.TempDir(), "workspace")
