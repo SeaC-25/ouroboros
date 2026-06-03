@@ -36,6 +36,21 @@ type ProviderUsageRecord struct {
 	BudgetMaxEstimatedCostUSD float64  `json:"budget_max_estimated_cost_usd,omitempty"`
 }
 
+type ProviderUsageSummary struct {
+	RecordCount              int
+	Providers                []string
+	Models                   []string
+	InputTokens              int
+	OutputTokens             int
+	TotalTokens              int
+	EstimatedCostUSD         float64
+	EstimatedCostRecordCount int
+	BudgetEnforcedCount      int
+	BudgetWithinLimitCount   int
+	FirstCreatedAt           string
+	LastCreatedAt            string
+}
+
 type ProviderGenerationBudgetOptions struct {
 	MaxEstimatedCostUSD *float64
 }
@@ -155,6 +170,55 @@ func ListProviderUsageRecords(root string) ([]ProviderUsageRecord, error) {
 		return records[i].CreatedAt < records[j].CreatedAt
 	})
 	return records, nil
+}
+
+func SummarizeProviderUsageRecords(root string) (ProviderUsageSummary, error) {
+	records, err := ListProviderUsageRecords(root)
+	if err != nil {
+		return ProviderUsageSummary{}, err
+	}
+	summary := ProviderUsageSummary{
+		RecordCount: len(records),
+	}
+	providers := map[string]bool{}
+	models := map[string]bool{}
+	for i, record := range records {
+		if i == 0 {
+			summary.FirstCreatedAt = record.CreatedAt
+		}
+		summary.LastCreatedAt = record.CreatedAt
+		if provider := strings.TrimSpace(record.ProviderName); provider != "" {
+			providers[provider] = true
+		}
+		if model := strings.TrimSpace(record.Model); model != "" {
+			models[model] = true
+		}
+		summary.InputTokens += record.InputTokens
+		summary.OutputTokens += record.OutputTokens
+		summary.TotalTokens += record.TotalTokens
+		if record.EstimatedCostAvailable {
+			summary.EstimatedCostUSD += record.EstimatedCostUSD
+			summary.EstimatedCostRecordCount++
+		}
+		if record.BudgetEnforced {
+			summary.BudgetEnforcedCount++
+			if record.BudgetStatus == "within_limit" {
+				summary.BudgetWithinLimitCount++
+			}
+		}
+	}
+	summary.Providers = sortedProviderUsageSummaryKeys(providers)
+	summary.Models = sortedProviderUsageSummaryKeys(models)
+	return summary, nil
+}
+
+func sortedProviderUsageSummaryKeys(values map[string]bool) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func ReadProviderUsageRecord(root string, recordPath string) (ProviderUsageRecord, error) {

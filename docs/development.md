@@ -65,6 +65,7 @@ GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro provider generate ./workspac
 GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro provider generate ./workspace --prompt "Summarize the scoped plan." --max-estimated-cost-usd 0.01
 GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro provider generate ./workspace --prompt "Summarize the scoped plan." --record-usage
 GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro provider usage ./workspace
+GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro provider usage ./workspace --summary
 GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro toolchain list ./workspace
 GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro toolchain health ./workspace
 GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro toolchain authored-tool-validate ./authored-tool.yaml
@@ -122,7 +123,7 @@ The run preflight performs `GET <base_url>/models/<model>` and accepts only 2xx 
 
 `--max-estimated-cost-usd` is an explicit preview budget gate. It is checked after the provider returns token usage and a local cost estimate can be computed, but before assistant text is printed or a usage record is written. When pricing metadata is missing, or the estimated cost exceeds the configured limit, the command fails closed and writes no usage record. This is not a pre-spend reservation because the manual preview has already crossed the provider HTTP boundary.
 
-By default, the preview does not write workspace state. `--record-usage` is the explicit metadata-only ledger write gate; after a successful preview it writes a JSON record under `workspace/runtime/model-usage/` containing provider/model identity, token counts, optional cost estimate, optional context window, normalized capabilities, and any enforced preview budget decision. It does not persist prompt text, assistant text, bearer tokens, provider response bodies, or replay events. `ouro provider usage <workspace> [record]` lists or inspects those direct JSON records.
+By default, the preview does not write workspace state. `--record-usage` is the explicit metadata-only ledger write gate; after a successful preview it writes a JSON record under `workspace/runtime/model-usage/` containing provider/model identity, token counts, optional cost estimate, optional context window, normalized capabilities, and any enforced preview budget decision. It does not persist prompt text, assistant text, bearer tokens, provider response bodies, or replay events. `ouro provider usage <workspace> [record]` lists or inspects those direct JSON records, and `ouro provider usage <workspace> --summary` prints an aggregate record/token/cost/budget summary without writing workspace state or replay events.
 
 This preview does not run workspace tools, dispatch workers, contact scoped targets, mutate replay events, write reports, mediate tool calls, stream model output, perform provider failover, enforce run/replay model budgets, or attach model generation to the autonomous run loop.
 

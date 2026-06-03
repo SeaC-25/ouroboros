@@ -70,6 +70,59 @@ func TestRecordProviderGenerationUsageWritesMetadataOnlyRecord(t *testing.T) {
 	}
 }
 
+func TestSummarizeProviderUsageRecordsAggregatesMetadataOnlyLedger(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	maxCost := 0.01
+	_, err := RecordProviderGenerationUsage(root, ProviderGenerationResult{
+		ProviderName:           "local-openai",
+		Model:                  "gpt-a",
+		InputTokens:            1000,
+		OutputTokens:           500,
+		TotalTokens:            1500,
+		EstimatedCostUSD:       0.0075,
+		EstimatedCostAvailable: true,
+	}, ProviderUsageRecordOptions{
+		Now:                 time.Date(2026, 6, 4, 12, 30, 0, 0, time.UTC),
+		MaxEstimatedCostUSD: &maxCost,
+	})
+	if err != nil {
+		t.Fatalf("record first usage: %v", err)
+	}
+	_, err = RecordProviderGenerationUsage(root, ProviderGenerationResult{
+		ProviderName: "second-openai",
+		Model:        "gpt-b",
+		InputTokens:  200,
+		OutputTokens: 300,
+		TotalTokens:  500,
+	}, ProviderUsageRecordOptions{Now: time.Date(2026, 6, 4, 13, 0, 0, 0, time.UTC)})
+	if err != nil {
+		t.Fatalf("record second usage: %v", err)
+	}
+
+	summary, err := SummarizeProviderUsageRecords(root)
+	if err != nil {
+		t.Fatalf("summarize provider usage: %v", err)
+	}
+	if summary.RecordCount != 2 || summary.InputTokens != 1200 || summary.OutputTokens != 800 || summary.TotalTokens != 2000 {
+		t.Fatalf("unexpected token summary: %#v", summary)
+	}
+	if summary.EstimatedCostRecordCount != 1 || summary.EstimatedCostUSD != 0.0075 {
+		t.Fatalf("unexpected cost summary: %#v", summary)
+	}
+	if summary.BudgetEnforcedCount != 1 || summary.BudgetWithinLimitCount != 1 {
+		t.Fatalf("unexpected budget summary: %#v", summary)
+	}
+	if strings.Join(summary.Providers, "|") != "local-openai|second-openai" || strings.Join(summary.Models, "|") != "gpt-a|gpt-b" {
+		t.Fatalf("unexpected provider/model summary: %#v", summary)
+	}
+	if summary.FirstCreatedAt != "2026-06-04T12:30:00Z" || summary.LastCreatedAt != "2026-06-04T13:00:00Z" {
+		t.Fatalf("unexpected time summary: %#v", summary)
+	}
+}
+
 func TestRecordProviderGenerationUsagePersistsBudgetDecision(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
 	if err := InitWorkspace(root); err != nil {
