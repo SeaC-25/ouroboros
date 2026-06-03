@@ -1646,6 +1646,12 @@ func (commandToolExecutionRunner) Execute(ctx context.Context, request ToolExecu
 		}
 		return result, fmt.Errorf("execute run command %s: %w", command, err)
 	}
+	if transcript, ok, err := managedOutputTranscriptForRequest(request); err != nil {
+		result.Transcript = err.Error()
+		return result, err
+	} else if ok {
+		result.Transcript = transcript
+	}
 	if result.Transcript == "" {
 		result.Transcript = "command completed without output"
 	}
@@ -1761,6 +1767,9 @@ func managedBinaryTargetKinds(binary string, operation string, node compiler.Pla
 		if binary == "subfinder" {
 			return []string{string(domain.TargetDomain)}
 		}
+		if binary == "amass" {
+			return []string{string(domain.TargetDomain)}
+		}
 	case "template_scan":
 		if binary == "nuclei" {
 			return []string{string(domain.TargetURL)}
@@ -1787,6 +1796,9 @@ func managedBinaryTargetKinds(binary string, operation string, node compiler.Pla
 		}
 	case "dns_probe":
 		if binary == "dnsx" {
+			return []string{string(domain.TargetDomain)}
+		}
+		if binary == "dnsrecon" {
 			return []string{string(domain.TargetDomain)}
 		}
 	case "service_fingerprint":
@@ -1819,6 +1831,23 @@ func managedBinaryCommandFor(request ToolExecutionRequest, binary string, operat
 				return nil, false, nil
 			}
 			return []string{binary, "-json", "-d", target.Value}, true, nil
+		}
+		if binary == "amass" {
+			if target.Kind != string(domain.TargetDomain) {
+				return nil, false, nil
+			}
+			if !targetPolicyDisabled(request.ScopeTargetPolicy) && scopeTargetExcludedForRequest(request, target) {
+				return nil, true, fmt.Errorf("scope target %s is excluded for capability %s", target.Value, request.Node.Capability)
+			}
+			domainName, ok := normalizeSubfinderDNSName(target.Value)
+			if !ok {
+				return nil, true, fmt.Errorf("amass command requires valid domain scope target")
+			}
+			outputPath, err := managedOutputPathForRequest(request, binary)
+			if err != nil {
+				return nil, true, err
+			}
+			return []string{binary, "enum", "-passive", "-nocolor", "-d", domainName, "-json", outputPath}, true, nil
 		}
 	case "template_scan":
 		if binary == "nuclei" {
@@ -1920,6 +1949,23 @@ func managedBinaryCommandFor(request ToolExecutionRequest, binary string, operat
 			}
 			return []string{binary, "-j", "-silent", "-omit-raw", "-l", inputPath}, true, nil
 		}
+		if binary == "dnsrecon" {
+			if target.Kind != string(domain.TargetDomain) {
+				return nil, false, nil
+			}
+			if !targetPolicyDisabled(request.ScopeTargetPolicy) && scopeTargetExcludedForRequest(request, target) {
+				return nil, true, fmt.Errorf("scope target %s is excluded for capability %s", target.Value, request.Node.Capability)
+			}
+			domainName, ok := normalizeSubfinderDNSName(target.Value)
+			if !ok {
+				return nil, true, fmt.Errorf("dnsrecon command requires valid domain scope target")
+			}
+			outputPath, err := managedOutputPathForRequest(request, binary)
+			if err != nil {
+				return nil, true, err
+			}
+			return []string{binary, "-d", domainName, "-t", "std", "-j", outputPath}, true, nil
+		}
 	case "service_fingerprint":
 		if binary == "nmap" {
 			if target.Kind != string(domain.TargetHost) && target.Kind != string(domain.TargetCIDR) {
@@ -1952,6 +1998,60 @@ func writeDnsxManagedInputFile(root string, nodeID string, domainName string) (s
 		return "", fmt.Errorf("write dnsx managed input file: %w", err)
 	}
 	return inputPath, nil
+}
+
+func managedOutputPathForRequest(request ToolExecutionRequest, binary string) (string, error) {
+	root := strings.TrimSpace(request.WorkspaceRoot)
+	if root == "" {
+		return "", fmt.Errorf("%s command requires workspace root", binary)
+	}
+	name, err := validateAuthoredToolName(binary)
+	if err != nil {
+		return "", err
+	}
+	outputDir := filepath.Join(root, "toolchain", "managed-outputs", name)
+	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+		return "", fmt.Errorf("create %s managed output directory: %w", name, err)
+	}
+	return filepath.Join(outputDir, safeFactIDPart(request.Node.ID)+".json"), nil
+}
+
+func managedOutputTranscriptForRequest(request ToolExecutionRequest) (string, bool, error) {
+	binary := managedBinaryDependencyName(request.Node)
+	switch strings.TrimSpace(request.Node.ParserID) {
+	case "amass_json":
+		if binary != "amass" {
+			return "", false, nil
+		}
+	case "dnsrecon_json":
+		if binary != "dnsrecon" {
+			return "", false, nil
+		}
+	default:
+		return "", false, nil
+	}
+	outputPath, err := managedOutputPathForRequest(request, binary)
+	if err != nil {
+		return "", true, err
+	}
+	info, err := os.Lstat(outputPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", true, fmt.Errorf("inspect %s managed output: %w", binary, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return "", true, fmt.Errorf("%s managed output must not be a symlink: %s", binary, outputPath)
+	}
+	if info.IsDir() || !info.Mode().IsRegular() {
+		return "", true, fmt.Errorf("%s managed output must be a regular file: %s", binary, outputPath)
+	}
+	data, err := os.ReadFile(outputPath)
+	if err != nil {
+		return "", true, fmt.Errorf("read %s managed output: %w", binary, err)
+	}
+	return strings.TrimSpace(string(data)), true, nil
 }
 
 func writeFfufManagedWordlist(root string, nodeID string) (string, error) {

@@ -7403,6 +7403,231 @@ execution:
 	t.Fatalf("expected nmap host-scope execution event, got %#v", events)
 }
 
+func TestRunWorkspacePromotesAmassManagedOutputFileToEvidenceSurface(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	scope := `version: 1
+scope:
+  target_policy: enforce
+  targets:
+    - kind: domain
+      value: example.com
+  exclusions: []
+execution:
+  isolation: process
+  tool_concurrency: 1
+`
+	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
+		t.Fatalf("write domain scope: %v", err)
+	}
+	writeManagedBundleFixture(t, root, "amass", "binary", "4.2.0", `#!/usr/bin/env sh
+out=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-json" ]; then
+    shift
+    out="$1"
+  fi
+  shift
+done
+mkdir -p "$(dirname "$out")"
+cat > "$out" <<'JSONL'
+{"name":"api.example.com","source":"secret-token","addresses":[{"ip":"192.0.2.10"}]}
+{"name":"evil.example.net","source":"secret-token"}
+JSONL
+printf 'amass wrote %s\n' "$out"
+`)
+	if _, err := ExecuteManagedToolBundleInstall(root, "infra-pack", "amass", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed amass bundle: %v", err)
+	}
+
+	result, err := RunWorkspaceWithOptions(ctx, root, RunOptions{Action: compiler.ActionDiscoverAssets, DeferReportProjection: true})
+	if err != nil {
+		t.Fatalf("run workspace with amass parser: %v", err)
+	}
+	store, err := eventlog.OpenSQLite(filepath.Join(root, "replay", "events.db"))
+	if err != nil {
+		t.Fatalf("open event log: %v", err)
+	}
+	defer store.Close()
+	events, err := store.Replay(ctx, result.RunID)
+	if err != nil {
+		t.Fatalf("replay events: %v", err)
+	}
+	snapshot, err := eventlog.BuildReplaySnapshot(events)
+	if err != nil {
+		t.Fatalf("build replay snapshot: %v", err)
+	}
+	var surfaceID string
+	for _, fact := range snapshot.Blackboard.Facts {
+		if fact.Source != "parser.amass_json" {
+			continue
+		}
+		surfaceID = fact.ID
+		if fact.Kind != "surface" || !strings.Contains(fact.Statement, "api.example.com") || strings.Contains(fact.Statement, "secret-token") || strings.Contains(fact.Statement, "evil.example.net") {
+			t.Fatalf("unexpected amass fact: %#v", fact)
+		}
+	}
+	if surfaceID == "" {
+		t.Fatalf("expected amass parser surface fact in replay snapshot, facts=%#v", snapshot.Blackboard.Facts)
+	}
+	if _, ok := snapshot.Evidence.Node(surfaceID); !ok {
+		t.Fatalf("expected amass parser fact to project into evidence graph")
+	}
+}
+
+func TestRunWorkspacePromotesDnsreconManagedOutputFileToEvidenceSurface(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	scope := `version: 1
+scope:
+  target_policy: enforce
+  targets:
+    - kind: domain
+      value: example.com
+  exclusions: []
+execution:
+  isolation: process
+  tool_concurrency: 1
+`
+	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
+		t.Fatalf("write domain scope: %v", err)
+	}
+	writeManagedBundleFixture(t, root, "dnsrecon", "binary", "1.2.0", `#!/usr/bin/env sh
+out=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-j" ]; then
+    shift
+    out="$1"
+  fi
+  shift
+done
+mkdir -p "$(dirname "$out")"
+cat > "$out" <<'JSON'
+[
+  {"type":"A","name":"api.example.com","address":"192.0.2.10","raw":"secret-token"},
+  {"type":"A","name":"evil.example.net","address":"198.51.100.10","raw":"secret-token"}
+]
+JSON
+printf 'dnsrecon wrote %s\n' "$out"
+`)
+	if _, err := ExecuteManagedToolBundleInstall(root, "infra-pack", "dnsrecon", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed dnsrecon bundle: %v", err)
+	}
+
+	result, err := RunWorkspaceWithOptions(ctx, root, RunOptions{Action: compiler.ActionDiscoverAssets, DeferReportProjection: true})
+	if err != nil {
+		t.Fatalf("run workspace with dnsrecon parser: %v", err)
+	}
+	store, err := eventlog.OpenSQLite(filepath.Join(root, "replay", "events.db"))
+	if err != nil {
+		t.Fatalf("open event log: %v", err)
+	}
+	defer store.Close()
+	events, err := store.Replay(ctx, result.RunID)
+	if err != nil {
+		t.Fatalf("replay events: %v", err)
+	}
+	snapshot, err := eventlog.BuildReplaySnapshot(events)
+	if err != nil {
+		t.Fatalf("build replay snapshot: %v", err)
+	}
+	var surfaceID string
+	for _, fact := range snapshot.Blackboard.Facts {
+		if fact.Source != "parser.dnsrecon_json" {
+			continue
+		}
+		surfaceID = fact.ID
+		if fact.Kind != "surface" || !strings.Contains(fact.Statement, "api.example.com") || strings.Contains(fact.Statement, "secret-token") || strings.Contains(fact.Statement, "evil.example.net") {
+			t.Fatalf("unexpected dnsrecon fact: %#v", fact)
+		}
+	}
+	if surfaceID == "" {
+		t.Fatalf("expected dnsrecon parser surface fact in replay snapshot, facts=%#v", snapshot.Blackboard.Facts)
+	}
+	if _, ok := snapshot.Evidence.Node(surfaceID); !ok {
+		t.Fatalf("expected dnsrecon parser fact to project into evidence graph")
+	}
+}
+
+func TestNativeManagedRunCommandBuildsDomainFileOutputArgv(t *testing.T) {
+	tests := []struct {
+		toolID    string
+		operation string
+		parserID  string
+		wantArgs  []string
+	}{
+		{
+			toolID:    "amass",
+			operation: "subdomain_discovery",
+			parserID:  "amass_json",
+			wantArgs:  []string{"enum", "-passive", "-nocolor", "-d", "example.com", "-json"},
+		},
+		{
+			toolID:    "dnsrecon",
+			operation: "dns_probe",
+			parserID:  "dnsrecon_json",
+			wantArgs:  []string{"-d", "example.com", "-t", "std", "-j"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.toolID, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "workspace")
+			if err := InitWorkspace(root); err != nil {
+				t.Fatalf("init workspace: %v", err)
+			}
+			payloadPath := writeManagedBundleFixture(t, root, tt.toolID, "binary", "1.0.0", "#!/usr/bin/env sh\nprintf 'file-output-tool\\n'\n")
+			if _, err := ExecuteManagedToolBundleInstall(root, "infra-pack", tt.toolID, ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+				t.Fatalf("install managed %s bundle: %v", tt.toolID, err)
+			}
+			request := ToolExecutionRequest{
+				WorkspaceRoot: root,
+				Node: compiler.PlanNode{
+					ID:             tt.toolID + "-domain-output:01",
+					Capability:     "infra.host_discovery",
+					ManifestName:   "infra-pack",
+					ToolID:         tt.toolID,
+					AdapterID:      "managed_binary",
+					Operation:      tt.operation,
+					ParserID:       tt.parserID,
+					TargetKind:     "domain",
+					DependencyName: tt.toolID,
+					DependencyKind: "binary",
+					Runner:         "native",
+				},
+				ScopeTargets:      []ScopeTarget{{Kind: "domain", Value: "example.com"}},
+				ScopeTargetPolicy: "enforce",
+				IsolationMode:     "process",
+			}
+
+			command, target, ok, err := nativeManagedRunCommandWithTarget(request)
+			if err != nil || !ok {
+				t.Fatalf("expected %s command for domain scope, command=%#v target=%#v ok=%v err=%v", tt.toolID, command, target, ok, err)
+			}
+			if target.Kind != "domain" || target.Value != "example.com" {
+				t.Fatalf("expected selected domain target, got %#v", target)
+			}
+			if command[0] != payloadPath {
+				t.Fatalf("expected resolved workspace-managed binary, got %#v want %s", command, payloadPath)
+			}
+			for _, want := range tt.wantArgs {
+				if !containsTrimmedValue(command[1:], want) {
+					t.Fatalf("expected %s argv to contain %q, got %#v", tt.toolID, want, command)
+				}
+			}
+			outputPath := command[len(command)-1]
+			if !strings.HasPrefix(outputPath, filepath.Join(root, "toolchain", "managed-outputs", tt.toolID)+string(os.PathSeparator)) || !strings.HasSuffix(outputPath, ".json") {
+				t.Fatalf("expected workspace-confined managed output path, got %#v", command)
+			}
+		})
+	}
+}
+
 func TestNativeManagedRunCommandKeepsDomainToolsOfflineForURLScope(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -7461,69 +7686,6 @@ func TestNativeManagedRunCommandKeepsDomainToolsOfflineForURLScope(t *testing.T)
 			command, ok, err := nativeManagedRunCommand(request)
 			if err != nil || ok || len(command) > 0 {
 				t.Fatalf("%s must stay offline until domain scope is explicit, command=%#v ok=%v err=%v", tt.toolID, command, ok, err)
-			}
-		})
-	}
-}
-
-func TestNativeManagedRunCommandKeepsUnsupportedDomainToolsOfflineForDomainScope(t *testing.T) {
-	tests := []struct {
-		name       string
-		pack       string
-		capability string
-		toolID     string
-		operation  string
-		parserID   string
-	}{
-		{
-			name:       "amass",
-			pack:       "infra-pack",
-			capability: "infra.host_discovery",
-			toolID:     "amass",
-			operation:  "subdomain_discovery",
-			parserID:   "amass_json",
-		},
-		{
-			name:       "dnsrecon",
-			pack:       "infra-pack",
-			capability: "infra.host_discovery",
-			toolID:     "dnsrecon",
-			operation:  "dns_probe",
-			parserID:   "dnsrecon_json",
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			root := filepath.Join(t.TempDir(), "workspace")
-			if err := InitWorkspace(root); err != nil {
-				t.Fatalf("init workspace: %v", err)
-			}
-			writeManagedBundleFixture(t, root, tt.toolID, "binary", "1.0.0", "#!/usr/bin/env sh\nprintf 'should-not-run-unsupported-domain-tool\\n'\n")
-			if _, err := ExecuteManagedToolBundleInstall(root, tt.pack, tt.toolID, ManagedToolBundleInstallOptions{Execute: true}); err != nil {
-				t.Fatalf("install managed %s bundle: %v", tt.toolID, err)
-			}
-			request := ToolExecutionRequest{
-				WorkspaceRoot: root,
-				Node: compiler.PlanNode{
-					ID:             tt.toolID + "-domain-scope:01",
-					Capability:     tt.capability,
-					ManifestName:   tt.pack,
-					ToolID:         tt.toolID,
-					AdapterID:      "managed_binary",
-					Operation:      tt.operation,
-					ParserID:       tt.parserID,
-					TargetKind:     "domain",
-					DependencyName: tt.toolID,
-					DependencyKind: "binary",
-					Runner:         "native",
-				},
-				ScopeTargets:  []ScopeTarget{{Kind: "domain", Value: "example.com"}},
-				IsolationMode: "process",
-			}
-
-			command, ok, err := nativeManagedRunCommand(request)
-			if err != nil || ok || len(command) > 0 {
-				t.Fatalf("%s must stay offline for explicit domain scope until its builder is implemented, command=%#v ok=%v err=%v", tt.toolID, command, ok, err)
 			}
 		})
 	}
