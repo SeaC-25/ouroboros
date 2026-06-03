@@ -209,6 +209,70 @@ providers:
 	}
 }
 
+func TestProviderGenerateCommandCanRecordUsage(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"choices": [{"message": {"role": "assistant", "content": "approved plan"}}],
+			"usage": {"prompt_tokens": 1000, "completion_tokens": 500, "total_tokens": 1500}
+		}`))
+	}))
+	defer server.Close()
+	t.Setenv("OURO_TEST_PROVIDER_KEY", "secret-value")
+	providers := fmt.Sprintf(`version: 1
+providers:
+  - name: local-openai
+    type: openai_compatible
+    model: gpt-test
+    base_url: %s/v1
+    api_key_env: OURO_TEST_PROVIDER_KEY
+    input_price_per_million_tokens: 2.50
+    output_price_per_million_tokens: 10.00
+    capabilities:
+      - json_mode
+    enabled: true
+`, server.URL)
+	if err := os.WriteFile(filepath.Join(root, "providers.yaml"), []byte(providers), 0o644); err != nil {
+		t.Fatalf("write providers: %v", err)
+	}
+
+	var out bytes.Buffer
+	generate := newRootCommand(&out, new(bytes.Buffer))
+	generate.SetArgs([]string{"provider", "generate", root, "--prompt", "Summarize scope.", "--record-usage"})
+	if err := generate.Execute(); err != nil {
+		t.Fatalf("execute provider generate: %v output=%q", err, out.String())
+	}
+	if !strings.Contains(out.String(), "usage_record=") {
+		t.Fatalf("expected usage record output, got %q", out.String())
+	}
+
+	var listOut bytes.Buffer
+	list := newRootCommand(&listOut, new(bytes.Buffer))
+	list.SetArgs([]string{"provider", "usage", root})
+	if err := list.Execute(); err != nil {
+		t.Fatalf("list provider usage: %v output=%q", err, listOut.String())
+	}
+	for _, want := range []string{
+		"provider-usage:",
+		"source=provider-generate",
+		"provider=local-openai",
+		"model=gpt-test",
+		"input_tokens=1000",
+		"output_tokens=500",
+		"total_tokens=1500",
+		"estimated_cost_usd=0.007500",
+		"capabilities=json_mode",
+	} {
+		if !strings.Contains(listOut.String(), want) {
+			t.Fatalf("expected provider usage output to contain %q, got %q", want, listOut.String())
+		}
+	}
+}
+
 func TestProviderGenerateCommandRequiresPrompt(t *testing.T) {
 	var out bytes.Buffer
 	cmd := newRootCommand(&out, new(bytes.Buffer))
