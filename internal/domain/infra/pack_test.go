@@ -90,12 +90,33 @@ func TestCIDRTargetProducesHostServiceCoverageHypotheses(t *testing.T) {
 	}
 }
 
-func TestPackRejectsNonCIDRTarget(t *testing.T) {
+func TestDomainAndHostTargetsProduceInfraHypotheses(t *testing.T) {
+	pack := NewPack()
+	for _, target := range []domain.Target{
+		{Kind: domain.TargetDomain, Value: "example.com"},
+		{Kind: domain.TargetHost, Value: "app.example.com"},
+	} {
+		hypotheses, err := pack.InitialHypotheses(target)
+		if err != nil {
+			t.Fatalf("initial hypotheses for %s target: %v", target.Kind, err)
+		}
+		if len(hypotheses) == 0 {
+			t.Fatalf("expected hypotheses for %s target", target.Kind)
+		}
+		for _, hypothesis := range hypotheses {
+			if hypothesis.Target != target.Value {
+				t.Fatalf("hypothesis target not propagated for %s: %#v", target.Kind, hypothesis)
+			}
+		}
+	}
+}
+
+func TestPackRejectsUnsupportedTarget(t *testing.T) {
 	_, err := NewPack().InitialHypotheses(domain.Target{Kind: domain.TargetURL, Value: "https://app.example"})
 	if err == nil {
 		t.Fatalf("expected URL target to fail")
 	}
-	if !strings.Contains(err.Error(), "cidr target") {
-		t.Fatalf("expected cidr target error, got %v", err)
+	if !strings.Contains(err.Error(), "cidr, domain, or host target") {
+		t.Fatalf("expected supported-target error, got %v", err)
 	}
 }

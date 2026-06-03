@@ -16,6 +16,8 @@ type TargetKind string
 const (
 	TargetURL       TargetKind = "url"
 	TargetCIDR      TargetKind = "cidr"
+	TargetDomain    TargetKind = "domain"
+	TargetHost      TargetKind = "host"
 	TargetChallenge TargetKind = "challenge"
 	TargetArtifact  TargetKind = "artifact"
 )

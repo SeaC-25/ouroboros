@@ -2911,6 +2911,18 @@ func TestValidateScopeConfigRejectsNegativeWorkerPoolMaxConcurrency(t *testing.T
 	}
 }
 
+func TestValidateScopeConfigAcceptsDomainAndHostTargets(t *testing.T) {
+	config := ScopeConfig{Version: 1}
+	config.Scope.Targets = []ScopeTarget{
+		{Kind: "domain", Value: "example.com"},
+		{Kind: "host", Value: "api.example.com"},
+	}
+
+	if err := ValidateScopeConfig(config); err != nil {
+		t.Fatalf("expected domain and host targets to be valid, got %v", err)
+	}
+}
+
 func TestRunWorkspaceExecutesManifestRunCommandInAttemptSandbox(t *testing.T) {
 	ctx := context.Background()
 	root := filepath.Join(t.TempDir(), "workspace")
@@ -3621,6 +3633,43 @@ execution:
 	t.Fatalf("expected naabu tool-level execution event, got %#v", events)
 }
 
+func TestRunWorkspaceRejectsExcludedCIDRBeforeNaabuExecutionWhenHostScopePresent(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	scope := `version: 1
+scope:
+  target_policy: enforce
+  targets:
+    - kind: host
+      value: api.example.com
+    - kind: cidr
+      value: 10.0.0.0/24
+  exclusions:
+    - 10.0.0.0/24
+execution:
+  isolation: process
+`
+	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
+		t.Fatalf("write scope: %v", err)
+	}
+	marker := filepath.Join(t.TempDir(), "excluded-cidr-naabu-ran")
+	writeManagedBundleFixture(t, root, "naabu", "binary", "2.3.4", "#!/usr/bin/env sh\nprintf 'should-not-run-excluded-cidr-naabu\\n'\ntouch "+marker+"\n")
+	if _, err := ExecuteManagedToolBundleInstall(root, "infra-pack", "naabu", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed naabu bundle: %v", err)
+	}
+
+	_, err := RunWorkspace(ctx, root)
+	if err == nil || !strings.Contains(err.Error(), "excluded") {
+		t.Fatalf("expected excluded CIDR failure before naabu execution, got %v", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("excluded CIDR naabu payload must not run, marker stat err=%v", err)
+	}
+}
+
 func TestNativeManagedRunCommandKeepsNaabuOfflineForNonCIDRScope(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
 	if err := InitWorkspace(root); err != nil {
@@ -3630,10 +3679,51 @@ func TestNativeManagedRunCommandKeepsNaabuOfflineForNonCIDRScope(t *testing.T) {
 	if _, err := ExecuteManagedToolBundleInstall(root, "infra-pack", "naabu", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
 		t.Fatalf("install managed naabu bundle: %v", err)
 	}
+	for _, scopeTarget := range []ScopeTarget{
+		{Kind: "url", Value: "https://app.example"},
+		{Kind: "host", Value: "api.example.com"},
+	} {
+		t.Run(scopeTarget.Kind, func(t *testing.T) {
+			request := ToolExecutionRequest{
+				WorkspaceRoot: root,
+				Node: compiler.PlanNode{
+					ID:             "naabu-non-cidr-scope:01",
+					Capability:     "infra.host_discovery",
+					ManifestName:   "infra-pack",
+					ToolID:         "naabu",
+					AdapterID:      "managed_binary",
+					Operation:      "port_scan",
+					ParserID:       "naabu_jsonl",
+					TargetKind:     "host",
+					DependencyName: "naabu",
+					DependencyKind: "binary",
+					Runner:         "native",
+				},
+				ScopeTargets:  []ScopeTarget{scopeTarget},
+				IsolationMode: "process",
+			}
+
+			command, ok, err := nativeManagedRunCommand(request)
+			if err != nil || ok || len(command) > 0 {
+				t.Fatalf("naabu must stay offline for non-CIDR scope %#v, command=%#v ok=%v err=%v", scopeTarget, command, ok, err)
+			}
+		})
+	}
+}
+
+func TestNativeManagedRunCommandUsesCIDRForNaabuWhenHostAndCIDRScopeExist(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	payloadPath := writeManagedBundleFixture(t, root, "naabu", "binary", "2.3.4", "#!/usr/bin/env sh\nprintf 'naabu-cidr-with-host-present\\n'\n")
+	if _, err := ExecuteManagedToolBundleInstall(root, "infra-pack", "naabu", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed naabu bundle: %v", err)
+	}
 	request := ToolExecutionRequest{
 		WorkspaceRoot: root,
 		Node: compiler.PlanNode{
-			ID:             "naabu-non-cidr-scope:01",
+			ID:             "naabu-host-cidr-scope:01",
 			Capability:     "infra.host_discovery",
 			ManifestName:   "infra-pack",
 			ToolID:         "naabu",
@@ -3645,13 +3735,54 @@ func TestNativeManagedRunCommandKeepsNaabuOfflineForNonCIDRScope(t *testing.T) {
 			DependencyKind: "binary",
 			Runner:         "native",
 		},
+		ScopeTargets: []ScopeTarget{
+			{Kind: "host", Value: "api.example.com"},
+			{Kind: "cidr", Value: "10.0.0.0/24"},
+		},
+		IsolationMode: "process",
+	}
+
+	command, ok, err := nativeManagedRunCommand(request)
+	if err != nil || !ok {
+		t.Fatalf("expected naabu to use CIDR scope even when host scope is present, command=%#v ok=%v err=%v", command, ok, err)
+	}
+	want := []string{payloadPath, "-json", "-host", "10.0.0.0/24"}
+	if !reflect.DeepEqual(command, want) {
+		t.Fatalf("unexpected naabu argv\nwant=%#v\n got=%#v", want, command)
+	}
+}
+
+func TestNativeManagedRunCommandKeepsNmapOfflineForUnsupportedTargetKind(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	writeManagedBundleFixture(t, root, "nmap", "binary", "7.95", "#!/usr/bin/env sh\nprintf 'nmap-unsupported-target\\n'\n")
+	if _, err := ExecuteManagedToolBundleInstall(root, "infra-pack", "nmap", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed nmap bundle: %v", err)
+	}
+	request := ToolExecutionRequest{
+		WorkspaceRoot: root,
+		Node: compiler.PlanNode{
+			ID:             "nmap-url-target-kind:01",
+			Capability:     "infra.host_discovery",
+			ManifestName:   "infra-pack",
+			ToolID:         "nmap",
+			AdapterID:      "managed_binary",
+			Operation:      "service_fingerprint",
+			ParserID:       "nmap_xml",
+			TargetKind:     "url",
+			DependencyName: "nmap",
+			DependencyKind: "binary",
+			Runner:         "native",
+		},
 		ScopeTargets:  []ScopeTarget{{Kind: "url", Value: "https://app.example"}},
 		IsolationMode: "process",
 	}
 
 	command, ok, err := nativeManagedRunCommand(request)
 	if err != nil || ok || len(command) > 0 {
-		t.Fatalf("naabu must stay offline for non-CIDR scope, command=%#v ok=%v err=%v", command, ok, err)
+		t.Fatalf("nmap must stay offline for unsupported target kind, command=%#v ok=%v err=%v", command, ok, err)
 	}
 }
 
@@ -3687,6 +3818,207 @@ func TestNativeManagedRunCommandKeepsSubfinderOfflineForURLScope(t *testing.T) {
 	if err != nil || ok || len(command) > 0 {
 		t.Fatalf("subfinder must stay offline until domain scope is explicit, command=%#v ok=%v err=%v", command, ok, err)
 	}
+}
+
+func TestRunWorkspaceExecutesToolLevelSubfinderThroughExplicitDomainScope(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	scope := `version: 1
+scope:
+  target_policy: enforce
+  targets:
+    - kind: domain
+      value: example.com
+  exclusions: []
+execution:
+  isolation: process
+`
+	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
+		t.Fatalf("write scope: %v", err)
+	}
+	marker := filepath.Join(t.TempDir(), "tool-level-catalog-subfinder-ran")
+	writeManagedBundleFixture(t, root, "subfinder", "binary", "2.7.0", "#!/usr/bin/env sh\nprintf 'tool-level-subfinder-output args=%s target=%s tool_id=%s operation=%s parser=%s dep=%s target_kind=%s scope_target_kind=%s\\n' \"$*\" \"$OURO_TARGET\" \"$OURO_TOOL_ID\" \"$OURO_OPERATION\" \"$OURO_PARSER_ID\" \"$OURO_DEPENDENCY_NAME\" \"$OURO_TARGET_KIND\" \"$OURO_SCOPE_TARGET_KIND\"\ntouch "+marker+"\n")
+	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "subfinder", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed subfinder bundle: %v", err)
+	}
+
+	result, err := RunWorkspace(ctx, root)
+	if err != nil {
+		t.Fatalf("run workspace: %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("expected subfinder tool-level payload to run through explicit domain scope builder: %v", err)
+	}
+	store, err := eventlog.OpenSQLite(filepath.Join(root, "replay", "events.db"))
+	if err != nil {
+		t.Fatalf("open event log: %v", err)
+	}
+	defer store.Close()
+	events, err := store.Replay(ctx, result.RunID)
+	if err != nil {
+		t.Fatalf("replay events: %v", err)
+	}
+	for _, event := range events {
+		if event.Type != eventlog.EventTool {
+			continue
+		}
+		var payload struct {
+			Tool            string `json:"tool"`
+			Parser          string `json:"parser"`
+			ExecutionStatus string `json:"execution_status"`
+			Transcript      string `json:"transcript"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatalf("decode tool payload: %v", err)
+		}
+		if payload.Tool != "web-api-pack" || payload.Parser != "subfinder_jsonl" || payload.ExecutionStatus == "" {
+			continue
+		}
+		if payload.ExecutionStatus != "completed" {
+			t.Fatalf("expected subfinder tool-level node to complete, got %#v", payload)
+		}
+		for _, want := range []string{
+			"tool-level-subfinder-output",
+			"args=-json -d example.com",
+			"target=example.com",
+			"tool_id=subfinder",
+			"operation=subdomain_discovery",
+			"parser=subfinder_jsonl",
+			"dep=subfinder",
+			"target_kind=domain",
+			"scope_target_kind=domain",
+		} {
+			if !strings.Contains(payload.Transcript, want) {
+				t.Fatalf("expected subfinder tool-level transcript to contain %q, got %#v", want, payload)
+			}
+		}
+		if strings.Contains(payload.Transcript, "offline tool execution boundary") {
+			t.Fatalf("subfinder tool-level execution must not use offline runner, got %#v", payload)
+		}
+		return
+	}
+	t.Fatalf("expected subfinder tool-level execution event, got %#v", events)
+}
+
+func TestRunWorkspaceRejectsExcludedDomainBeforeSubfinderExecution(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	scope := `version: 1
+scope:
+  target_policy: enforce
+  targets:
+    - kind: domain
+      value: example.com
+  exclusions:
+    - example.com
+execution:
+  isolation: process
+`
+	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
+		t.Fatalf("write scope: %v", err)
+	}
+	marker := filepath.Join(t.TempDir(), "excluded-domain-subfinder-ran")
+	writeManagedBundleFixture(t, root, "subfinder", "binary", "2.7.0", "#!/usr/bin/env sh\nprintf 'should-not-run-excluded-domain-subfinder\\n'\ntouch "+marker+"\n")
+	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "subfinder", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed subfinder bundle: %v", err)
+	}
+
+	_, err := RunWorkspace(ctx, root)
+	if err == nil || !strings.Contains(err.Error(), "excluded") {
+		t.Fatalf("expected excluded domain failure, got %v", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("excluded domain subfinder payload must not run, marker stat err=%v", err)
+	}
+}
+
+func TestRunWorkspaceExecutesToolLevelNmapThroughExplicitHostScope(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	scope := `version: 1
+scope:
+  target_policy: enforce
+  targets:
+    - kind: host
+      value: api.example.com
+  exclusions: []
+execution:
+  isolation: process
+`
+	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
+		t.Fatalf("write scope: %v", err)
+	}
+	marker := filepath.Join(t.TempDir(), "tool-level-catalog-nmap-host-ran")
+	writeManagedBundleFixture(t, root, "nmap", "binary", "7.95", "#!/usr/bin/env sh\nprintf 'tool-level-nmap-host-output args=%s target=%s tool_id=%s operation=%s parser=%s dep=%s target_kind=%s scope_target_kind=%s\\n' \"$*\" \"$OURO_TARGET\" \"$OURO_TOOL_ID\" \"$OURO_OPERATION\" \"$OURO_PARSER_ID\" \"$OURO_DEPENDENCY_NAME\" \"$OURO_TARGET_KIND\" \"$OURO_SCOPE_TARGET_KIND\"\ntouch "+marker+"\n")
+	if _, err := ExecuteManagedToolBundleInstall(root, "infra-pack", "nmap", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed nmap bundle: %v", err)
+	}
+
+	result, err := RunWorkspace(ctx, root)
+	if err != nil {
+		t.Fatalf("run workspace: %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("expected nmap host-scope payload to run through registered argv builder: %v", err)
+	}
+	store, err := eventlog.OpenSQLite(filepath.Join(root, "replay", "events.db"))
+	if err != nil {
+		t.Fatalf("open event log: %v", err)
+	}
+	defer store.Close()
+	events, err := store.Replay(ctx, result.RunID)
+	if err != nil {
+		t.Fatalf("replay events: %v", err)
+	}
+	for _, event := range events {
+		if event.Type != eventlog.EventTool {
+			continue
+		}
+		var payload struct {
+			Tool            string `json:"tool"`
+			Parser          string `json:"parser"`
+			ExecutionStatus string `json:"execution_status"`
+			Transcript      string `json:"transcript"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatalf("decode tool payload: %v", err)
+		}
+		if payload.Tool != "infra-pack" || payload.Parser != "nmap_xml" || payload.ExecutionStatus == "" {
+			continue
+		}
+		if payload.ExecutionStatus != "completed" {
+			t.Fatalf("expected nmap host-scope node to complete, got %#v", payload)
+		}
+		for _, want := range []string{
+			"tool-level-nmap-host-output",
+			"args=-oX - api.example.com",
+			"target=api.example.com",
+			"tool_id=nmap",
+			"operation=service_fingerprint",
+			"parser=nmap_xml",
+			"dep=nmap",
+			"target_kind=host",
+			"scope_target_kind=host",
+		} {
+			if !strings.Contains(payload.Transcript, want) {
+				t.Fatalf("expected nmap host-scope transcript to contain %q, got %#v", want, payload)
+			}
+		}
+		if strings.Contains(payload.Transcript, "offline tool execution boundary") {
+			t.Fatalf("nmap host-scope execution must not use offline runner, got %#v", payload)
+		}
+		return
+	}
+	t.Fatalf("expected nmap host-scope execution event, got %#v", events)
 }
 
 func TestNativeManagedRunCommandKeepsDomainToolsOfflineForURLScope(t *testing.T) {
@@ -3755,6 +4087,77 @@ func TestNativeManagedRunCommandKeepsDomainToolsOfflineForURLScope(t *testing.T)
 			command, ok, err := nativeManagedRunCommand(request)
 			if err != nil || ok || len(command) > 0 {
 				t.Fatalf("%s must stay offline until domain scope is explicit, command=%#v ok=%v err=%v", tt.toolID, command, ok, err)
+			}
+		})
+	}
+}
+
+func TestNativeManagedRunCommandKeepsUnsupportedDomainToolsOfflineForDomainScope(t *testing.T) {
+	tests := []struct {
+		name       string
+		pack       string
+		capability string
+		toolID     string
+		operation  string
+		parserID   string
+	}{
+		{
+			name:       "amass",
+			pack:       "infra-pack",
+			capability: "infra.host_discovery",
+			toolID:     "amass",
+			operation:  "subdomain_discovery",
+			parserID:   "amass_json",
+		},
+		{
+			name:       "dnsx",
+			pack:       "infra-pack",
+			capability: "infra.host_discovery",
+			toolID:     "dnsx",
+			operation:  "dns_probe",
+			parserID:   "dnsx_jsonl",
+		},
+		{
+			name:       "dnsrecon",
+			pack:       "infra-pack",
+			capability: "infra.host_discovery",
+			toolID:     "dnsrecon",
+			operation:  "dns_probe",
+			parserID:   "dnsrecon_json",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "workspace")
+			if err := InitWorkspace(root); err != nil {
+				t.Fatalf("init workspace: %v", err)
+			}
+			writeManagedBundleFixture(t, root, tt.toolID, "binary", "1.0.0", "#!/usr/bin/env sh\nprintf 'should-not-run-unsupported-domain-tool\\n'\n")
+			if _, err := ExecuteManagedToolBundleInstall(root, tt.pack, tt.toolID, ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+				t.Fatalf("install managed %s bundle: %v", tt.toolID, err)
+			}
+			request := ToolExecutionRequest{
+				WorkspaceRoot: root,
+				Node: compiler.PlanNode{
+					ID:             tt.toolID + "-domain-scope:01",
+					Capability:     tt.capability,
+					ManifestName:   tt.pack,
+					ToolID:         tt.toolID,
+					AdapterID:      "managed_binary",
+					Operation:      tt.operation,
+					ParserID:       tt.parserID,
+					TargetKind:     "domain",
+					DependencyName: tt.toolID,
+					DependencyKind: "binary",
+					Runner:         "native",
+				},
+				ScopeTargets:  []ScopeTarget{{Kind: "domain", Value: "example.com"}},
+				IsolationMode: "process",
+			}
+
+			command, ok, err := nativeManagedRunCommand(request)
+			if err != nil || ok || len(command) > 0 {
+				t.Fatalf("%s must stay offline for explicit domain scope until its builder is implemented, command=%#v ok=%v err=%v", tt.toolID, command, ok, err)
 			}
 		})
 	}
@@ -6458,6 +6861,7 @@ type streamingCompletionToolExecutionRunner struct {
 	slowCapability string
 	slowDelay      time.Duration
 	slowRelease    <-chan struct{}
+	slowStarted    bool
 	slowDone       bool
 }
 
@@ -6465,7 +6869,7 @@ func (r *streamingCompletionToolExecutionRunner) Execute(ctx context.Context, re
 	if err := ctx.Err(); err != nil {
 		return ToolExecutionResult{}, err
 	}
-	if request.Node.Capability == r.slowCapability {
+	if request.Node.Capability == r.slowCapability && r.claimSlowWorker() {
 		if r.slowRelease != nil {
 			select {
 			case <-ctx.Done():
@@ -6479,15 +6883,29 @@ func (r *streamingCompletionToolExecutionRunner) Execute(ctx context.Context, re
 			case <-time.After(r.slowDelay):
 			}
 		}
-		r.mu.Lock()
-		r.slowDone = true
-		r.mu.Unlock()
+		r.markSlowDone()
 	}
 	return ToolExecutionResult{
 		ExecutionID: "stream-" + request.Node.Capability,
 		Status:      "completed",
 		Transcript:  "streamed execution for " + request.Node.ManifestName,
 	}, nil
+}
+
+func (r *streamingCompletionToolExecutionRunner) claimSlowWorker() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.slowStarted {
+		return false
+	}
+	r.slowStarted = true
+	return true
+}
+
+func (r *streamingCompletionToolExecutionRunner) markSlowDone() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.slowDone = true
 }
 
 func (r *streamingCompletionToolExecutionRunner) SlowDone() bool {

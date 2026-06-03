@@ -1507,7 +1507,7 @@ func packForTargetKind(kind domain.TargetKind) (domain.Pack, bool) {
 	switch kind {
 	case domain.TargetURL:
 		return webapi.NewPack(), true
-	case domain.TargetCIDR:
+	case domain.TargetCIDR, domain.TargetDomain, domain.TargetHost:
 		return infra.NewPack(), true
 	case domain.TargetChallenge:
 		return ctf.NewPack(), true
@@ -1544,7 +1544,7 @@ func (defaultToolExecutionRunner) Execute(ctx context.Context, request ToolExecu
 		return commandToolExecutionRunner{}.Execute(ctx, request)
 	}
 	if strings.TrimSpace(request.Node.Runner) == "native" {
-		nativeCommand, ok, err := nativeManagedRunCommand(request)
+		nativeCommand, nativeTarget, ok, err := nativeManagedRunCommandWithTarget(request)
 		if err != nil {
 			result := nativeManagedToolExecutionResult(request)
 			result.Transcript = err.Error()
@@ -1553,6 +1553,9 @@ func (defaultToolExecutionRunner) Execute(ctx context.Context, request ToolExecu
 		if ok {
 			nativeRequest := request
 			nativeRequest.Node.RunCommand = nativeCommand
+			if strings.TrimSpace(nativeTarget.Value) != "" {
+				nativeRequest.ScopeTargets = []ScopeTarget{nativeTarget}
+			}
 			return commandToolExecutionRunner{}.Execute(ctx, nativeRequest)
 		}
 	}
@@ -1638,39 +1641,46 @@ func (commandToolExecutionRunner) Execute(ctx context.Context, request ToolExecu
 }
 
 func nativeManagedRunCommand(request ToolExecutionRequest) ([]string, bool, error) {
+	command, _, ok, err := nativeManagedRunCommandWithTarget(request)
+	return command, ok, err
+}
+
+func nativeManagedRunCommandWithTarget(request ToolExecutionRequest) ([]string, ScopeTarget, bool, error) {
 	if executionIsolationMode(request.IsolationMode) == "container" {
-		return nil, false, nil
+		return nil, ScopeTarget{}, false, nil
 	}
 	if catalogToolLevelNodeRequiresAdapterArgvBuilder(request.Node) {
-		command, ok, err := managedBinaryRunCommand(request)
+		command, target, ok, err := managedBinaryRunCommand(request)
 		if err != nil {
-			return nil, true, err
+			return nil, target, true, err
 		}
 		if !ok {
-			return nil, false, nil
+			return nil, ScopeTarget{}, false, nil
 		}
 		if resolved, ok, err := workspaceToolchainExecutable(request.WorkspaceRoot, command[0]); err != nil {
-			return nil, true, err
+			return nil, target, true, err
 		} else if !ok {
-			return nil, false, nil
+			return nil, ScopeTarget{}, false, nil
 		} else {
 			command[0] = resolved
 		}
-		return command, true, nil
+		return command, target, true, nil
 	}
 	candidates := nativeManagedToolCandidates(request)
 	for _, candidate := range candidates {
 		if _, ok, err := workspaceToolchainExecutable(request.WorkspaceRoot, candidate); err != nil {
-			return nil, true, err
+			return nil, ScopeTarget{}, true, err
 		} else if ok {
 			command := []string{candidate}
+			var selectedTarget ScopeTarget
 			if target, ok := scopedTargetForNode(request.Node, request.ScopeTargets); ok {
 				command = append(command, target.Value)
+				selectedTarget = target
 			}
-			return command, true, nil
+			return command, selectedTarget, true, nil
 		}
 	}
-	return nil, false, nil
+	return nil, ScopeTarget{}, false, nil
 }
 
 func catalogToolLevelNodeRequiresAdapterArgvBuilder(node compiler.PlanNode) bool {
@@ -1678,24 +1688,25 @@ func catalogToolLevelNodeRequiresAdapterArgvBuilder(node compiler.PlanNode) bool
 		(strings.TrimSpace(node.AdapterID) != "" || strings.TrimSpace(node.Operation) != "")
 }
 
-func managedBinaryRunCommand(request ToolExecutionRequest) ([]string, bool, error) {
+func managedBinaryRunCommand(request ToolExecutionRequest) ([]string, ScopeTarget, bool, error) {
 	node := request.Node
 	if strings.TrimSpace(node.AdapterID) != "managed_binary" {
-		return nil, false, nil
+		return nil, ScopeTarget{}, false, nil
 	}
 	operation, ok := toolchain.DefaultAuthoredToolRegistry().AdapterOperation(node.AdapterID, node.Operation)
 	if !ok {
-		return nil, false, nil
+		return nil, ScopeTarget{}, false, nil
 	}
 	binary := managedBinaryDependencyName(node)
 	if binary == "" || !containsTrimmedValue(operation.DependencyNames, binary) {
-		return nil, false, nil
+		return nil, ScopeTarget{}, false, nil
 	}
-	target, hasTarget := managedBinaryTarget(request)
+	target, hasTarget := managedBinaryTargetFor(request, binary, node.Operation)
 	if !hasTarget {
-		return nil, false, nil
+		return nil, ScopeTarget{}, false, nil
 	}
-	return managedBinaryCommandFor(request, binary, node.Operation, target)
+	command, ok, err := managedBinaryCommandFor(request, binary, node.Operation, target)
+	return command, target, ok, err
 }
 
 func managedBinaryDependencyName(node compiler.PlanNode) string {
@@ -1710,13 +1721,40 @@ func managedBinaryDependencyName(node compiler.PlanNode) string {
 	return ""
 }
 
-func managedBinaryTarget(request ToolExecutionRequest) (ScopeTarget, bool) {
-	if target, ok := scopedTargetForNode(request.Node, request.ScopeTargets); ok {
-		target.Kind = strings.TrimSpace(target.Kind)
-		target.Value = strings.TrimSpace(target.Value)
-		return target, target.Value != ""
+func managedBinaryTargetFor(request ToolExecutionRequest, binary string, operation string) (ScopeTarget, bool) {
+	for _, targetKind := range managedBinaryTargetKinds(binary, operation, request.Node) {
+		if target, ok := scopedTargetByKind(request.ScopeTargets, targetKind); ok {
+			return target, true
+		}
 	}
 	return ScopeTarget{}, false
+}
+
+func managedBinaryTargetKinds(binary string, operation string, node compiler.PlanNode) []string {
+	binary = strings.TrimSpace(binary)
+	switch strings.TrimSpace(operation) {
+	case "http_probe":
+		if binary == "httpx" {
+			return []string{string(domain.TargetURL)}
+		}
+	case "subdomain_discovery":
+		if binary == "subfinder" {
+			return []string{string(domain.TargetDomain)}
+		}
+	case "template_scan":
+		if binary == "nuclei" {
+			return []string{string(domain.TargetURL)}
+		}
+	case "port_scan":
+		if binary == "naabu" {
+			return []string{string(domain.TargetCIDR)}
+		}
+	case "service_fingerprint":
+		if binary == "nmap" {
+			return []string{string(domain.TargetHost), string(domain.TargetCIDR)}
+		}
+	}
+	return targetKindsForExecutionNode(node)
 }
 
 func managedBinaryCommandFor(request ToolExecutionRequest, binary string, operation string, target ScopeTarget) ([]string, bool, error) {
@@ -1730,6 +1768,13 @@ func managedBinaryCommandFor(request ToolExecutionRequest, binary string, operat
 	case "http_probe":
 		if binary == "httpx" {
 			return []string{binary, "-json", "-u", target.Value}, true, nil
+		}
+	case "subdomain_discovery":
+		if binary == "subfinder" {
+			if target.Kind != string(domain.TargetDomain) {
+				return nil, false, nil
+			}
+			return []string{binary, "-json", "-d", target.Value}, true, nil
 		}
 	case "template_scan":
 		if binary == "nuclei" {
@@ -1754,6 +1799,9 @@ func managedBinaryCommandFor(request ToolExecutionRequest, binary string, operat
 		}
 	case "service_fingerprint":
 		if binary == "nmap" {
+			if target.Kind != string(domain.TargetHost) && target.Kind != string(domain.TargetCIDR) {
+				return nil, false, nil
+			}
 			return []string{binary, "-oX", "-", target.Value}, true, nil
 		}
 	}
@@ -2186,16 +2234,16 @@ func commandTimeoutTranscript(timeoutMS int, output string) string {
 }
 
 func requireCommandScopeTarget(request ToolExecutionRequest) error {
-	requiredKind := targetKindForCapability(request.Node.Capability)
-	if requiredKind == "" {
+	requiredKinds := targetKindsForExecutionNode(request.Node)
+	if len(requiredKinds) == 0 {
 		return nil
 	}
 	if targetPolicyDisabled(request.ScopeTargetPolicy) {
 		return nil
 	}
-	target, ok := scopedTargetForNode(request.Node, request.ScopeTargets)
+	target, ok := scopedTargetForExecutionNode(request.Node, request.ScopeTargets)
 	if !ok {
-		return fmt.Errorf("command runner requires %s scope target for capability %s", requiredKind, request.Node.Capability)
+		return fmt.Errorf("command runner requires %s scope target for capability %s", strings.Join(requiredKinds, " or "), request.Node.Capability)
 	}
 	if scopeTargetExcluded(target, request.ScopeExclusions) {
 		return fmt.Errorf("scope target %s is excluded for capability %s", target.Value, request.Node.Capability)
@@ -2207,21 +2255,21 @@ func validateRunCommandArguments(command []string, request ToolExecutionRequest)
 	if targetPolicyDisabled(request.ScopeTargetPolicy) {
 		return nil
 	}
-	targetKind := targetKindForCapability(request.Node.Capability)
-	if targetKind != string(domain.TargetURL) && targetKind != string(domain.TargetCIDR) && targetKind != string(domain.TargetChallenge) {
-		return nil
-	}
-	target, ok := scopedTargetForNode(request.Node, request.ScopeTargets)
+	target, ok := scopedTargetForExecutionNode(request.Node, request.ScopeTargets)
 	if !ok {
 		return nil
 	}
+	targetKind := strings.TrimSpace(target.Kind)
 	if targetKind == string(domain.TargetCIDR) {
 		return validateCIDRRunCommandArguments(command, request, target)
 	}
 	if targetKind == string(domain.TargetChallenge) {
 		return validateChallengeRunCommandArguments(command, request, target)
 	}
-	return validateWebRunCommandArguments(command, request, target)
+	if targetKind == string(domain.TargetURL) {
+		return validateWebRunCommandArguments(command, request, target)
+	}
+	return nil
 }
 
 func validateWebRunCommandArguments(command []string, request ToolExecutionRequest, target ScopeTarget) error {
@@ -2471,7 +2519,7 @@ func commandContextEnvironmentFor(request ToolExecutionRequest, workspaceRoot st
 		"OURO_TOOLCHAIN_BIN=" + toolchainBin,
 		"OURO_TOOLCHAIN_RULES=" + toolchainRules,
 	}
-	if target, ok := scopedTargetForNode(request.Node, request.ScopeTargets); ok {
+	if target, ok := scopedTargetForExecutionNode(request.Node, request.ScopeTargets); ok {
 		targetKind := strings.TrimSpace(request.Node.TargetKind)
 		if targetKind == "" {
 			targetKind = target.Kind
@@ -2520,7 +2568,7 @@ func commandWorkingDirectory(request ToolExecutionRequest, attemptDir string) st
 
 func expandRunCommand(command []string, request ToolExecutionRequest) ([]string, error) {
 	expanded := make([]string, 0, len(command))
-	target, hasTarget := scopedTargetForNode(request.Node, request.ScopeTargets)
+	target, hasTarget := scopedTargetForExecutionNode(request.Node, request.ScopeTargets)
 	for _, part := range command {
 		value := part
 		needsTarget := strings.Contains(value, "{{target}}") || strings.Contains(value, "{{target_kind}}")
@@ -2539,17 +2587,45 @@ func expandRunCommand(command []string, request ToolExecutionRequest) ([]string,
 }
 
 func scopedTargetForNode(node compiler.PlanNode, targets []ScopeTarget) (ScopeTarget, bool) {
-	wantedKind := targetKindForCapability(node.Capability)
-	if wantedKind != "" {
-		for _, target := range targets {
-			if strings.TrimSpace(target.Kind) == wantedKind && strings.TrimSpace(target.Value) != "" {
-				return ScopeTarget{Kind: strings.TrimSpace(target.Kind), Value: strings.TrimSpace(target.Value)}, true
+	wantedKinds := targetKindsForNode(node)
+	if len(wantedKinds) > 0 {
+		for _, wantedKind := range wantedKinds {
+			if target, ok := scopedTargetByKind(targets, wantedKind); ok {
+				return target, true
 			}
 		}
 		return ScopeTarget{}, false
 	}
 	for _, target := range targets {
 		if strings.TrimSpace(target.Value) != "" {
+			return ScopeTarget{Kind: strings.TrimSpace(target.Kind), Value: strings.TrimSpace(target.Value)}, true
+		}
+	}
+	return ScopeTarget{}, false
+}
+
+func scopedTargetForExecutionNode(node compiler.PlanNode, targets []ScopeTarget) (ScopeTarget, bool) {
+	wantedKinds := targetKindsForExecutionNode(node)
+	if len(wantedKinds) > 0 {
+		for _, wantedKind := range wantedKinds {
+			if target, ok := scopedTargetByKind(targets, wantedKind); ok {
+				return target, true
+			}
+		}
+		return ScopeTarget{}, false
+	}
+	for _, target := range targets {
+		if strings.TrimSpace(target.Value) != "" {
+			return ScopeTarget{Kind: strings.TrimSpace(target.Kind), Value: strings.TrimSpace(target.Value)}, true
+		}
+	}
+	return ScopeTarget{}, false
+}
+
+func scopedTargetByKind(targets []ScopeTarget, wantedKind string) (ScopeTarget, bool) {
+	wantedKind = strings.TrimSpace(wantedKind)
+	for _, target := range targets {
+		if strings.TrimSpace(target.Kind) == wantedKind && strings.TrimSpace(target.Value) != "" {
 			return ScopeTarget{Kind: strings.TrimSpace(target.Kind), Value: strings.TrimSpace(target.Value)}, true
 		}
 	}
@@ -2689,6 +2765,37 @@ func targetKindForCapability(capability string) string {
 		return string(domain.TargetChallenge)
 	default:
 		return ""
+	}
+}
+
+func targetKindsForNode(node compiler.PlanNode) []string {
+	if targetKind := strings.TrimSpace(node.TargetKind); targetKind != "" {
+		return compatibleScopeTargetKinds(targetKind)
+	}
+	if targetKind := targetKindForCapability(node.Capability); targetKind != "" {
+		return []string{targetKind}
+	}
+	return nil
+}
+
+func targetKindsForExecutionNode(node compiler.PlanNode) []string {
+	if catalogToolLevelNodeRequiresAdapterArgvBuilder(node) {
+		return targetKindsForNode(node)
+	}
+	if targetKind := targetKindForCapability(node.Capability); targetKind != "" {
+		return []string{targetKind}
+	}
+	return nil
+}
+
+func compatibleScopeTargetKinds(targetKind string) []string {
+	switch strings.TrimSpace(targetKind) {
+	case "":
+		return nil
+	case string(domain.TargetHost):
+		return []string{string(domain.TargetHost), string(domain.TargetCIDR)}
+	default:
+		return []string{strings.TrimSpace(targetKind)}
 	}
 }
 

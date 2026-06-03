@@ -12,15 +12,18 @@ import (
 )
 
 func (Pack) InitialHypotheses(target domain.Target) ([]domain.Hypothesis, error) {
-	if target.Kind != domain.TargetCIDR {
-		return nil, fmt.Errorf("infra-internal pack requires cidr target, got %s", target.Kind)
-	}
 	targetValue := strings.TrimSpace(target.Value)
 	if targetValue == "" {
-		return nil, fmt.Errorf("infra-internal pack requires non-empty cidr target")
+		return nil, fmt.Errorf("infra-internal pack requires non-empty target")
 	}
-	if _, err := netip.ParsePrefix(targetValue); err != nil {
-		return nil, fmt.Errorf("infra-internal pack requires cidr target: %w", err)
+	switch target.Kind {
+	case domain.TargetCIDR:
+		if _, err := netip.ParsePrefix(targetValue); err != nil {
+			return nil, fmt.Errorf("infra-internal pack requires cidr target: %w", err)
+		}
+	case domain.TargetDomain, domain.TargetHost:
+	default:
+		return nil, fmt.Errorf("infra-internal pack requires cidr, domain, or host target, got %s", target.Kind)
 	}
 
 	return []domain.Hypothesis{
