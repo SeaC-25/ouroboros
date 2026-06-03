@@ -273,6 +273,63 @@ providers:
 	}
 }
 
+func TestProviderUsageCommandCanPrintSummary(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	maxCost := 0.01
+	if _, err := app.RecordProviderGenerationUsage(root, app.ProviderGenerationResult{
+		ProviderName:           "local-openai",
+		Model:                  "gpt-a",
+		InputTokens:            1000,
+		OutputTokens:           500,
+		TotalTokens:            1500,
+		EstimatedCostUSD:       0.0075,
+		EstimatedCostAvailable: true,
+	}, app.ProviderUsageRecordOptions{
+		Now:                 time.Date(2026, 6, 4, 12, 30, 0, 0, time.UTC),
+		MaxEstimatedCostUSD: &maxCost,
+	}); err != nil {
+		t.Fatalf("record first usage: %v", err)
+	}
+	if _, err := app.RecordProviderGenerationUsage(root, app.ProviderGenerationResult{
+		ProviderName: "second-openai",
+		Model:        "gpt-b",
+		InputTokens:  200,
+		OutputTokens: 300,
+		TotalTokens:  500,
+	}, app.ProviderUsageRecordOptions{Now: time.Date(2026, 6, 4, 13, 0, 0, 0, time.UTC)}); err != nil {
+		t.Fatalf("record second usage: %v", err)
+	}
+
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{"provider", "usage", root, "--summary"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("summarize provider usage: %v output=%q", err, out.String())
+	}
+	for _, want := range []string{
+		"provider-usage-summary:",
+		"records=2",
+		"providers=local-openai|second-openai",
+		"models=gpt-a|gpt-b",
+		"input_tokens=1200",
+		"output_tokens=800",
+		"total_tokens=2000",
+		"estimated_cost_usd=0.007500",
+		"estimated_cost_records=1",
+		"budget_enforced_records=1",
+		"budget_within_limit_records=1",
+		"first_created_at=2026-06-04T12:30:00Z",
+		"last_created_at=2026-06-04T13:00:00Z",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("expected provider usage summary output to contain %q, got %q", want, out.String())
+		}
+	}
+}
+
 func TestProviderGenerateCommandRejectsOverBudgetWithoutWritingUsage(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
 	if err := app.InitWorkspace(root); err != nil {

@@ -326,11 +326,22 @@ func newProviderGenerateCommand(out io.Writer) *cobra.Command {
 }
 
 func newProviderUsageCommand(out io.Writer) *cobra.Command {
-	return &cobra.Command{
+	var summary bool
+	cmd := &cobra.Command{
 		Use:   "usage <workspace> [record]",
 		Short: "List or inspect provider usage records",
 		Args:  cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if summary {
+				if len(args) == 2 {
+					return fmt.Errorf("provider usage summary cannot inspect an individual record")
+				}
+				result, err := app.SummarizeProviderUsageRecords(args[0])
+				if err != nil {
+					return err
+				}
+				return printProviderUsageSummary(out, result)
+			}
 			if len(args) == 2 {
 				record, err := app.ReadProviderUsageRecord(args[0], args[1])
 				if err != nil {
@@ -350,6 +361,8 @@ func newProviderUsageCommand(out io.Writer) *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&summary, "summary", false, "print an aggregate provider usage summary")
+	return cmd
 }
 
 func printProviderGenerationResult(out io.Writer, result app.ProviderGenerationResult) error {
@@ -418,6 +431,26 @@ func printProviderUsageRecord(out io.Writer, record app.ProviderUsageRecord) err
 			fmt.Sprintf("budget_status=%s", record.BudgetStatus),
 			fmt.Sprintf("budget_max_estimated_cost_usd=%.6f", record.BudgetMaxEstimatedCostUSD),
 		)
+	}
+	_, err := fmt.Fprintln(out, strings.Join(parts, " "))
+	return err
+}
+
+func printProviderUsageSummary(out io.Writer, summary app.ProviderUsageSummary) error {
+	parts := []string{
+		"provider-usage-summary:",
+		fmt.Sprintf("records=%d", summary.RecordCount),
+		fmt.Sprintf("providers=%s", strings.Join(summary.Providers, "|")),
+		fmt.Sprintf("models=%s", strings.Join(summary.Models, "|")),
+		fmt.Sprintf("input_tokens=%d", summary.InputTokens),
+		fmt.Sprintf("output_tokens=%d", summary.OutputTokens),
+		fmt.Sprintf("total_tokens=%d", summary.TotalTokens),
+		fmt.Sprintf("estimated_cost_usd=%.6f", summary.EstimatedCostUSD),
+		fmt.Sprintf("estimated_cost_records=%d", summary.EstimatedCostRecordCount),
+		fmt.Sprintf("budget_enforced_records=%d", summary.BudgetEnforcedCount),
+		fmt.Sprintf("budget_within_limit_records=%d", summary.BudgetWithinLimitCount),
+		fmt.Sprintf("first_created_at=%s", summary.FirstCreatedAt),
+		fmt.Sprintf("last_created_at=%s", summary.LastCreatedAt),
 	}
 	_, err := fmt.Fprintln(out, strings.Join(parts, " "))
 	return err
