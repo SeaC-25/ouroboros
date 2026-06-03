@@ -106,7 +106,7 @@ func parseNucleiJSONL(output []byte, targetURL string) ([]nucleiFinding, error) 
 			Type:        nucleiCleanMetadataValue(record.Type, 64),
 			MatcherName: nucleiCleanMetadataValue(record.MatcherName, 120),
 			MatchedURL:  matchedURL,
-			TargetURL:   nucleiEvidenceURL(targetURL),
+			TargetURL:   webEvidenceURL(targetURL),
 			CWE:         firstNucleiClassificationID(record.Info.Classification.CWE, nucleiValidCWEID),
 			CVE:         firstNucleiClassificationID(record.Info.Classification.CVE, nucleiValidCVEID),
 			Confidence:  nucleiConfidence(severity),
@@ -176,12 +176,12 @@ func nucleiScopedMatchedURL(reported string, target string) string {
 		return ""
 	}
 	if reported != "" && webURLWithinScope(reported, target) {
-		return nucleiEvidenceURL(reported)
+		return webEvidenceURL(reported)
 	}
-	return nucleiEvidenceURL(target)
+	return webEvidenceURL(target)
 }
 
-func nucleiEvidenceURL(value string) string {
+func webEvidenceURL(value string) string {
 	parsed := parsedWebURL(value)
 	if parsed == nil {
 		return ""
