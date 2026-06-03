@@ -488,6 +488,9 @@ func parseOpenAICompatibleProviderBaseURL(raw string) (*url.URL, error) {
 	if parsed.Scheme == "" || parsed.Host == "" {
 		return nil, errors.New("base_url must be an absolute URL")
 	}
+	if parsed.User != nil {
+		return nil, errors.New("base_url must not include userinfo")
+	}
 	switch parsed.Scheme {
 	case "http", "https":
 	default:

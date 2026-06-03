@@ -61,7 +61,7 @@ func TestRootCommandIncludesProductionCommands(t *testing.T) {
 		names[child.Name()] = true
 	}
 
-	for _, name := range []string{"init", "run", "report-project", "report-project-dispatch", "report-project-dispatches", "execute-report-project-dispatch", "report-project-dispatch-executions", "report-project-dispatch-execution-annotate", "report-project-dispatch-execution-select", "report-project-dispatch-execution-selection", "report-project-dispatch-execution-selection-clear", "replay", "replay-workbench", "replay-workbench-session", "replay-workbench-session-annotate", "replay-workbench-session-select", "replay-workbench-session-selection", "replay-workbench-session-selection-clear", "replay-workbench-sessions", "replay-workbench-collaboration", "replay-workbench-collaboration-annotate", "replay-workbench-collaboration-select", "replay-workbench-collaboration-selection", "replay-workbench-collaboration-selection-clear", "replay-workbench-collaboration-presence", "replay-workbench-collaboration-presences", "replay-workbench-collaboration-note", "replay-workbench-collaboration-note-annotate", "replay-workbench-collaboration-note-select", "replay-workbench-collaboration-note-selection", "replay-workbench-collaboration-note-selection-clear", "replay-workbench-collaboration-notes", "replay-workbench-collaborations", "toolchain", "runtime", "doctor"} {
+	for _, name := range []string{"init", "run", "report-project", "report-project-dispatch", "report-project-dispatches", "execute-report-project-dispatch", "report-project-dispatch-executions", "report-project-dispatch-execution-annotate", "report-project-dispatch-execution-select", "report-project-dispatch-execution-selection", "report-project-dispatch-execution-selection-clear", "replay", "replay-workbench", "replay-workbench-session", "replay-workbench-session-annotate", "replay-workbench-session-select", "replay-workbench-session-selection", "replay-workbench-session-selection-clear", "replay-workbench-sessions", "replay-workbench-collaboration", "replay-workbench-collaboration-annotate", "replay-workbench-collaboration-select", "replay-workbench-collaboration-selection", "replay-workbench-collaboration-selection-clear", "replay-workbench-collaboration-presence", "replay-workbench-collaboration-presences", "replay-workbench-collaboration-note", "replay-workbench-collaboration-note-annotate", "replay-workbench-collaboration-note-select", "replay-workbench-collaboration-note-selection", "replay-workbench-collaboration-note-selection-clear", "replay-workbench-collaboration-notes", "replay-workbench-collaborations", "toolchain", "runtime", "provider", "doctor"} {
 		if !names[name] {
 			t.Fatalf("expected root command to include %q", name)
 		}
@@ -85,6 +85,105 @@ func TestRootCommandIncludesProductionCommands(t *testing.T) {
 		if !runtimeNames[name] {
 			t.Fatalf("expected runtime command to include %q", name)
 		}
+	}
+}
+
+func TestProviderGenerateCommandUsesOpenAICompatibleProvider(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	var captured struct {
+		Model     string `json:"model"`
+		MaxTokens int    `json:"max_tokens"`
+		Messages  []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("expected chat completions path, got %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer secret-value" {
+			t.Fatalf("expected bearer header, got %q", got)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("decode generation body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"choices": [{"message": {"role": "assistant", "content": "approved plan"}}],
+			"usage": {"prompt_tokens": 11, "completion_tokens": 5, "total_tokens": 16}
+		}`))
+	}))
+	defer server.Close()
+	t.Setenv("OURO_TEST_PROVIDER_KEY", "secret-value")
+	providers := fmt.Sprintf(`version: 1
+providers:
+  - name: local-openai
+    type: openai_compatible
+    model: gpt-test
+    base_url: %s/v1
+    api_key_env: OURO_TEST_PROVIDER_KEY
+    enabled: true
+`, server.URL)
+	if err := os.WriteFile(filepath.Join(root, "providers.yaml"), []byte(providers), 0o644); err != nil {
+		t.Fatalf("write providers: %v", err)
+	}
+
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{"provider", "generate", root, "--system", "You are Ouroboros.", "--prompt", "Summarize scope.", "--max-tokens", "32"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute provider generate: %v output=%q", err, out.String())
+	}
+	for _, want := range []string{
+		"provider-generate: status=completed",
+		"provider=local-openai",
+		"model=gpt-test",
+		"input_tokens=11",
+		"output_tokens=5",
+		"total_tokens=16",
+		"text=approved plan",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("expected provider generate output to contain %q, got %q", want, out.String())
+		}
+	}
+	if captured.Model != "gpt-test" || captured.MaxTokens != 32 {
+		t.Fatalf("unexpected request payload: %#v", captured)
+	}
+	if len(captured.Messages) != 2 || captured.Messages[0].Role != "system" || captured.Messages[1].Role != "user" {
+		t.Fatalf("unexpected request messages: %#v", captured.Messages)
+	}
+}
+
+func TestProviderGenerateCommandRequiresPrompt(t *testing.T) {
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{"provider", "generate", t.TempDir(), "--prompt", "   "})
+
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "prompt is required") {
+		t.Fatalf("expected prompt-required error, got %v output=%q", err, out.String())
+	}
+	if out.Len() != 0 {
+		t.Fatalf("expected no provider output, got %q", out.String())
+	}
+}
+
+func TestProviderGenerateCommandRejectsNegativeMaxTokens(t *testing.T) {
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{"provider", "generate", t.TempDir(), "--prompt", "hello", "--max-tokens", "-1"})
+
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "max_tokens") {
+		t.Fatalf("expected max_tokens error, got %v output=%q", err, out.String())
+	}
+	if out.Len() != 0 {
+		t.Fatalf("expected no provider output, got %q", out.String())
 	}
 }
 

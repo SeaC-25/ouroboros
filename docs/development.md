@@ -61,6 +61,7 @@ GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro run ./workspace --require-sa
 GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro replay ./workspace <run-id>
 GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro replay ./workspace <run-id> --tui
 GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro replay ./workspace <run-id> --interactive
+GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro provider generate ./workspace --prompt "Summarize the scoped plan." --system "You are Ouroboros." --max-tokens 128
 GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro toolchain list ./workspace
 GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro toolchain health ./workspace
 GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro toolchain authored-tool-validate ./authored-tool.yaml
@@ -106,7 +107,11 @@ providers:
     enabled: true
 ```
 
-The preflight performs `GET <base_url>/models/<model>` and accepts only 2xx responses. When `api_key_env` is set, the environment variable must exist and is sent as a bearer token; the token value is not persisted in provider config, run events, or provider errors. `base_url` must be an absolute `http` or `https` URL without query or fragment. `timeout_ms` defaults to 5000 when omitted. This path validates provider reachability and records the configured provider/model in replay model usage, but it does not yet call model generation APIs or implement provider failover.
+The run preflight performs `GET <base_url>/models/<model>` and accepts only 2xx responses. When `api_key_env` is set, the environment variable must exist and is sent as a bearer token; the token value is not persisted in provider config, run events, provider errors, or CLI preview output. `base_url` must be an absolute `http` or `https` URL without query, fragment, or userinfo. `timeout_ms` defaults to 5000 when omitted. This path validates provider reachability and records the configured provider/model in replay model usage; it still does not call model generation APIs during `ouro run` or implement provider failover.
+
+`ouro provider generate <workspace> --prompt "..." [--system "..."] [--max-tokens N]` is a separate manual generation preview for `openai_compatible` providers. It performs `POST <base_url>/chat/completions`, sends the bearer token only from `api_key_env`, parses the first assistant text plus `prompt_tokens`, `completion_tokens`, and `total_tokens`, and reports provider/status failures without response bodies or token values.
+
+This preview does not run workspace tools, dispatch workers, contact scoped targets, mutate replay events, write reports, mediate tool calls, stream model output, perform provider failover, or attach model generation to the autonomous run loop.
 
 ## Run Event Streaming
 

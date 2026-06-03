@@ -10693,6 +10693,37 @@ providers:
 	}
 }
 
+func TestRunWorkspaceRejectsOpenAICompatibleProviderBaseURLUserinfo(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	providers := `version: 1
+providers:
+  - name: local-openai
+    type: openai_compatible
+    model: gpt-test
+    base_url: http://user:pass@127.0.0.1:1/v1
+    enabled: true
+`
+	if err := os.WriteFile(filepath.Join(root, "providers.yaml"), []byte(providers), 0o644); err != nil {
+		t.Fatalf("write providers: %v", err)
+	}
+
+	_, err := RunWorkspace(context.Background(), root)
+	if err == nil {
+		t.Fatalf("expected userinfo base_url to fail")
+	}
+	if !strings.Contains(err.Error(), "base_url") || !strings.Contains(err.Error(), "userinfo") || !strings.Contains(err.Error(), "local-openai") {
+		t.Fatalf("expected provider base_url userinfo error, got %v", err)
+	}
+	for _, secret := range []string{"user:pass", "pass@127"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("provider base_url error leaked userinfo: %v", err)
+		}
+	}
+}
+
 func TestRunWorkspaceRejectsInvalidScope(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
 	if err := InitWorkspace(root); err != nil {

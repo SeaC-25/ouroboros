@@ -1552,23 +1552,15 @@ func (openAICompatibleProviderAdapter) Prepare(ctx context.Context, provider Pro
 	if err != nil {
 		return ProviderRuntime{}, fmt.Errorf("provider %s base_url is invalid: %w", provider.Name, err)
 	}
-	endpoint := strings.TrimRight(baseURL.String(), "/") + "/models/" + url.PathEscape(strings.TrimSpace(provider.Model))
+	endpoint := openAICompatibleModelEndpoint(baseURL, provider.Model)
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return ProviderRuntime{}, fmt.Errorf("provider %s preflight request: %w", provider.Name, err)
 	}
-	if envName := strings.TrimSpace(provider.APIKeyEnv); envName != "" {
-		apiKey, ok := os.LookupEnv(envName)
-		if !ok || strings.TrimSpace(apiKey) == "" {
-			return ProviderRuntime{}, fmt.Errorf("provider %s api key env %s is required", provider.Name, envName)
-		}
-		request.Header.Set("Authorization", "Bearer "+apiKey)
+	if err := applyOpenAICompatibleBearer(request, provider); err != nil {
+		return ProviderRuntime{}, err
 	}
-	timeout := 5 * time.Second
-	if provider.TimeoutMS > 0 {
-		timeout = time.Duration(provider.TimeoutMS) * time.Millisecond
-	}
-	client := &http.Client{Timeout: timeout}
+	client := &http.Client{Timeout: openAICompatibleProviderTimeout(provider)}
 	response, err := client.Do(request)
 	if err != nil {
 		return ProviderRuntime{}, fmt.Errorf("provider %s preflight failed: %w", provider.Name, err)

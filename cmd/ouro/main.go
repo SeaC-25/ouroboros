@@ -115,6 +115,7 @@ func newRootCommand(out io.Writer, errOut io.Writer) *cobra.Command {
 	cmd.AddCommand(newReplayWorkbenchCollaborationNoteSelectionClearCommand(out))
 	cmd.AddCommand(newReplayWorkbenchCollaborationNotesCommand(out))
 	cmd.AddCommand(newReplayWorkbenchCollaborationsCommand(out))
+	cmd.AddCommand(newProviderCommand(out))
 	cmd.AddCommand(newToolchainCommand(out))
 	cmd.AddCommand(newRuntimeCommand(out))
 	return cmd
@@ -248,6 +249,67 @@ func printDoctorWarnings(out io.Writer, warnings []string) error {
 		}
 	}
 	return nil
+}
+
+func newProviderCommand(out io.Writer) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "provider",
+		Short: "Run model provider preview commands",
+	}
+	cmd.AddCommand(newProviderGenerateCommand(out))
+	return cmd
+}
+
+func newProviderGenerateCommand(out io.Writer) *cobra.Command {
+	var systemPrompt string
+	var userPrompt string
+	var maxTokens int
+	cmd := &cobra.Command{
+		Use:   "generate <workspace>",
+		Short: "Generate a manual provider preview message",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if strings.TrimSpace(userPrompt) == "" {
+				return fmt.Errorf("provider generation prompt is required")
+			}
+			result, err := app.GenerateProviderMessage(cmd.Context(), args[0], app.ProviderGenerationRequest{
+				SystemPrompt: systemPrompt,
+				UserPrompt:   userPrompt,
+				MaxTokens:    maxTokens,
+			})
+			if err != nil {
+				return err
+			}
+			return printProviderGenerationResult(out, result)
+		},
+	}
+	cmd.Flags().StringVar(&systemPrompt, "system", "", "system prompt for the provider preview")
+	cmd.Flags().StringVar(&userPrompt, "prompt", "", "user prompt for the provider preview")
+	cmd.Flags().IntVar(&maxTokens, "max-tokens", 0, "maximum completion tokens for the provider preview")
+	return cmd
+}
+
+func printProviderGenerationResult(out io.Writer, result app.ProviderGenerationResult) error {
+	lines := []string{
+		"provider-generate: status=completed",
+		fmt.Sprintf("provider=%s", compactProviderText(result.ProviderName)),
+		fmt.Sprintf("model=%s", compactProviderText(result.Model)),
+		fmt.Sprintf("input_tokens=%d", result.InputTokens),
+		fmt.Sprintf("output_tokens=%d", result.OutputTokens),
+		fmt.Sprintf("total_tokens=%d", result.TotalTokens),
+		fmt.Sprintf("latency_ms=%d", result.Latency.Milliseconds()),
+		fmt.Sprintf("text=%s", compactProviderText(result.Text)),
+	}
+	for _, line := range lines {
+		if _, err := fmt.Fprintln(out, line); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func compactProviderText(text string) string {
+	return strings.Join(strings.Fields(text), " ")
 }
 
 func newRunCommand(out io.Writer) *cobra.Command {
