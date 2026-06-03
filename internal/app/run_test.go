@@ -5669,6 +5669,392 @@ execution:
 	}
 }
 
+func TestRunWorkspacePromotesFfufJSONToEvidenceSurface(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	scope := `version: 1
+scope:
+  target_policy: enforce
+  targets:
+    - kind: url
+      value: https://app.example
+  exclusions: []
+execution:
+  isolation: process
+  tool_concurrency: 1
+`
+	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
+		t.Fatalf("write URL scope: %v", err)
+	}
+	marker := filepath.Join(t.TempDir(), "tool-level-ffuf-ran")
+	writeManagedBundleFixture(t, root, "ffuf", "binary", "2.1.0", `#!/usr/bin/env sh
+cat <<'JSONL'
+{"url":"https://app.example/admin?token=secret-token#frag","status":200,"length":6726,"words":120,"lines":32,"content-type":"text/html; charset=utf-8","input":{"FUZZ":"secret-token"},"redirectlocation":"https://evil.example/secret-token","resultfile":"/tmp/secret-token"}
+JSONL
+touch `+marker+`
+`)
+	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "ffuf", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed ffuf bundle: %v", err)
+	}
+
+	result, err := RunWorkspaceWithOptions(ctx, root, RunOptions{Action: compiler.ActionEnumeratePaths, DeferReportProjection: true})
+	if err != nil {
+		t.Fatalf("run workspace with ffuf parser: %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("expected ffuf payload to run through registered argv builder: %v", err)
+	}
+	store, err := eventlog.OpenSQLite(filepath.Join(root, "replay", "events.db"))
+	if err != nil {
+		t.Fatalf("open event log: %v", err)
+	}
+	defer store.Close()
+	events, err := store.Replay(ctx, result.RunID)
+	if err != nil {
+		t.Fatalf("replay events: %v", err)
+	}
+	snapshot, err := eventlog.BuildReplaySnapshot(events)
+	if err != nil {
+		t.Fatalf("build replay snapshot: %v", err)
+	}
+
+	var surfaceID string
+	for _, fact := range snapshot.Blackboard.Facts {
+		if fact.Source != "parser.ffuf_json" {
+			continue
+		}
+		surfaceID = fact.ID
+		if fact.Kind != "surface" {
+			t.Fatalf("expected ffuf parser fact kind surface, got %#v", fact)
+		}
+		for _, want := range []string{"ffuf", "https://app.example/admin", "status=200", "length=6726"} {
+			if !strings.Contains(fact.Statement, want) {
+				t.Fatalf("expected ffuf route surface to contain %q, got %#v", want, fact)
+			}
+		}
+		if strings.Contains(fact.Statement, "secret-token") || strings.Contains(fact.Statement, "evil.example") {
+			t.Fatalf("ffuf route statement leaked redacted output: %#v", fact)
+		}
+		if fact.Confidence < 0.6 {
+			t.Fatalf("expected completed ffuf route confidence, got %#v", fact)
+		}
+		break
+	}
+	if surfaceID == "" {
+		t.Fatalf("expected ffuf parser route fact in replay snapshot, facts=%#v", snapshot.Blackboard.Facts)
+	}
+	node, ok := snapshot.Evidence.Node(surfaceID)
+	if !ok {
+		t.Fatalf("expected ffuf parser fact to project into evidence graph")
+	}
+	if node.Type != evidence.NodeSurface {
+		t.Fatalf("expected evidence surface node, got %#v", node)
+	}
+
+	foundFactEvent := false
+	foundParserEvent := false
+	for _, event := range events {
+		switch event.Type {
+		case eventlog.EventFact:
+			var payload struct {
+				FactID        string `json:"fact_id"`
+				Source        string `json:"source"`
+				URL           string `json:"url"`
+				TargetURL     string `json:"target_url"`
+				StatusCode    int    `json:"status_code"`
+				ContentLength int64  `json:"content_length"`
+				ContentWords  int64  `json:"content_words"`
+				ContentLines  int64  `json:"content_lines"`
+				ContentType   string `json:"content_type"`
+				ParserID      string `json:"parser_id"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatalf("decode fact event: %v", err)
+			}
+			if payload.FactID != surfaceID || payload.Source != "parser.ffuf_json" {
+				continue
+			}
+			foundFactEvent = true
+			if payload.URL != "https://app.example/admin" || payload.TargetURL != "https://app.example" || payload.StatusCode != 200 || payload.ContentLength != 6726 || payload.ContentWords != 120 || payload.ContentLines != 32 || payload.ContentType != "text/html" || payload.ParserID != "ffuf_json" {
+				t.Fatalf("expected structured ffuf route metadata, got %#v", payload)
+			}
+			if strings.Contains(string(event.Payload), "secret-token") || strings.Contains(string(event.Payload), "evil.example") || strings.Contains(string(event.Payload), "resultfile") {
+				t.Fatalf("ffuf route fact payload leaked redacted output: %s", string(event.Payload))
+			}
+		case eventlog.EventParser:
+			var payload struct {
+				Parser string `json:"parser"`
+				Status string `json:"status"`
+				ToolID string `json:"tool_id"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatalf("decode parser event: %v", err)
+			}
+			if payload.Parser == "ffuf_json" && payload.Status == "parsed" && payload.ToolID == "ffuf" {
+				foundParserEvent = true
+			}
+		}
+	}
+	if !foundFactEvent {
+		t.Fatalf("expected raw ffuf fact event for %s", surfaceID)
+	}
+	if !foundParserEvent {
+		t.Fatalf("expected parsed ffuf parser event, events=%#v", events)
+	}
+}
+
+func TestRunWorkspaceRecordsFfufParseFailureWithoutSurface(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	scope := `version: 1
+scope:
+  target_policy: enforce
+  targets:
+    - kind: url
+      value: https://app.example
+  exclusions: []
+execution:
+  isolation: process
+  tool_concurrency: 1
+`
+	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
+		t.Fatalf("write URL scope: %v", err)
+	}
+	writeManagedBundleFixture(t, root, "ffuf", "binary", "2.1.0", "#!/usr/bin/env sh\nprintf 'not-json\\n'\n")
+	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "ffuf", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed ffuf bundle: %v", err)
+	}
+
+	result, err := RunWorkspaceWithOptions(ctx, root, RunOptions{Action: compiler.ActionEnumeratePaths, DeferReportProjection: true})
+	if err != nil {
+		t.Fatalf("parse failure should not fail completed ffuf run: %v", err)
+	}
+	store, err := eventlog.OpenSQLite(filepath.Join(root, "replay", "events.db"))
+	if err != nil {
+		t.Fatalf("open event log: %v", err)
+	}
+	defer store.Close()
+	events, err := store.Replay(ctx, result.RunID)
+	if err != nil {
+		t.Fatalf("replay events: %v", err)
+	}
+
+	foundParseFailure := false
+	for _, event := range events {
+		switch event.Type {
+		case eventlog.EventParser:
+			var payload struct {
+				Parser       string `json:"parser"`
+				Status       string `json:"status"`
+				ToolID       string `json:"tool_id"`
+				FindingCount int    `json:"finding_count"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatalf("decode parser event: %v", err)
+			}
+			if payload.Parser == "ffuf_json" && payload.Status == "parse_failed" && payload.ToolID == "ffuf" && payload.FindingCount == 0 {
+				foundParseFailure = true
+			}
+		case eventlog.EventFact:
+			var payload struct {
+				Source string `json:"source"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatalf("decode fact event: %v", err)
+			}
+			if payload.Source == "parser.ffuf_json" {
+				t.Fatalf("parse failure must not emit ffuf parser fact: %#v", payload)
+			}
+		}
+	}
+	if !foundParseFailure {
+		t.Fatalf("expected run-level ffuf parse_failed event, events=%#v", events)
+	}
+}
+
+func TestNativeManagedRunCommandBuildsFfufPathFuzzArgvForURLScope(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	payloadPath := writeManagedBundleFixture(t, root, "ffuf", "binary", "2.1.0", "#!/usr/bin/env sh\nprintf 'ffuf-url\\n'\n")
+	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "ffuf", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed ffuf bundle: %v", err)
+	}
+	request := ToolExecutionRequest{
+		WorkspaceRoot: root,
+		Node: compiler.PlanNode{
+			ID:             "ffuf-url-scope:01",
+			Capability:     "web.route_enumeration",
+			ManifestName:   "web-api-pack",
+			ToolID:         "ffuf",
+			AdapterID:      "managed_binary",
+			Operation:      "path_fuzz",
+			ParserID:       "ffuf_json",
+			TargetKind:     "url",
+			DependencyName: "ffuf",
+			DependencyKind: "binary",
+			Runner:         "native",
+		},
+		ScopeTargets:      []ScopeTarget{{Kind: "url", Value: "https://app.example/app"}},
+		ScopeTargetPolicy: "enforce",
+		IsolationMode:     "process",
+	}
+
+	command, target, ok, err := nativeManagedRunCommandWithTarget(request)
+	if err != nil || !ok {
+		t.Fatalf("expected ffuf command for URL scope, command=%#v target=%#v ok=%v err=%v", command, target, ok, err)
+	}
+	if target.Kind != "url" || target.Value != "https://app.example/app" {
+		t.Fatalf("expected selected URL target, got %#v", target)
+	}
+	if len(command) != 7 {
+		t.Fatalf("unexpected ffuf argv length: %#v", command)
+	}
+	inputPath := command[2]
+	wantPrefix := filepath.Join(root, "toolchain", "managed-inputs", "ffuf") + string(os.PathSeparator)
+	if !strings.HasPrefix(inputPath, wantPrefix) {
+		t.Fatalf("expected ffuf wordlist under managed inputs, got %q prefix %q", inputPath, wantPrefix)
+	}
+	wordlist, err := os.ReadFile(inputPath)
+	if err != nil {
+		t.Fatalf("read ffuf managed wordlist: %v", err)
+	}
+	wordlistText := string(wordlist)
+	for _, want := range []string{"admin\n", "login\n", "api\n"} {
+		if !strings.Contains(wordlistText, want) {
+			t.Fatalf("expected managed ffuf wordlist to contain %q, got %q", want, wordlistText)
+		}
+	}
+	want := []string{payloadPath, "-w", inputPath, "-u", "https://app.example/app/FUZZ", "-json", "-s"}
+	if strings.Join(command, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("unexpected ffuf argv: got %#v want %#v", command, want)
+	}
+}
+
+func TestNativeManagedRunCommandKeepsFfufOfflineForNonURLScope(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	writeManagedBundleFixture(t, root, "ffuf", "binary", "2.1.0", "#!/usr/bin/env sh\nprintf 'ffuf-non-url\\n'\n")
+	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "ffuf", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed ffuf bundle: %v", err)
+	}
+	for _, scopeTarget := range []ScopeTarget{
+		{Kind: "domain", Value: "example.com"},
+		{Kind: "host", Value: "app.example.com"},
+		{Kind: "cidr", Value: "10.0.0.0/24"},
+	} {
+		t.Run(scopeTarget.Kind, func(t *testing.T) {
+			request := ToolExecutionRequest{
+				WorkspaceRoot: root,
+				Node: compiler.PlanNode{
+					ID:             "ffuf-non-url-scope:01",
+					Capability:     "web.route_enumeration",
+					ManifestName:   "web-api-pack",
+					ToolID:         "ffuf",
+					AdapterID:      "managed_binary",
+					Operation:      "path_fuzz",
+					ParserID:       "ffuf_json",
+					TargetKind:     "url",
+					DependencyName: "ffuf",
+					DependencyKind: "binary",
+					Runner:         "native",
+				},
+				ScopeTargets:      []ScopeTarget{scopeTarget},
+				ScopeTargetPolicy: "enforce",
+				IsolationMode:     "process",
+			}
+
+			command, ok, err := nativeManagedRunCommand(request)
+			if err != nil || ok || len(command) > 0 {
+				t.Fatalf("ffuf must stay offline for non-URL scope %#v, command=%#v ok=%v err=%v", scopeTarget, command, ok, err)
+			}
+		})
+	}
+}
+
+func TestNativeManagedRunCommandRejectsExcludedFfufURLBeforeWritingWordlist(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	writeManagedBundleFixture(t, root, "ffuf", "binary", "2.1.0", "#!/usr/bin/env sh\nprintf 'ffuf-excluded\\n'")
+	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "ffuf", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed ffuf bundle: %v", err)
+	}
+	request := ToolExecutionRequest{
+		WorkspaceRoot: root,
+		Node: compiler.PlanNode{
+			ID:             "ffuf-excluded-url:01",
+			Capability:     "web.route_enumeration",
+			ManifestName:   "web-api-pack",
+			ToolID:         "ffuf",
+			AdapterID:      "managed_binary",
+			Operation:      "path_fuzz",
+			ParserID:       "ffuf_json",
+			TargetKind:     "url",
+			DependencyName: "ffuf",
+			DependencyKind: "binary",
+			Runner:         "native",
+		},
+		ScopeTargets:      []ScopeTarget{{Kind: "url", Value: "https://app.example/app"}},
+		ScopeExclusions:   []string{"https://app.example/app"},
+		ScopeTargetPolicy: "enforce",
+		IsolationMode:     "process",
+	}
+
+	command, ok, err := nativeManagedRunCommand(request)
+	if err == nil || !strings.Contains(err.Error(), "excluded") || !ok || len(command) > 0 {
+		t.Fatalf("expected excluded ffuf URL to fail before argv, command=%#v ok=%v err=%v", command, ok, err)
+	}
+	assertNoWorkspaceFileNamed(t, root, "ffuf-wordlist.txt")
+}
+
+func TestNativeManagedRunCommandRejectsExcludedFfufGeneratedURLBeforeWritingWordlist(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	writeManagedBundleFixture(t, root, "ffuf", "binary", "2.1.0", "#!/usr/bin/env sh\nprintf 'ffuf-excluded-generated\\n'")
+	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "ffuf", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed ffuf bundle: %v", err)
+	}
+	request := ToolExecutionRequest{
+		WorkspaceRoot: root,
+		Node: compiler.PlanNode{
+			ID:             "ffuf-excluded-generated-url:01",
+			Capability:     "web.route_enumeration",
+			ManifestName:   "web-api-pack",
+			ToolID:         "ffuf",
+			AdapterID:      "managed_binary",
+			Operation:      "path_fuzz",
+			ParserID:       "ffuf_json",
+			TargetKind:     "url",
+			DependencyName: "ffuf",
+			DependencyKind: "binary",
+			Runner:         "native",
+		},
+		ScopeTargets:      []ScopeTarget{{Kind: "url", Value: "https://app.example"}},
+		ScopeExclusions:   []string{"https://app.example/admin"},
+		ScopeTargetPolicy: "enforce",
+		IsolationMode:     "process",
+	}
+
+	command, ok, err := nativeManagedRunCommand(request)
+	if err == nil || !strings.Contains(err.Error(), "excluded") || !ok || len(command) > 0 {
+		t.Fatalf("expected generated excluded ffuf URL to fail before argv, command=%#v ok=%v err=%v", command, ok, err)
+	}
+	assertNoWorkspaceFileNamed(t, root, "ffuf-wordlist.txt")
+}
+
 func TestRunWorkspacePromotesKatanaJSONLToEvidenceSurface(t *testing.T) {
 	ctx := context.Background()
 	root := filepath.Join(t.TempDir(), "workspace")
