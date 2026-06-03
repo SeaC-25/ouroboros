@@ -72,6 +72,12 @@ func parserEventsForToolExecution(runID string, request ToolExecutionRequest, re
 			return []eventlog.Event{parserStatusEvent(runID, request, result, parserID, "parse_failed", err.Error(), 0)}
 		}
 		return events
+	case "ffuf_json":
+		events, err := ffufParserEvents(runID, request, result)
+		if err != nil {
+			return []eventlog.Event{parserStatusEvent(runID, request, result, parserID, "parse_failed", err.Error(), 0)}
+		}
+		return events
 	default:
 		return nil
 	}

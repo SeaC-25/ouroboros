@@ -1769,6 +1769,10 @@ func managedBinaryTargetKinds(binary string, operation string, node compiler.Pla
 		if binary == "katana" {
 			return []string{string(domain.TargetURL)}
 		}
+	case "path_fuzz":
+		if binary == "ffuf" {
+			return []string{string(domain.TargetURL)}
+		}
 	case "port_scan":
 		if binary == "naabu" {
 			return []string{string(domain.TargetCIDR)}
@@ -1829,6 +1833,30 @@ func managedBinaryCommandFor(request ToolExecutionRequest, binary string, operat
 			}
 			return []string{binary, "-u", target.Value, "-j", "-silent", "-or", "-ob", "-duc"}, true, nil
 		}
+	case "path_fuzz":
+		if binary == "ffuf" {
+			if target.Kind != string(domain.TargetURL) {
+				return nil, false, nil
+			}
+			if !targetPolicyDisabled(request.ScopeTargetPolicy) && scopeTargetExcludedForRequest(request, target) {
+				return nil, true, fmt.Errorf("scope target %s is excluded for capability %s", target.Value, request.Node.Capability)
+			}
+			fuzzURL, ok := ffufManagedFuzzURL(target.Value)
+			if !ok {
+				return nil, true, fmt.Errorf("ffuf command requires valid url scope target")
+			}
+			if !targetPolicyDisabled(request.ScopeTargetPolicy) {
+				excludedCandidate, ok := ffufManagedExcludedCandidate(request, target.Value)
+				if ok {
+					return nil, true, fmt.Errorf("scope target %s is excluded for capability %s", excludedCandidate, request.Node.Capability)
+				}
+			}
+			wordlistPath, err := writeFfufManagedWordlist(request.WorkspaceRoot, request.Node.ID)
+			if err != nil {
+				return nil, true, err
+			}
+			return []string{binary, "-w", wordlistPath, "-u", fuzzURL, "-json", "-s"}, true, nil
+		}
 	case "port_scan":
 		if binary == "naabu" {
 			if target.Kind != string(domain.TargetCIDR) {
@@ -1886,6 +1914,73 @@ func writeDnsxManagedInputFile(root string, nodeID string, domainName string) (s
 		return "", fmt.Errorf("write dnsx managed input file: %w", err)
 	}
 	return inputPath, nil
+}
+
+func writeFfufManagedWordlist(root string, nodeID string) (string, error) {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		return "", fmt.Errorf("ffuf command requires workspace root")
+	}
+	inputDir := filepath.Join(root, "toolchain", "managed-inputs", "ffuf", safeFactIDPart(nodeID))
+	if err := os.MkdirAll(inputDir, 0o755); err != nil {
+		return "", fmt.Errorf("create ffuf managed input directory: %w", err)
+	}
+	inputPath := filepath.Join(inputDir, "ffuf-wordlist.txt")
+	wordlist := strings.Join(ffufManagedWordlistEntries(), "\n") + "\n"
+	if err := os.WriteFile(inputPath, []byte(wordlist), 0o644); err != nil {
+		return "", fmt.Errorf("write ffuf managed wordlist: %w", err)
+	}
+	return inputPath, nil
+}
+
+func ffufManagedWordlistEntries() []string {
+	return []string{
+		"admin",
+		"login",
+		"api",
+		"health",
+		"status",
+		"robots.txt",
+		"sitemap.xml",
+	}
+}
+
+func ffufManagedExcludedCandidate(request ToolExecutionRequest, targetURL string) (string, bool) {
+	for _, entry := range ffufManagedWordlistEntries() {
+		candidate, ok := ffufManagedCandidateURL(targetURL, entry)
+		if !ok {
+			continue
+		}
+		target := ScopeTarget{Kind: string(domain.TargetURL), Value: candidate}
+		if scopeTargetExcludedForRequest(request, target) {
+			return candidate, true
+		}
+	}
+	return "", false
+}
+
+func ffufManagedCandidateURL(targetURL string, entry string) (string, bool) {
+	canonical := webEvidenceURL(targetURL)
+	if canonical == "" {
+		return "", false
+	}
+	entry = strings.Trim(strings.TrimSpace(entry), "/")
+	if entry == "" {
+		return "", false
+	}
+	return strings.TrimRight(canonical, "/") + "/" + entry, true
+}
+
+func ffufManagedFuzzURL(targetURL string) (string, bool) {
+	parsed := parsedWebURL(targetURL)
+	if parsed == nil {
+		return "", false
+	}
+	canonical := webEvidenceURL(targetURL)
+	if canonical == "" {
+		return "", false
+	}
+	return strings.TrimRight(canonical, "/") + "/FUZZ", true
 }
 
 func managedBinaryHasRuleBundleDependency(node compiler.PlanNode, name string) bool {
