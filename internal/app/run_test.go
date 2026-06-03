@@ -14,6 +14,7 @@ import (
 
 	"github.com/ouroboros/ouroboros/internal/compiler"
 	"github.com/ouroboros/ouroboros/internal/eventlog"
+	"github.com/ouroboros/ouroboros/internal/evidence"
 	"github.com/ouroboros/ouroboros/internal/toolchain"
 )
 
@@ -3848,6 +3849,245 @@ execution:
 		return
 	}
 	t.Fatalf("expected mobsfscan tool-level execution event, got %#v", events)
+}
+
+func TestRunWorkspacePromotesMobsfscanJSONToEvidenceFinding(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	artifactPath := filepath.Join(root, "artifacts", "samples", "App.java")
+	if err := os.MkdirAll(filepath.Dir(artifactPath), 0o755); err != nil {
+		t.Fatalf("create artifact dir: %v", err)
+	}
+	if err := os.WriteFile(artifactPath, []byte("class App { void log() {} }\n"), 0o644); err != nil {
+		t.Fatalf("write artifact fixture: %v", err)
+	}
+	scope := `version: 1
+scope:
+  target_policy: enforce
+  targets:
+    - kind: artifact
+      value: samples/App.java
+  exclusions: []
+execution:
+  isolation: process
+  tool_concurrency: 1
+`
+	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
+		t.Fatalf("write artifact scope: %v", err)
+	}
+	writeManagedBundleFixture(t, root, "mobsfscan", "binary", "0.4.0", `#!/usr/bin/env sh
+cat <<'JSON'
+{
+  "results": {
+    "android_logging": {
+      "metadata": {
+        "description": "Application logs sensitive data",
+        "severity": "WARNING",
+        "cwe": "CWE-532",
+        "owasp-mobile": "M1",
+        "masvs": "MSTG-STORAGE-3"
+      },
+      "files": [
+        {
+          "file_path": "samples/App.java",
+          "match_lines": [19, 19],
+          "match_string": "Log.d(\"token\", token);"
+        }
+      ]
+    }
+  }
+}
+JSON
+`)
+	if _, err := ExecuteManagedToolBundleInstall(root, "ctf-pack", "mobsfscan", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed mobsfscan bundle: %v", err)
+	}
+
+	result, err := RunWorkspaceWithOptions(ctx, root, RunOptions{
+		Action:                compiler.ActionFingerprintSurface,
+		DeferReportProjection: true,
+	})
+	if err != nil {
+		t.Fatalf("run workspace with mobsfscan parser: %v", err)
+	}
+	store, err := eventlog.OpenSQLite(filepath.Join(root, "replay", "events.db"))
+	if err != nil {
+		t.Fatalf("open event log: %v", err)
+	}
+	defer store.Close()
+	events, err := store.Replay(ctx, result.RunID)
+	if err != nil {
+		t.Fatalf("replay events: %v", err)
+	}
+	snapshot, err := eventlog.BuildReplaySnapshot(events)
+	if err != nil {
+		t.Fatalf("build replay snapshot: %v", err)
+	}
+
+	var findingID string
+	for _, fact := range snapshot.Blackboard.Facts {
+		if fact.Source != "parser.mobsfscan_json" {
+			continue
+		}
+		findingID = fact.ID
+		if fact.Kind != "finding" {
+			t.Fatalf("expected mobsfscan parser fact kind finding, got %#v", fact)
+		}
+		for _, want := range []string{"mobsfscan", "android_logging", "WARNING", "samples/App.java:19", "CWE-532"} {
+			if !strings.Contains(fact.Statement, want) {
+				t.Fatalf("expected mobsfscan finding to contain %q, got %#v", want, fact)
+			}
+		}
+		if fact.Confidence < 0.7 {
+			t.Fatalf("expected warning finding confidence to be promoted above transcript level, got %#v", fact)
+		}
+		break
+	}
+	if findingID == "" {
+		t.Fatalf("expected mobsfscan parser finding fact in replay snapshot, facts=%#v", snapshot.Blackboard.Facts)
+	}
+	node, ok := snapshot.Evidence.Node(findingID)
+	if !ok {
+		t.Fatalf("expected parser fact to project into evidence graph")
+	}
+	if node.Type != evidence.NodeFinding {
+		t.Fatalf("expected evidence finding node, got %#v", node)
+	}
+
+	foundFindingFactEvent := false
+	for _, event := range events {
+		if event.Type != eventlog.EventFact {
+			continue
+		}
+		var payload struct {
+			FactID    string `json:"fact_id"`
+			Source    string `json:"source"`
+			RuleID    string `json:"rule_id"`
+			Severity  string `json:"severity"`
+			FilePath  string `json:"file_path"`
+			LineStart int    `json:"line_start"`
+			ParserID  string `json:"parser_id"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatalf("decode fact event: %v", err)
+		}
+		if payload.FactID != findingID || payload.Source != "parser.mobsfscan_json" {
+			continue
+		}
+		foundFindingFactEvent = true
+		if payload.RuleID != "android_logging" || payload.Severity != "WARNING" || payload.FilePath != "samples/App.java" || payload.LineStart != 19 || payload.ParserID != "mobsfscan_json" {
+			t.Fatalf("expected structured mobsfscan fact metadata, got %#v", payload)
+		}
+	}
+	if !foundFindingFactEvent {
+		t.Fatalf("expected raw mobsfscan fact event for %s", findingID)
+	}
+
+	foundParserEvent := false
+	for _, event := range events {
+		if event.Type != eventlog.EventParser {
+			continue
+		}
+		var payload struct {
+			Parser string `json:"parser"`
+			Status string `json:"status"`
+			ToolID string `json:"tool_id"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatalf("decode parser event: %v", err)
+		}
+		if payload.Parser == "mobsfscan_json" && payload.Status == "parsed" && payload.ToolID == "mobsfscan" {
+			foundParserEvent = true
+		}
+	}
+	if !foundParserEvent {
+		t.Fatalf("expected parsed mobsfscan parser event, events=%#v", events)
+	}
+}
+
+func TestRunWorkspaceRecordsMobsfscanParseFailureWithoutFinding(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	artifactPath := filepath.Join(root, "artifacts", "samples", "Bad.java")
+	if err := os.MkdirAll(filepath.Dir(artifactPath), 0o755); err != nil {
+		t.Fatalf("create artifact dir: %v", err)
+	}
+	if err := os.WriteFile(artifactPath, []byte("class Bad {}\n"), 0o644); err != nil {
+		t.Fatalf("write artifact fixture: %v", err)
+	}
+	scope := `version: 1
+scope:
+  target_policy: enforce
+  targets:
+    - kind: artifact
+      value: samples/Bad.java
+  exclusions: []
+execution:
+  isolation: process
+  tool_concurrency: 1
+`
+	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
+		t.Fatalf("write artifact scope: %v", err)
+	}
+	writeManagedBundleFixture(t, root, "mobsfscan", "binary", "0.4.0", "#!/usr/bin/env sh\nprintf 'not-json\\n'\n")
+	if _, err := ExecuteManagedToolBundleInstall(root, "ctf-pack", "mobsfscan", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed mobsfscan bundle: %v", err)
+	}
+
+	result, err := RunWorkspaceWithOptions(ctx, root, RunOptions{
+		Action:                compiler.ActionFingerprintSurface,
+		DeferReportProjection: true,
+	})
+	if err != nil {
+		t.Fatalf("parse failure should not fail completed mobsfscan run: %v", err)
+	}
+	store, err := eventlog.OpenSQLite(filepath.Join(root, "replay", "events.db"))
+	if err != nil {
+		t.Fatalf("open event log: %v", err)
+	}
+	defer store.Close()
+	events, err := store.Replay(ctx, result.RunID)
+	if err != nil {
+		t.Fatalf("replay events: %v", err)
+	}
+
+	foundParseFailure := false
+	for _, event := range events {
+		switch event.Type {
+		case eventlog.EventParser:
+			var payload struct {
+				Parser       string `json:"parser"`
+				Status       string `json:"status"`
+				ToolID       string `json:"tool_id"`
+				FindingCount int    `json:"finding_count"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatalf("decode parser event: %v", err)
+			}
+			if payload.Parser == "mobsfscan_json" && payload.Status == "parse_failed" && payload.ToolID == "mobsfscan" && payload.FindingCount == 0 {
+				foundParseFailure = true
+			}
+		case eventlog.EventFact:
+			var payload struct {
+				Source string `json:"source"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatalf("decode fact event: %v", err)
+			}
+			if payload.Source == "parser.mobsfscan_json" {
+				t.Fatalf("parse failure must not emit mobsfscan parser fact: %#v", payload)
+			}
+		}
+	}
+	if !foundParseFailure {
+		t.Fatalf("expected run-level mobsfscan parse_failed event, events=%#v", events)
+	}
 }
 
 func TestRunWorkspaceRejectsExcludedArtifactBeforeMobsfscanExecution(t *testing.T) {

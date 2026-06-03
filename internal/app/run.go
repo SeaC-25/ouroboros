@@ -578,6 +578,11 @@ func runToolExecutionStage(ctx context.Context, root string, runID string, manif
 			}
 			return errors.Join(err, leaseErr)
 		}
+		for _, event := range parserEventsForToolExecution(runID, outcome.request, result) {
+			if err := appendLifecycleEvent(event); err != nil {
+				return errors.Join(fmt.Errorf("record parser event for tool plan node %s: %w", outcome.request.Node.ID, err), leaseErr)
+			}
+		}
 		return leaseErr
 	})
 	if err != nil {
