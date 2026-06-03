@@ -5371,6 +5371,489 @@ execution:
 	}
 }
 
+func TestRunWorkspaceExecutesToolLevelDnsxThroughExplicitDomainScope(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	scope := `version: 1
+scope:
+  target_policy: enforce
+  targets:
+    - kind: domain
+      value: example.com
+  exclusions: []
+execution:
+  isolation: process
+`
+	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
+		t.Fatalf("write scope: %v", err)
+	}
+	marker := filepath.Join(t.TempDir(), "tool-level-catalog-dnsx-ran")
+	writeManagedBundleFixture(t, root, "dnsx", "binary", "1.2.3", `#!/usr/bin/env sh
+args="$*"
+input=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-l" ]; then
+    shift
+    input="$1"
+  fi
+  shift || true
+done
+printf 'tool-level-dnsx-output args=%s input=%s input_value=%s target=%s tool_id=%s operation=%s parser=%s dep=%s target_kind=%s scope_target_kind=%s\n' "$args" "$input" "$(cat "$input")" "$OURO_TARGET" "$OURO_TOOL_ID" "$OURO_OPERATION" "$OURO_PARSER_ID" "$OURO_DEPENDENCY_NAME" "$OURO_TARGET_KIND" "$OURO_SCOPE_TARGET_KIND"
+touch `+marker+`
+`)
+	if _, err := ExecuteManagedToolBundleInstall(root, "infra-pack", "dnsx", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed dnsx bundle: %v", err)
+	}
+
+	result, err := RunWorkspace(ctx, root)
+	if err != nil {
+		t.Fatalf("run workspace: %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("expected dnsx tool-level payload to run through explicit domain scope builder: %v", err)
+	}
+	store, err := eventlog.OpenSQLite(filepath.Join(root, "replay", "events.db"))
+	if err != nil {
+		t.Fatalf("open event log: %v", err)
+	}
+	defer store.Close()
+	events, err := store.Replay(ctx, result.RunID)
+	if err != nil {
+		t.Fatalf("replay events: %v", err)
+	}
+	for _, event := range events {
+		if event.Type != eventlog.EventTool {
+			continue
+		}
+		var payload struct {
+			Tool            string `json:"tool"`
+			Parser          string `json:"parser"`
+			ExecutionStatus string `json:"execution_status"`
+			Transcript      string `json:"transcript"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatalf("decode tool payload: %v", err)
+		}
+		if payload.Tool != "infra-pack" || payload.Parser != "dnsx_jsonl" || payload.ExecutionStatus == "" {
+			continue
+		}
+		if payload.ExecutionStatus != "completed" {
+			t.Fatalf("expected dnsx tool-level node to complete, got %#v", payload)
+		}
+		for _, want := range []string{
+			"tool-level-dnsx-output",
+			"args=-j -silent -omit-raw -l ",
+			"input_value=example.com",
+			"target=example.com",
+			"tool_id=dnsx",
+			"operation=dns_probe",
+			"parser=dnsx_jsonl",
+			"dep=dnsx",
+			"target_kind=domain",
+			"scope_target_kind=domain",
+		} {
+			if !strings.Contains(payload.Transcript, want) {
+				t.Fatalf("expected dnsx tool-level transcript to contain %q, got %#v", want, payload)
+			}
+		}
+		if strings.Contains(payload.Transcript, "offline tool execution boundary") {
+			t.Fatalf("dnsx tool-level execution must not use offline runner, got %#v", payload)
+		}
+		return
+	}
+	t.Fatalf("expected dnsx tool-level execution event, got %#v", events)
+}
+
+func TestRunWorkspacePromotesDnsxJSONLToEvidenceSurface(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	scope := `version: 1
+scope:
+  target_policy: enforce
+  targets:
+    - kind: domain
+      value: example.com
+  exclusions: []
+execution:
+  isolation: process
+  tool_concurrency: 1
+`
+	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
+		t.Fatalf("write domain scope: %v", err)
+	}
+	writeManagedBundleFixture(t, root, "dnsx", "binary", "1.2.3", `#!/usr/bin/env sh
+cat <<'JSONL'
+{"host":"api.example.com","a":["192.0.2.10"],"cname":["alias.example.com"],"resolver":["secret-token"],"raw":"secret-token","all":["secret-token"],"cdn_name":"secret-token","asn":{"asn":"secret-token"}}
+{"host":"api.evil.test","a":["198.51.100.9"],"raw":"secret-token"}
+JSONL
+`)
+	if _, err := ExecuteManagedToolBundleInstall(root, "infra-pack", "dnsx", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed dnsx bundle: %v", err)
+	}
+
+	result, err := RunWorkspaceWithOptions(ctx, root, RunOptions{DeferReportProjection: true})
+	if err != nil {
+		t.Fatalf("run workspace with dnsx parser: %v", err)
+	}
+	store, err := eventlog.OpenSQLite(filepath.Join(root, "replay", "events.db"))
+	if err != nil {
+		t.Fatalf("open event log: %v", err)
+	}
+	defer store.Close()
+	events, err := store.Replay(ctx, result.RunID)
+	if err != nil {
+		t.Fatalf("replay events: %v", err)
+	}
+	snapshot, err := eventlog.BuildReplaySnapshot(events)
+	if err != nil {
+		t.Fatalf("build replay snapshot: %v", err)
+	}
+
+	dnsxFacts := 0
+	var surfaceID string
+	for _, fact := range snapshot.Blackboard.Facts {
+		if fact.Source != "parser.dnsx_jsonl" {
+			continue
+		}
+		dnsxFacts++
+		if surfaceID == "" {
+			surfaceID = fact.ID
+		}
+		if fact.Kind != "surface" {
+			t.Fatalf("expected dnsx parser fact kind surface, got %#v", fact)
+		}
+		if !strings.Contains(fact.Statement, "dnsx") || !strings.Contains(fact.Statement, "api.example.com") {
+			t.Fatalf("expected dnsx surface statement to name scoped host, got %#v", fact)
+		}
+		if strings.Contains(fact.Statement, "secret-token") || strings.Contains(fact.Statement, "evil.test") {
+			t.Fatalf("dnsx surface statement leaked redacted output: %#v", fact)
+		}
+	}
+	if dnsxFacts != 2 || surfaceID == "" {
+		t.Fatalf("expected two dnsx parser surface facts in replay snapshot, facts=%#v", snapshot.Blackboard.Facts)
+	}
+	node, ok := snapshot.Evidence.Node(surfaceID)
+	if !ok {
+		t.Fatalf("expected dnsx parser fact to project into evidence graph")
+	}
+	if node.Type != evidence.NodeSurface {
+		t.Fatalf("expected evidence surface node, got %#v", node)
+	}
+
+	foundFactEvent := false
+	foundParserEvent := false
+	for _, event := range events {
+		switch event.Type {
+		case eventlog.EventFact:
+			var payload struct {
+				Source     string `json:"source"`
+				Host       string `json:"host"`
+				RecordType string `json:"record_type"`
+				Value      string `json:"value"`
+				Domain     string `json:"domain"`
+				ParserID   string `json:"parser_id"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatalf("decode fact event: %v", err)
+			}
+			if payload.Source != "parser.dnsx_jsonl" {
+				continue
+			}
+			foundFactEvent = true
+			if payload.Host != "api.example.com" || payload.Domain != "example.com" || payload.ParserID != "dnsx_jsonl" {
+				t.Fatalf("expected structured dnsx fact metadata, got %#v", payload)
+			}
+			if payload.RecordType != "A" && payload.RecordType != "CNAME" {
+				t.Fatalf("unexpected dnsx record type: %#v", payload)
+			}
+			if strings.Contains(string(event.Payload), "secret-token") || strings.Contains(string(event.Payload), "evil.test") {
+				t.Fatalf("dnsx fact payload leaked redacted output: %s", string(event.Payload))
+			}
+		case eventlog.EventParser:
+			var payload struct {
+				Parser string `json:"parser"`
+				Status string `json:"status"`
+				ToolID string `json:"tool_id"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatalf("decode parser event: %v", err)
+			}
+			if payload.Parser == "dnsx_jsonl" && payload.Status == "parsed" && payload.ToolID == "dnsx" {
+				foundParserEvent = true
+			}
+		}
+	}
+	if !foundFactEvent {
+		t.Fatalf("expected raw dnsx fact event")
+	}
+	if !foundParserEvent {
+		t.Fatalf("expected parsed dnsx parser event, events=%#v", events)
+	}
+}
+
+func TestRunWorkspaceRecordsDnsxParseFailureWithoutSurface(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	scope := `version: 1
+scope:
+  target_policy: enforce
+  targets:
+    - kind: domain
+      value: example.com
+  exclusions: []
+execution:
+  isolation: process
+  tool_concurrency: 1
+`
+	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
+		t.Fatalf("write domain scope: %v", err)
+	}
+	writeManagedBundleFixture(t, root, "dnsx", "binary", "1.2.3", "#!/usr/bin/env sh\nprintf 'not-jsonl\\n'\n")
+	if _, err := ExecuteManagedToolBundleInstall(root, "infra-pack", "dnsx", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed dnsx bundle: %v", err)
+	}
+
+	result, err := RunWorkspaceWithOptions(ctx, root, RunOptions{DeferReportProjection: true})
+	if err != nil {
+		t.Fatalf("parse failure should not fail completed dnsx run: %v", err)
+	}
+	store, err := eventlog.OpenSQLite(filepath.Join(root, "replay", "events.db"))
+	if err != nil {
+		t.Fatalf("open event log: %v", err)
+	}
+	defer store.Close()
+	events, err := store.Replay(ctx, result.RunID)
+	if err != nil {
+		t.Fatalf("replay events: %v", err)
+	}
+
+	foundParseFailure := false
+	for _, event := range events {
+		switch event.Type {
+		case eventlog.EventParser:
+			var payload struct {
+				Parser       string `json:"parser"`
+				Status       string `json:"status"`
+				ToolID       string `json:"tool_id"`
+				FindingCount int    `json:"finding_count"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatalf("decode parser event: %v", err)
+			}
+			if payload.Parser == "dnsx_jsonl" && payload.Status == "parse_failed" && payload.ToolID == "dnsx" && payload.FindingCount == 0 {
+				foundParseFailure = true
+			}
+		case eventlog.EventFact:
+			var payload struct {
+				Source string `json:"source"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatalf("decode fact event: %v", err)
+			}
+			if payload.Source == "parser.dnsx_jsonl" {
+				t.Fatalf("parse failure must not emit dnsx parser fact: %#v", payload)
+			}
+		}
+	}
+	if !foundParseFailure {
+		t.Fatalf("expected run-level dnsx parse_failed event, events=%#v", events)
+	}
+}
+
+func TestRunWorkspaceRejectsExcludedDomainBeforeDnsxExecution(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	scope := `version: 1
+scope:
+  target_policy: enforce
+  targets:
+    - kind: domain
+      value: example.com
+  exclusions:
+    - example.com
+execution:
+  isolation: process
+`
+	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
+		t.Fatalf("write scope: %v", err)
+	}
+	marker := filepath.Join(t.TempDir(), "excluded-domain-dnsx-ran")
+	writeManagedBundleFixture(t, root, "dnsx", "binary", "1.2.3", "#!/usr/bin/env sh\nprintf 'should-not-run-excluded-domain-dnsx\\n'\ntouch "+marker+"\n")
+	if _, err := ExecuteManagedToolBundleInstall(root, "infra-pack", "dnsx", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed dnsx bundle: %v", err)
+	}
+
+	_, err := RunWorkspace(ctx, root)
+	if err == nil || !strings.Contains(err.Error(), "excluded") {
+		t.Fatalf("expected excluded domain failure before dnsx execution, got %v", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("excluded domain dnsx payload must not run, marker stat err=%v", err)
+	}
+	assertNoWorkspaceFileNamed(t, root, "dnsx-targets.txt")
+}
+
+func TestNativeManagedRunCommandBuildsDnsxDNSProbeArgvForDomainScope(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	payloadPath := writeManagedBundleFixture(t, root, "dnsx", "binary", "1.2.3", "#!/usr/bin/env sh\nprintf 'dnsx-domain\\n'\n")
+	if _, err := ExecuteManagedToolBundleInstall(root, "infra-pack", "dnsx", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed dnsx bundle: %v", err)
+	}
+	request := ToolExecutionRequest{
+		WorkspaceRoot: root,
+		Node: compiler.PlanNode{
+			ID:             "dnsx-domain-scope:01",
+			Capability:     "infra.host_discovery",
+			ManifestName:   "infra-pack",
+			ToolID:         "dnsx",
+			AdapterID:      "managed_binary",
+			Operation:      "dns_probe",
+			ParserID:       "dnsx_jsonl",
+			TargetKind:     "domain",
+			DependencyName: "dnsx",
+			DependencyKind: "binary",
+			Runner:         "native",
+		},
+		ScopeTargets:      []ScopeTarget{{Kind: "domain", Value: "example.com"}},
+		ScopeTargetPolicy: "enforce",
+		IsolationMode:     "process",
+	}
+
+	command, target, ok, err := nativeManagedRunCommandWithTarget(request)
+	if err != nil || !ok {
+		t.Fatalf("expected dnsx command for domain scope, command=%#v target=%#v ok=%v err=%v", command, target, ok, err)
+	}
+	if target.Kind != "domain" || target.Value != "example.com" {
+		t.Fatalf("expected selected domain target, got %#v", target)
+	}
+	if len(command) != 6 || command[0] != payloadPath || command[1] != "-j" || command[2] != "-silent" || command[3] != "-omit-raw" || command[4] != "-l" {
+		t.Fatalf("unexpected dnsx argv: %#v", command)
+	}
+	inputPath := command[5]
+	if !strings.HasPrefix(inputPath, root+string(os.PathSeparator)) {
+		t.Fatalf("dnsx input file must stay under workspace root, got %q", inputPath)
+	}
+	content, err := os.ReadFile(inputPath)
+	if err != nil {
+		t.Fatalf("read dnsx input file: %v", err)
+	}
+	if string(content) != "example.com\n" {
+		t.Fatalf("expected dnsx input file to contain scoped domain, got %q", string(content))
+	}
+}
+
+func TestNativeManagedRunCommandKeepsDnsxOfflineForNonDomainScope(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	writeManagedBundleFixture(t, root, "dnsx", "binary", "1.2.3", "#!/usr/bin/env sh\nprintf 'dnsx-non-domain\\n'\n")
+	if _, err := ExecuteManagedToolBundleInstall(root, "infra-pack", "dnsx", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed dnsx bundle: %v", err)
+	}
+	for _, scopeTarget := range []ScopeTarget{
+		{Kind: "url", Value: "https://app.example.com"},
+		{Kind: "host", Value: "api.example.com"},
+		{Kind: "cidr", Value: "10.0.0.0/24"},
+	} {
+		t.Run(scopeTarget.Kind, func(t *testing.T) {
+			request := ToolExecutionRequest{
+				WorkspaceRoot: root,
+				Node: compiler.PlanNode{
+					ID:             "dnsx-non-domain-scope:01",
+					Capability:     "infra.host_discovery",
+					ManifestName:   "infra-pack",
+					ToolID:         "dnsx",
+					AdapterID:      "managed_binary",
+					Operation:      "dns_probe",
+					ParserID:       "dnsx_jsonl",
+					TargetKind:     "domain",
+					DependencyName: "dnsx",
+					DependencyKind: "binary",
+					Runner:         "native",
+				},
+				ScopeTargets:      []ScopeTarget{scopeTarget},
+				ScopeTargetPolicy: "enforce",
+				IsolationMode:     "process",
+			}
+
+			command, ok, err := nativeManagedRunCommand(request)
+			if err != nil || ok || len(command) > 0 {
+				t.Fatalf("dnsx must stay offline for non-domain scope %#v, command=%#v ok=%v err=%v", scopeTarget, command, ok, err)
+			}
+			assertNoWorkspaceFileNamed(t, root, "dnsx-targets.txt")
+		})
+	}
+}
+
+func TestNativeManagedRunCommandRejectsExcludedDnsxDomainBeforeWritingInput(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	writeManagedBundleFixture(t, root, "dnsx", "binary", "1.2.3", "#!/usr/bin/env sh\nprintf 'dnsx-excluded\\n'\n")
+	if _, err := ExecuteManagedToolBundleInstall(root, "infra-pack", "dnsx", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed dnsx bundle: %v", err)
+	}
+	request := ToolExecutionRequest{
+		WorkspaceRoot: root,
+		Node: compiler.PlanNode{
+			ID:             "dnsx-excluded-domain:01",
+			Capability:     "infra.host_discovery",
+			ManifestName:   "infra-pack",
+			ToolID:         "dnsx",
+			AdapterID:      "managed_binary",
+			Operation:      "dns_probe",
+			ParserID:       "dnsx_jsonl",
+			TargetKind:     "domain",
+			DependencyName: "dnsx",
+			DependencyKind: "binary",
+			Runner:         "native",
+		},
+		ScopeTargets:      []ScopeTarget{{Kind: "domain", Value: "example.com"}},
+		ScopeExclusions:   []string{"example.com"},
+		ScopeTargetPolicy: "enforce",
+		IsolationMode:     "process",
+	}
+
+	command, ok, err := nativeManagedRunCommand(request)
+	if err == nil || !strings.Contains(err.Error(), "excluded") || !ok || len(command) > 0 {
+		t.Fatalf("expected excluded dnsx domain to fail before argv, command=%#v ok=%v err=%v", command, ok, err)
+	}
+	assertNoWorkspaceFileNamed(t, root, "dnsx-targets.txt")
+}
+
+func assertNoWorkspaceFileNamed(t *testing.T, root string, base string) {
+	t.Helper()
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !entry.IsDir() && entry.Name() == base {
+			t.Fatalf("did not expect workspace file %s at %s", base, path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk workspace: %v", err)
+	}
+}
+
 func TestRunWorkspaceRejectsExcludedCIDRBeforeNaabuExecutionWhenHostScopePresent(t *testing.T) {
 	ctx := context.Background()
 	root := filepath.Join(t.TempDir(), "workspace")
@@ -5777,14 +6260,6 @@ func TestNativeManagedRunCommandKeepsDomainToolsOfflineForURLScope(t *testing.T)
 			parserID:   "amass_json",
 		},
 		{
-			name:       "dnsx",
-			pack:       "infra-pack",
-			capability: "infra.host_discovery",
-			toolID:     "dnsx",
-			operation:  "dns_probe",
-			parserID:   "dnsx_jsonl",
-		},
-		{
 			name:       "dnsrecon",
 			pack:       "infra-pack",
 			capability: "infra.host_discovery",
@@ -5846,14 +6321,6 @@ func TestNativeManagedRunCommandKeepsUnsupportedDomainToolsOfflineForDomainScope
 			toolID:     "amass",
 			operation:  "subdomain_discovery",
 			parserID:   "amass_json",
-		},
-		{
-			name:       "dnsx",
-			pack:       "infra-pack",
-			capability: "infra.host_discovery",
-			toolID:     "dnsx",
-			operation:  "dns_probe",
-			parserID:   "dnsx_jsonl",
 		},
 		{
 			name:       "dnsrecon",
