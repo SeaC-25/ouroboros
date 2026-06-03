@@ -1089,6 +1089,11 @@ func TestModelUpdateDoesNotRequestReadOnlyRuntimeActions(t *testing.T) {
 			kind: "replay-workbench-collaboration-presence",
 		},
 		{
+			name: "provider usage summary",
+			row:  "provider usage summary: mode=metadata-only records=2 providers=local-openai|second-openai models=gpt-a|gpt-b input_tokens=1200 output_tokens=800 total_tokens=2000 estimated_cost_usd=0.007500 estimated_cost_records=1 budget_enforced_records=1 budget_within_limit_records=1 first_created_at=2026-06-04T12:30:00Z last_created_at=2026-06-04T13:00:00Z source=/tmp/ouro/runtime/model-usage",
+			kind: "provider-usage-summary",
+		},
+		{
 			name: "workspace safety strict gate",
 			row:  "workspace safety strict gate: blocked errors=2",
 			kind: "workspace-safety-strict-gate",

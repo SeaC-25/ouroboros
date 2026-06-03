@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -1074,6 +1075,7 @@ func baseTUIModelForWorkspace(root string) tui.Model {
 }
 
 func tuiModelWithWorkspaceRuntimeRows(root string, model tui.Model) tui.Model {
+	model = tuiModelWithProviderUsageSummaryRows(root, model)
 	model = tuiModelWithInstallRequestRows(root, model)
 	model = tuiModelWithCompilePreviewSignalRows(root, model)
 	model = tuiModelWithCompilePreviewReviewRows(root, model)
@@ -1114,6 +1116,45 @@ func tuiModelWithWorkspaceRuntimeRows(root string, model tui.Model) tui.Model {
 	model = tuiModelWithWorkerLeaseRows(root, model)
 	model = tuiModelWithRuntimeWorkerPlacementRows(root, model)
 	return model
+}
+
+func tuiModelWithProviderUsageSummaryRows(root string, model tui.Model) tui.Model {
+	summary, err := SummarizeProviderUsageRecords(root)
+	if err != nil {
+		return model.AppendRuntimeRows(tui.RuntimeTabModelRuntime, []string{
+			"provider usage summary error: mode=metadata-only error=" + compactRuntimeRowValue(err.Error()),
+		})
+	}
+	return model.AppendRuntimeRows(tui.RuntimeTabModelRuntime, providerUsageSummaryRuntimeRows(root, summary))
+}
+
+func providerUsageSummaryRuntimeRows(root string, summary ProviderUsageSummary) []string {
+	source := providerUsageDirectory(root)
+	return []string{fmt.Sprintf(
+		"provider usage summary: mode=metadata-only records=%d providers=%s models=%s provider_count=%d model_count=%d input_tokens=%d output_tokens=%d total_tokens=%d estimated_cost_usd=%.6f estimated_cost_records=%d budget_enforced_records=%d budget_within_limit_records=%d first_created_at=%s last_created_at=%s source_b64=%s",
+		summary.RecordCount,
+		providerUsageSummaryRowList(summary.Providers),
+		providerUsageSummaryRowList(summary.Models),
+		len(summary.Providers),
+		len(summary.Models),
+		summary.InputTokens,
+		summary.OutputTokens,
+		summary.TotalTokens,
+		summary.EstimatedCostUSD,
+		summary.EstimatedCostRecordCount,
+		summary.BudgetEnforcedCount,
+		summary.BudgetWithinLimitCount,
+		installRequestDisplayValue(summary.FirstCreatedAt, "none"),
+		installRequestDisplayValue(summary.LastCreatedAt, "none"),
+		base64.RawURLEncoding.EncodeToString([]byte(source)),
+	)}
+}
+
+func providerUsageSummaryRowList(values []string) string {
+	if len(values) == 0 {
+		return "none"
+	}
+	return strings.Join(values, "|")
 }
 
 func tuiModelWithReplayWorkbenchSessionRows(root string, model tui.Model) tui.Model {

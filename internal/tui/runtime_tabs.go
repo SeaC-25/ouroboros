@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"encoding/base64"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -162,6 +164,8 @@ func (a RuntimeAction) FeedbackRow() string {
 			name = strings.TrimSpace(a.Row)
 		}
 		return "action: install retry execution result selected " + name
+	case "provider-usage-summary":
+		return "action: provider usage summary selected read-only"
 	case "install-orchestration-artifact":
 		return "action: install orchestration artifact selected " + strings.TrimSpace(a.ArtifactPath)
 	case "worker-orchestration-supervisor-artifact":
@@ -960,6 +964,9 @@ func runtimeActionForRow(row string) (RuntimeAction, bool) {
 	}
 	if strings.HasPrefix(trimmed, "retry execution result ") {
 		return runtimeRetryExecutionResultActionForRow(trimmed), true
+	}
+	if strings.HasPrefix(trimmed, "provider usage summary:") {
+		return runtimeProviderUsageSummaryActionForRow(trimmed), true
 	}
 	if strings.HasPrefix(trimmed, "install orchestration artifact:") {
 		return runtimeInstallOrchestrationArtifactActionForRow(trimmed), true
@@ -2671,7 +2678,55 @@ func runtimeActionIsReadOnly(action RuntimeAction) bool {
 	if kind == "report-projection-dispatch-execution-artifact" {
 		return strings.TrimSpace(action.Current) != "false" || strings.TrimSpace(action.State) != "completed" || !strings.Contains(action.Results, "written=true")
 	}
-	return strings.HasPrefix(kind, "compile-preview-signal") || kind == "compile-preview-review-comparison" || kind == "replay-workbench-collaboration-presence" || strings.HasPrefix(kind, "workspace-safety") || strings.HasPrefix(kind, "install-execution") || strings.HasPrefix(kind, "install-retry-execution") || kind == "install-orchestration-artifact" || kind == "report-projection-execution-review" || kind == "worker-orchestration-artifact" || kind == "worker-orchestration-supervisor-artifact" || kind == "worker-lifecycle-audit-artifact" || kind == "worker-lifecycle-audit-item" || kind == "worker-lifecycle-review-artifact" || kind == "worker-lifecycle-action-plan-artifact" || kind == "worker-lifecycle-maintenance-artifact" || kind == "worker-lifecycle-maintenance-supervisor-artifact" || kind == "worker-lifecycle-policy-run-artifact" || kind == "worker-lifecycle-policy-scheduler-run-artifact" || kind == "worker-lifecycle-action" || strings.HasPrefix(kind, "worker-lease-result-reconciliation-execution") || strings.HasPrefix(kind, "worker-lease-reclaim-execution") || strings.HasPrefix(kind, "worker-queue-dispatch-execution") || strings.HasPrefix(kind, "worker-queue-dispatch-result") || kind == "worker-dispatch-retry-plan-artifact" || kind == "worker-dispatch-retry-dispatch-artifact" || strings.HasPrefix(kind, "worker-dispatch-retry-dispatch-execution") || kind == "worker-dispatch-retry-scheduler-run-artifact" || kind == "worker-transport-daemon-supervisor-artifact" || kind == "worker-transport-daemon-control-artifact"
+	return kind == "provider-usage-summary" || strings.HasPrefix(kind, "compile-preview-signal") || kind == "compile-preview-review-comparison" || kind == "replay-workbench-collaboration-presence" || strings.HasPrefix(kind, "workspace-safety") || strings.HasPrefix(kind, "install-execution") || strings.HasPrefix(kind, "install-retry-execution") || kind == "install-orchestration-artifact" || kind == "report-projection-execution-review" || kind == "worker-orchestration-artifact" || kind == "worker-orchestration-supervisor-artifact" || kind == "worker-lifecycle-audit-artifact" || kind == "worker-lifecycle-audit-item" || kind == "worker-lifecycle-review-artifact" || kind == "worker-lifecycle-action-plan-artifact" || kind == "worker-lifecycle-maintenance-artifact" || kind == "worker-lifecycle-maintenance-supervisor-artifact" || kind == "worker-lifecycle-policy-run-artifact" || kind == "worker-lifecycle-policy-scheduler-run-artifact" || kind == "worker-lifecycle-action" || strings.HasPrefix(kind, "worker-lease-result-reconciliation-execution") || strings.HasPrefix(kind, "worker-lease-reclaim-execution") || strings.HasPrefix(kind, "worker-queue-dispatch-execution") || strings.HasPrefix(kind, "worker-queue-dispatch-result") || kind == "worker-dispatch-retry-plan-artifact" || kind == "worker-dispatch-retry-dispatch-artifact" || strings.HasPrefix(kind, "worker-dispatch-retry-dispatch-execution") || kind == "worker-dispatch-retry-scheduler-run-artifact" || kind == "worker-transport-daemon-supervisor-artifact" || kind == "worker-transport-daemon-control-artifact"
+}
+
+func runtimeProviderUsageSummaryActionForRow(row string) RuntimeAction {
+	fields := runtimeSimpleKeyValueFields(strings.TrimSpace(strings.TrimPrefix(row, "provider usage summary:")))
+	source := fields["source"]
+	if encoded := strings.TrimSpace(fields["source_b64"]); encoded != "" {
+		if decoded, err := base64.RawURLEncoding.DecodeString(encoded); err == nil {
+			source = string(decoded)
+		}
+	}
+	providerCount := valueOrDefault(fields["provider_count"], strconv.Itoa(pipeSeparatedValueCount(fields["providers"])))
+	modelCount := valueOrDefault(fields["model_count"], strconv.Itoa(pipeSeparatedValueCount(fields["models"])))
+	return RuntimeAction{
+		Kind:          "provider-usage-summary",
+		State:         "ready",
+		ExecutionMode: valueOrDefault(fields["mode"], "metadata-only"),
+		Source:        source,
+		Ready:         "records=" + valueOrDefault(fields["records"], "0") + " providers=" + providerCount + " models=" + modelCount,
+		Results: strings.Join(nonEmptyRuntimeParts([]string{
+			"input_tokens=" + fields["input_tokens"],
+			"output_tokens=" + fields["output_tokens"],
+			"total_tokens=" + fields["total_tokens"],
+			"estimated_cost_usd=" + fields["estimated_cost_usd"],
+			"estimated_cost_records=" + fields["estimated_cost_records"],
+		}), " "),
+		Output: "provider usage summary is read-only metadata from manual provider previews",
+		Row:    row,
+	}
+}
+
+func runtimeSimpleKeyValueFields(row string) map[string]string {
+	values := map[string]string{}
+	for _, field := range strings.Fields(row) {
+		key, value, ok := strings.Cut(field, "=")
+		if !ok {
+			continue
+		}
+		values[strings.TrimSpace(key)] = strings.TrimSpace(value)
+	}
+	return values
+}
+
+func pipeSeparatedValueCount(value string) int {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "none" {
+		return 0
+	}
+	return strings.Count(value, "|") + 1
 }
 
 func firstRuntimeToken(value string) string {

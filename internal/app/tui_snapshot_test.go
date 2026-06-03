@@ -13,6 +13,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/ouroboros/ouroboros/internal/compiler"
+	"github.com/ouroboros/ouroboros/internal/eventlog"
 	"github.com/ouroboros/ouroboros/internal/tui"
 )
 
@@ -140,6 +141,189 @@ dependencies:
 		if !strings.Contains(view, want) {
 			t.Fatalf("expected TUI pending request view to contain %q:\n%s", want, view)
 		}
+	}
+}
+
+func TestNewTUIModelForWorkspaceShowsProviderUsageSummaryReadOnly(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	recordProviderUsageSummaryFixture(t, root)
+
+	model := NewTUIModelForWorkspace(root).
+		SelectRuntimeTab(tui.RuntimeTabModelRuntime).
+		SelectRuntimeRowMatching(tui.RuntimeTabModelRuntime, "provider usage summary:", "")
+	resized, cmd := model.Update(tea.WindowSizeMsg{Width: 2200, Height: 40})
+	if cmd != nil {
+		t.Fatalf("expected resize update to be synchronous")
+	}
+	view := resized.View()
+	for _, want := range []string{
+		"provider usage summary: mode=metadata-only records=2",
+		"providers=local-openai|second-openai",
+		"models=gpt-a|gpt-b",
+		"input_tokens=1200",
+		"output_tokens=800",
+		"total_tokens=2000",
+		"estimated_cost_usd=0.007500",
+		"estimated_cost_records=1",
+		"budget_enforced_records=1",
+		"budget_within_limit_records=1",
+		"first_created_at=2026-06-04T12:30:00Z",
+		"last_created_at=2026-06-04T13:00:00Z",
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("expected TUI provider usage summary view to contain %q:\n%s", want, view)
+		}
+	}
+	for _, leaked := range []string{"do not persist generated text", "Authorization", "Bearer", "secret-value"} {
+		if strings.Contains(view, leaked) {
+			t.Fatalf("provider usage TUI summary leaked %q:\n%s", leaked, view)
+		}
+	}
+
+	detailed := resized.(tui.Model).ShowRuntimeActionDetails()
+	detailView := detailed.View()
+	for _, want := range []string{
+		"[Node Inspector]",
+		"runtime action: provider-usage-summary",
+		"execution mode: metadata-only",
+		"source: " + filepath.Join(root, "runtime", "model-usage"),
+		"ready: records=2 providers=2 models=2",
+		"results: input_tokens=1200 output_tokens=800 total_tokens=2000 estimated_cost_usd=0.007500 estimated_cost_records=1",
+		"output: provider usage summary is read-only metadata from manual provider previews",
+		"mode: read-only",
+	} {
+		if !strings.Contains(detailView, want) {
+			t.Fatalf("expected TUI provider usage details to contain %q:\n%s", want, detailView)
+		}
+	}
+}
+
+func TestNewTUIModelForWorkspaceProviderUsageSummaryDoesNotMutateReplayEvents(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	recordProviderUsageSummaryFixture(t, root)
+	store, err := eventlog.OpenSQLite(filepath.Join(root, "replay", "events.db"))
+	if err != nil {
+		t.Fatalf("open replay store: %v", err)
+	}
+	defer store.Close()
+	const runID = "run-provider-usage-summary-tui"
+	if _, err := store.Append(ctx, eventlog.Event{
+		RunID:   runID,
+		Type:    eventlog.EventReplay,
+		Payload: json.RawMessage(`{"status":"seed"}`),
+	}); err != nil {
+		t.Fatalf("seed replay event: %v", err)
+	}
+	eventsBefore, err := store.Replay(ctx, runID)
+	if err != nil {
+		t.Fatalf("replay before: %v", err)
+	}
+	recordsBefore, err := ListProviderUsageRecords(root)
+	if err != nil {
+		t.Fatalf("list usage records before: %v", err)
+	}
+
+	model := NewTUIModelForWorkspace(root).SelectRuntimeTab(tui.RuntimeTabModelRuntime)
+	resized, cmd := model.Update(tea.WindowSizeMsg{Width: 520, Height: 40})
+	if cmd != nil {
+		t.Fatalf("expected resize update to be synchronous")
+	}
+	if view := resized.View(); !strings.Contains(view, "provider usage summary: mode=metadata-only records=2") {
+		t.Fatalf("expected provider usage summary row in TUI view:\n%s", view)
+	}
+
+	eventsAfter, err := store.Replay(ctx, runID)
+	if err != nil {
+		t.Fatalf("replay after: %v", err)
+	}
+	recordsAfter, err := ListProviderUsageRecords(root)
+	if err != nil {
+		t.Fatalf("list usage records after: %v", err)
+	}
+	if len(eventsAfter) != len(eventsBefore) {
+		t.Fatalf("provider usage TUI summary must not mutate replay events: before=%d after=%d", len(eventsBefore), len(eventsAfter))
+	}
+	if len(recordsAfter) != len(recordsBefore) {
+		t.Fatalf("provider usage TUI summary must not create usage records: before=%d after=%d", len(recordsBefore), len(recordsAfter))
+	}
+}
+
+func TestNewTUIModelForWorkspaceProviderUsageSummaryDetailsHandleSpacePathsAndNames(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace with space")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	if _, err := RecordProviderGenerationUsage(root, ProviderGenerationResult{
+		ProviderName: "local openai",
+		Model:        "gpt a",
+		InputTokens:  10,
+		OutputTokens: 20,
+		TotalTokens:  30,
+	}, ProviderUsageRecordOptions{Now: time.Date(2026, 6, 4, 14, 0, 0, 0, time.UTC)}); err != nil {
+		t.Fatalf("record first usage: %v", err)
+	}
+	if _, err := RecordProviderGenerationUsage(root, ProviderGenerationResult{
+		ProviderName: "pipe|provider",
+		Model:        "gpt|b",
+		InputTokens:  1,
+		OutputTokens: 2,
+		TotalTokens:  3,
+	}, ProviderUsageRecordOptions{Now: time.Date(2026, 6, 4, 15, 0, 0, 0, time.UTC)}); err != nil {
+		t.Fatalf("record second usage: %v", err)
+	}
+
+	model := NewTUIModelForWorkspace(root).
+		SelectRuntimeTab(tui.RuntimeTabModelRuntime).
+		SelectRuntimeRowMatching(tui.RuntimeTabModelRuntime, "provider usage summary:", "")
+	resized, cmd := model.Update(tea.WindowSizeMsg{Width: 2200, Height: 40})
+	if cmd != nil {
+		t.Fatalf("expected resize update to be synchronous")
+	}
+	detailView := resized.(tui.Model).ShowRuntimeActionDetails().View()
+	for _, want := range []string{
+		"source: " + filepath.Join(root, "runtime", "model-usage"),
+		"ready: records=2 providers=2 models=2",
+		"results: input_tokens=11 output_tokens=22 total_tokens=33",
+	} {
+		if !strings.Contains(detailView, want) {
+			t.Fatalf("expected provider usage summary details to contain %q:\n%s", want, detailView)
+		}
+	}
+}
+
+func recordProviderUsageSummaryFixture(t *testing.T, root string) {
+	t.Helper()
+	maxCost := 0.01
+	if _, err := RecordProviderGenerationUsage(root, ProviderGenerationResult{
+		ProviderName:           "local-openai",
+		Model:                  "gpt-a",
+		Text:                   "do not persist generated text Authorization Bearer secret-value",
+		InputTokens:            1000,
+		OutputTokens:           500,
+		TotalTokens:            1500,
+		EstimatedCostUSD:       0.0075,
+		EstimatedCostAvailable: true,
+	}, ProviderUsageRecordOptions{
+		Now:                 time.Date(2026, 6, 4, 12, 30, 0, 0, time.UTC),
+		MaxEstimatedCostUSD: &maxCost,
+	}); err != nil {
+		t.Fatalf("record first usage: %v", err)
+	}
+	if _, err := RecordProviderGenerationUsage(root, ProviderGenerationResult{
+		ProviderName: "second-openai",
+		Model:        "gpt-b",
+		InputTokens:  200,
+		OutputTokens: 300,
+		TotalTokens:  500,
+	}, ProviderUsageRecordOptions{Now: time.Date(2026, 6, 4, 13, 0, 0, 0, time.UTC)}); err != nil {
+		t.Fatalf("record second usage: %v", err)
 	}
 }
 
