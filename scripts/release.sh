@@ -55,6 +55,10 @@ PREFIX="\${HOME}/.local" sh install.sh .
 
 No network access is required by the installer.
 
+Keep SHA256SUMS next to the archive when installing from the tarball. The
+installer verifies the matching archive entry before extraction when that file
+is present.
+
 If this archive includes managed tool bundles, the installer copies them to:
 
 \`\`\`text

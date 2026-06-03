@@ -17,6 +17,7 @@ Continue the Ouroboros TUI-first pentest IDE implementation by using the local r
 | Sqlmap managed log artifact wrapper | complete | Added real sqlmap `log` fallback under the managed output directory, converting only parameter/type/title/DBMS lines into the existing `sqlmap_json` transcript while rejecting symlinked or ambiguous logs. |
 | Container-mode managed execution | complete | Allowed catalog tool-level managed argv builders to run through existing container isolation without resolving host workspace binaries, leaving the configured container image responsible for inner tools while preserving scope and audit controls. |
 | OpenAI-compatible provider adapter | complete | Added an `openai_compatible` provider readiness preflight with environment-based bearer credentials, sanitized errors, and provider/model replay usage while leaving generation calls as a future slice. |
+| Release install checksum verification | complete | `scripts/install.sh` now verifies the matching `SHA256SUMS` archive entry when present before extracting or installing a local release tarball. |
 
 ## Phases
 | Phase | Status | Notes |

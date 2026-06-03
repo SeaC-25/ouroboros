@@ -73,7 +73,7 @@ GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro toolchain managed-install ./
 
 `make release` writes a local tarball and `SHA256SUMS` under `dist/`. The release script respects `VERSION`, `DIST_DIR`, `GOOS`, `GOARCH`, and `GOPROXY`; it builds one target tuple and does not publish artifacts.
 
-`scripts/install.sh` installs only from a local release archive or extracted release directory. It deliberately rejects HTTP(S) sources, writes to `${PREFIX:-$HOME/.local}/bin/ouro`, and requires no network access.
+`scripts/install.sh` installs only from a local release archive or extracted release directory. It deliberately rejects HTTP(S) sources, writes to `${PREFIX:-$HOME/.local}/bin/ouro`, and requires no network access. When installing a `.tar.gz` archive and a `SHA256SUMS` file exists in the same directory, the installer requires a matching checksum entry for that archive before extraction.
 
 `make doctor` creates a temporary workspace, initializes it, and runs `ouro doctor` against it. `make doctor-strict` runs the same initialized workspace through `ouro doctor --require-safety-authorization`, which is the CI-oriented safety-bypass gate.
 
