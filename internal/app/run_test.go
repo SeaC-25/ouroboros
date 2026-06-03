@@ -6020,6 +6020,103 @@ touch `+marker+`
 	}
 }
 
+func TestRunWorkspacePromotesArjunManagedOutputFileToEvidenceSurface(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	scope := `version: 1
+scope:
+  target_policy: enforce
+  targets:
+    - kind: url
+      value: https://app.example/search?q=hello
+  exclusions: []
+execution:
+  isolation: process
+  tool_concurrency: 1
+`
+	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
+		t.Fatalf("write URL scope: %v", err)
+	}
+	marker := filepath.Join(t.TempDir(), "tool-level-arjun-ran")
+	writeManagedBundleFixture(t, root, "arjun", "binary", "2.2.7", `#!/usr/bin/env sh
+out=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-oJ" ]; then
+    shift
+    out="$1"
+  fi
+  shift
+done
+mkdir -p "$(dirname "$out")"
+cat > "$out" <<'JSON'
+{
+  "https://app.example/search?token=secret-token#frag": ["q", "page"],
+  "https://evil.example/out?token=secret-token": ["evil"],
+  "headers": {"Authorization": "Bearer secret-token"}
+}
+JSON
+touch `+marker+`
+`)
+	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "arjun", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed arjun bundle: %v", err)
+	}
+
+	result, err := RunWorkspaceWithOptions(ctx, root, RunOptions{
+		Action:                compiler.ActionEnumeratePaths,
+		DeferReportProjection: true,
+	})
+	if err != nil {
+		t.Fatalf("run workspace with arjun parser: %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("expected arjun payload to run through registered argv builder: %v", err)
+	}
+	store, err := eventlog.OpenSQLite(filepath.Join(root, "replay", "events.db"))
+	if err != nil {
+		t.Fatalf("open event log: %v", err)
+	}
+	defer store.Close()
+	events, err := store.Replay(ctx, result.RunID)
+	if err != nil {
+		t.Fatalf("replay events: %v", err)
+	}
+	snapshot, err := eventlog.BuildReplaySnapshot(events)
+	if err != nil {
+		t.Fatalf("build replay snapshot: %v", err)
+	}
+
+	var surfaceID string
+	for _, fact := range snapshot.Blackboard.Facts {
+		if fact.Source != "parser.arjun_json" {
+			continue
+		}
+		surfaceID = fact.ID
+		if fact.Kind != "surface" {
+			t.Fatalf("expected arjun parser fact kind surface, got %#v", fact)
+		}
+		for _, want := range []string{"arjun", "https://app.example/search", "parameter=q"} {
+			if !strings.Contains(fact.Statement, want) {
+				t.Fatalf("expected arjun surface to contain %q, got %#v", want, fact)
+			}
+		}
+		for _, leaked := range []string{"secret-token", "evil.example", "Authorization", "token=", "#frag"} {
+			if strings.Contains(fact.Statement, leaked) {
+				t.Fatalf("arjun surface statement leaked untrusted output %q: %#v", leaked, fact)
+			}
+		}
+		break
+	}
+	if surfaceID == "" {
+		t.Fatalf("expected arjun parser surface fact in replay snapshot, facts=%#v", snapshot.Blackboard.Facts)
+	}
+	if _, ok := snapshot.Evidence.Node(surfaceID); !ok {
+		t.Fatalf("expected arjun parser fact to project into evidence graph")
+	}
+}
+
 func TestRunWorkspacePromotesURLListTextToEvidenceSurface(t *testing.T) {
 	ctx := context.Background()
 	root := filepath.Join(t.TempDir(), "workspace")
@@ -6094,6 +6191,54 @@ URLS
 	}
 	if _, ok := snapshot.Evidence.Node(surfaceID); !ok {
 		t.Fatalf("expected URL list parser fact to project into evidence graph")
+	}
+}
+
+func TestNativeManagedRunCommandBuildsArjunParameterDiscoveryArgvForURLScope(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	payloadPath := writeManagedBundleFixture(t, root, "arjun", "binary", "2.2.7", "#!/usr/bin/env sh\nprintf 'arjun-url\\n'\n")
+	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "arjun", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed arjun bundle: %v", err)
+	}
+	request := ToolExecutionRequest{
+		WorkspaceRoot: root,
+		Node: compiler.PlanNode{
+			ID:             "arjun-url-scope:01",
+			Capability:     "web.route_enumeration",
+			ManifestName:   "web-api-pack",
+			ToolID:         "arjun",
+			AdapterID:      "managed_binary",
+			Operation:      "parameter_discovery",
+			ParserID:       "arjun_json",
+			TargetKind:     "url",
+			DependencyName: "arjun",
+			DependencyKind: "binary",
+			Runner:         "native",
+		},
+		ScopeTargets:      []ScopeTarget{{Kind: "url", Value: "https://app.example/search?q=hello"}},
+		ScopeTargetPolicy: "enforce",
+		IsolationMode:     "process",
+	}
+
+	command, target, ok, err := nativeManagedRunCommandWithTarget(request)
+	if err != nil || !ok {
+		t.Fatalf("expected arjun command for URL scope, command=%#v target=%#v ok=%v err=%v", command, target, ok, err)
+	}
+	if target.Kind != "url" || target.Value != "https://app.example/search?q=hello" {
+		t.Fatalf("expected selected URL target, got %#v", target)
+	}
+	if len(command) != 8 {
+		t.Fatalf("unexpected arjun argv length: %#v", command)
+	}
+	if command[0] != payloadPath || command[1] != "-u" || command[2] != "https://app.example/search?q=hello" || command[3] != "-oJ" || command[5] != "-q" || command[6] != "-t" || command[7] != "1" {
+		t.Fatalf("unexpected arjun argv: %#v", command)
+	}
+	wantOutput := filepath.Join(root, "toolchain", "managed-outputs", "arjun", "arjun-url-scope-01.json")
+	if command[4] != wantOutput {
+		t.Fatalf("unexpected arjun managed output path: got %q want %q", command[4], wantOutput)
 	}
 }
 
@@ -6278,6 +6423,89 @@ func TestNativeManagedRunCommandRejectsExcludedArchiveDiscoveryDomain(t *testing
 	command, ok, err := nativeManagedRunCommand(request)
 	if err == nil || !strings.Contains(err.Error(), "excluded") || !ok || len(command) > 0 {
 		t.Fatalf("expected excluded archive discovery domain to fail before argv, command=%#v ok=%v err=%v", command, ok, err)
+	}
+}
+
+func TestNativeManagedRunCommandKeepsArjunOfflineForNonURLScope(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	writeManagedBundleFixture(t, root, "arjun", "binary", "2.2.7", "#!/usr/bin/env sh\nprintf 'arjun-non-url\\n'\n")
+	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "arjun", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed arjun bundle: %v", err)
+	}
+	for _, scopeTarget := range []ScopeTarget{
+		{Kind: "domain", Value: "example.com"},
+		{Kind: "host", Value: "app.example.com"},
+		{Kind: "cidr", Value: "10.0.0.0/24"},
+	} {
+		t.Run(scopeTarget.Kind, func(t *testing.T) {
+			request := ToolExecutionRequest{
+				WorkspaceRoot: root,
+				Node: compiler.PlanNode{
+					ID:             "arjun-non-url-scope:01",
+					Capability:     "web.route_enumeration",
+					ManifestName:   "web-api-pack",
+					ToolID:         "arjun",
+					AdapterID:      "managed_binary",
+					Operation:      "parameter_discovery",
+					ParserID:       "arjun_json",
+					TargetKind:     "url",
+					DependencyName: "arjun",
+					DependencyKind: "binary",
+					Runner:         "native",
+				},
+				ScopeTargets:      []ScopeTarget{scopeTarget},
+				ScopeTargetPolicy: "enforce",
+				IsolationMode:     "process",
+			}
+
+			command, ok, err := nativeManagedRunCommand(request)
+			if err != nil || ok || len(command) > 0 {
+				t.Fatalf("arjun must stay offline for non-URL scope %#v, command=%#v ok=%v err=%v", scopeTarget, command, ok, err)
+			}
+		})
+	}
+}
+
+func TestNativeManagedRunCommandRejectsExcludedArjunURL(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	writeManagedBundleFixture(t, root, "arjun", "binary", "2.2.7", "#!/usr/bin/env sh\nprintf 'arjun-excluded\\n'")
+	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "arjun", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed arjun bundle: %v", err)
+	}
+	request := ToolExecutionRequest{
+		WorkspaceRoot: root,
+		Node: compiler.PlanNode{
+			ID:             "arjun-excluded-url:01",
+			Capability:     "web.route_enumeration",
+			ManifestName:   "web-api-pack",
+			ToolID:         "arjun",
+			AdapterID:      "managed_binary",
+			Operation:      "parameter_discovery",
+			ParserID:       "arjun_json",
+			TargetKind:     "url",
+			DependencyName: "arjun",
+			DependencyKind: "binary",
+			Runner:         "native",
+		},
+		ScopeTargets:      []ScopeTarget{{Kind: "url", Value: "https://app.example/search?q=hello"}},
+		ScopeExclusions:   []string{"https://app.example/search"},
+		ScopeTargetPolicy: "enforce",
+		IsolationMode:     "process",
+	}
+
+	command, ok, err := nativeManagedRunCommand(request)
+	if err == nil || !strings.Contains(err.Error(), "excluded") || !ok || len(command) > 0 {
+		t.Fatalf("expected excluded arjun URL to fail before argv, command=%#v ok=%v err=%v", command, ok, err)
+	}
+	outputDir := filepath.Join(root, "toolchain", "managed-outputs", "arjun")
+	if _, statErr := os.Stat(outputDir); statErr == nil || !os.IsNotExist(statErr) {
+		t.Fatalf("excluded arjun URL must not create managed output directory, statErr=%v", statErr)
 	}
 }
 

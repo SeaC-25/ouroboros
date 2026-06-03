@@ -42,6 +42,12 @@ func parserEventsForToolExecution(runID string, request ToolExecutionRequest, re
 			return []eventlog.Event{parserStatusEvent(runID, request, result, parserID, "parse_failed", err.Error(), 0)}
 		}
 		return events
+	case "arjun_json":
+		events, err := arjunParserEvents(runID, request, result)
+		if err != nil {
+			return []eventlog.Event{parserStatusEvent(runID, request, result, parserID, "parse_failed", err.Error(), 0)}
+		}
+		return events
 	case "httpx_jsonl":
 		events, err := httpxParserEvents(runID, request, result)
 		if err != nil {
