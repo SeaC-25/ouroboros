@@ -2266,6 +2266,11 @@ func newReplayWorkbenchHandlerWithOptions(options replayWorkbenchHandlerOptions,
 			if r.Method == http.MethodHead {
 				return
 			}
+			providerUsageSummary, err := replayWorkbenchProviderUsageSummary(workspaceRoot)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
 			sessionSelectionMu.Lock()
 			var sessionSelectionCopy *app.ReplayWorkbenchSessionSelection
 			if sessionSelection != nil {
@@ -2288,7 +2293,7 @@ func newReplayWorkbenchHandlerWithOptions(options replayWorkbenchHandlerOptions,
 				reportSelectionCopy = &copied
 			}
 			reportSelectionMu.Unlock()
-			if err := printReplayWorkbenchHTML(w, results, replayWorkbenchSessionFromRequestWithDefault(r, results, defaultSession), savedSessions, sessionSelectionCopy, reportExecutions, reportSelectionCopy, collaborationState.Collaborations, collaborationState.CollaborationPresence, collaborationState.CollaborationNotes, collaborationState.CollaborationSelection, noteSelectionCopy, allowReportSelectionWrites, allowSessionSelectionWrites, allowCollaborationSelectionWrites, allowCollaborationPresenceWrites, allowCollaborationNoteWrites, allowCollaborationNoteSelectionWrites, enableCollaborationStream, sessionSelectionPollIntervalMS, collaborationSelectionPollIntervalMS, collaborationPresencePollIntervalMS, collaborationNotesPollIntervalMS, collaborationNoteSelectionPollIntervalMS); err != nil {
+			if err := printReplayWorkbenchHTML(w, results, replayWorkbenchSessionFromRequestWithDefault(r, results, defaultSession), savedSessions, sessionSelectionCopy, reportExecutions, reportSelectionCopy, collaborationState.Collaborations, collaborationState.CollaborationPresence, collaborationState.CollaborationNotes, collaborationState.CollaborationSelection, noteSelectionCopy, providerUsageSummary, allowReportSelectionWrites, allowSessionSelectionWrites, allowCollaborationSelectionWrites, allowCollaborationPresenceWrites, allowCollaborationNoteWrites, allowCollaborationNoteSelectionWrites, enableCollaborationStream, sessionSelectionPollIntervalMS, collaborationSelectionPollIntervalMS, collaborationPresencePollIntervalMS, collaborationNotesPollIntervalMS, collaborationNoteSelectionPollIntervalMS); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 			}
 		case "/api/session":
@@ -2313,6 +2318,19 @@ func newReplayWorkbenchHandlerWithOptions(options replayWorkbenchHandlerOptions,
 				return
 			}
 			if err := printReplayWorkbenchReportProjectionExecutionsJSON(w, reportExecutions); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+		case "/api/provider-usage-summary":
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			if r.Method == http.MethodHead {
+				return
+			}
+			summary, err := replayWorkbenchProviderUsageSummary(workspaceRoot)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if err := printReplayWorkbenchProviderUsageSummaryJSON(w, summary); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 			}
 		case "/api/report-selection":
@@ -2760,14 +2778,15 @@ func replayWorkbenchSessionFromRequestWithDefault(r *http.Request, results []app
 		RunIDs:        runIDs,
 		Filters:       filters,
 		Endpoints: map[string]string{
-			"html":            replayWorkbenchPathWithQuery("/", htmlQuery),
-			"replay":          replayWorkbenchPathWithQuery("/api/replay", filterQuery),
-			"replays":         replayWorkbenchPathWithQuery("/api/replays", filterQuery),
-			"sessions":        "/api/sessions",
-			"graph":           replayWorkbenchPathWithQuery("/api/graph", filterQuery),
-			"graphs":          replayWorkbenchPathWithQuery("/api/graphs", filterQuery),
-			"graph_ndjson":    replayWorkbenchPathWithQuery("/api/graph.ndjson", filterQuery),
-			"timeline_ndjson": replayWorkbenchPathWithQuery("/api/timeline.ndjson", filterQuery),
+			"html":                   replayWorkbenchPathWithQuery("/", htmlQuery),
+			"replay":                 replayWorkbenchPathWithQuery("/api/replay", filterQuery),
+			"replays":                replayWorkbenchPathWithQuery("/api/replays", filterQuery),
+			"sessions":               "/api/sessions",
+			"provider_usage_summary": "/api/provider-usage-summary",
+			"graph":                  replayWorkbenchPathWithQuery("/api/graph", filterQuery),
+			"graphs":                 replayWorkbenchPathWithQuery("/api/graphs", filterQuery),
+			"graph_ndjson":           replayWorkbenchPathWithQuery("/api/graph.ndjson", filterQuery),
+			"timeline_ndjson":        replayWorkbenchPathWithQuery("/api/timeline.ndjson", filterQuery),
 		},
 	}
 }
@@ -2858,6 +2877,22 @@ func printReplayWorkbenchSessions(out io.Writer, sessions []app.ReplayWorkbenchS
 	encoder := json.NewEncoder(out)
 	encoder.SetIndent("", "  ")
 	return encoder.Encode(sessions)
+}
+
+func replayWorkbenchProviderUsageSummary(workspaceRoot string) (app.ProviderUsageSummary, error) {
+	if strings.TrimSpace(workspaceRoot) == "" {
+		return app.ProviderUsageSummary{
+			Providers: []string{},
+			Models:    []string{},
+		}, nil
+	}
+	return app.SummarizeProviderUsageRecords(workspaceRoot)
+}
+
+func printReplayWorkbenchProviderUsageSummaryJSON(out io.Writer, summary app.ProviderUsageSummary) error {
+	encoder := json.NewEncoder(out)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(summary)
 }
 
 func printReplayWorkbenchReportProjectionExecutionsJSON(out io.Writer, executions []app.ReportProjectionDispatchExecution) error {
@@ -3275,7 +3310,7 @@ func printReplayWorkbenchSessionArtifact(out io.Writer, session app.ReplayWorkbe
 			}
 		}
 	}
-	for _, key := range []string{"html", "replay", "replays", "sessions", "graph", "graphs", "graph_ndjson", "timeline_ndjson"} {
+	for _, key := range []string{"html", "replay", "replays", "sessions", "provider_usage_summary", "graph", "graphs", "graph_ndjson", "timeline_ndjson"} {
 		if value := strings.TrimSpace(session.Endpoints[key]); value != "" {
 			if _, err := fmt.Fprintf(out, "endpoint: %s=%s\n", key, value); err != nil {
 				return err
@@ -3872,14 +3907,14 @@ func (filter replayTimelineFilter) matches(event replayExportTimeline) bool {
 
 func printReplayHTML(out io.Writer, result app.ReplayResult) error {
 	exports := []replayExport{replayExportFromResult(result)}
-	return printReplayHTMLDocument(out, exports, replayWorkbenchSessionFromExports(exports), nil, nil, nil, nil, nil, nil, nil, nil, nil, false, false, false, false, false, false, false, 0, 0, 0, 0, 0)
+	return printReplayHTMLDocument(out, exports, replayWorkbenchSessionFromExports(exports), nil, nil, nil, nil, nil, nil, nil, nil, nil, app.ProviderUsageSummary{}, false, false, false, false, false, false, false, 0, 0, 0, 0, 0)
 }
 
-func printReplayWorkbenchHTML(out io.Writer, results []app.ReplayResult, session replayWorkbenchSession, savedSessions []app.ReplayWorkbenchSessionArtifact, sessionSelection *app.ReplayWorkbenchSessionSelection, reportExecutions []app.ReportProjectionDispatchExecution, reportSelection *app.ReportProjectionDispatchExecutionSelection, collaborations []app.ReplayWorkbenchCollaborationArtifact, collaborationPresence []app.ReplayWorkbenchCollaborationPresence, collaborationNotes []app.ReplayWorkbenchCollaborationNote, collaborationSelection *app.ReplayWorkbenchCollaborationSelection, collaborationNoteSelection *app.ReplayWorkbenchCollaborationNoteSelection, allowReportSelectionWrites bool, allowSessionSelectionWrites bool, allowCollaborationSelectionWrites bool, allowCollaborationPresenceWrites bool, allowCollaborationNoteWrites bool, allowCollaborationNoteSelectionWrites bool, enableCollaborationStream bool, sessionSelectionPollIntervalMS int, collaborationSelectionPollIntervalMS int, collaborationPresencePollIntervalMS int, collaborationNotesPollIntervalMS int, collaborationNoteSelectionPollIntervalMS int) error {
-	return printReplayHTMLDocument(out, replayExportsFromResults(results), session, savedSessions, sessionSelection, reportExecutions, reportSelection, collaborations, collaborationPresence, collaborationNotes, collaborationSelection, collaborationNoteSelection, allowReportSelectionWrites, allowSessionSelectionWrites, allowCollaborationSelectionWrites, allowCollaborationPresenceWrites, allowCollaborationNoteWrites, allowCollaborationNoteSelectionWrites, enableCollaborationStream, sessionSelectionPollIntervalMS, collaborationSelectionPollIntervalMS, collaborationPresencePollIntervalMS, collaborationNotesPollIntervalMS, collaborationNoteSelectionPollIntervalMS)
+func printReplayWorkbenchHTML(out io.Writer, results []app.ReplayResult, session replayWorkbenchSession, savedSessions []app.ReplayWorkbenchSessionArtifact, sessionSelection *app.ReplayWorkbenchSessionSelection, reportExecutions []app.ReportProjectionDispatchExecution, reportSelection *app.ReportProjectionDispatchExecutionSelection, collaborations []app.ReplayWorkbenchCollaborationArtifact, collaborationPresence []app.ReplayWorkbenchCollaborationPresence, collaborationNotes []app.ReplayWorkbenchCollaborationNote, collaborationSelection *app.ReplayWorkbenchCollaborationSelection, collaborationNoteSelection *app.ReplayWorkbenchCollaborationNoteSelection, providerUsageSummary app.ProviderUsageSummary, allowReportSelectionWrites bool, allowSessionSelectionWrites bool, allowCollaborationSelectionWrites bool, allowCollaborationPresenceWrites bool, allowCollaborationNoteWrites bool, allowCollaborationNoteSelectionWrites bool, enableCollaborationStream bool, sessionSelectionPollIntervalMS int, collaborationSelectionPollIntervalMS int, collaborationPresencePollIntervalMS int, collaborationNotesPollIntervalMS int, collaborationNoteSelectionPollIntervalMS int) error {
+	return printReplayHTMLDocument(out, replayExportsFromResults(results), session, savedSessions, sessionSelection, reportExecutions, reportSelection, collaborations, collaborationPresence, collaborationNotes, collaborationSelection, collaborationNoteSelection, providerUsageSummary, allowReportSelectionWrites, allowSessionSelectionWrites, allowCollaborationSelectionWrites, allowCollaborationPresenceWrites, allowCollaborationNoteWrites, allowCollaborationNoteSelectionWrites, enableCollaborationStream, sessionSelectionPollIntervalMS, collaborationSelectionPollIntervalMS, collaborationPresencePollIntervalMS, collaborationNotesPollIntervalMS, collaborationNoteSelectionPollIntervalMS)
 }
 
-func printReplayHTMLDocument(out io.Writer, exports []replayExport, session replayWorkbenchSession, savedSessions []app.ReplayWorkbenchSessionArtifact, sessionSelection *app.ReplayWorkbenchSessionSelection, reportExecutions []app.ReportProjectionDispatchExecution, reportSelection *app.ReportProjectionDispatchExecutionSelection, collaborations []app.ReplayWorkbenchCollaborationArtifact, collaborationPresence []app.ReplayWorkbenchCollaborationPresence, collaborationNotes []app.ReplayWorkbenchCollaborationNote, collaborationSelection *app.ReplayWorkbenchCollaborationSelection, collaborationNoteSelection *app.ReplayWorkbenchCollaborationNoteSelection, allowReportSelectionWrites bool, allowSessionSelectionWrites bool, allowCollaborationSelectionWrites bool, allowCollaborationPresenceWrites bool, allowCollaborationNoteWrites bool, allowCollaborationNoteSelectionWrites bool, enableCollaborationStream bool, sessionSelectionPollIntervalMS int, collaborationSelectionPollIntervalMS int, collaborationPresencePollIntervalMS int, collaborationNotesPollIntervalMS int, collaborationNoteSelectionPollIntervalMS int) error {
+func printReplayHTMLDocument(out io.Writer, exports []replayExport, session replayWorkbenchSession, savedSessions []app.ReplayWorkbenchSessionArtifact, sessionSelection *app.ReplayWorkbenchSessionSelection, reportExecutions []app.ReportProjectionDispatchExecution, reportSelection *app.ReportProjectionDispatchExecutionSelection, collaborations []app.ReplayWorkbenchCollaborationArtifact, collaborationPresence []app.ReplayWorkbenchCollaborationPresence, collaborationNotes []app.ReplayWorkbenchCollaborationNote, collaborationSelection *app.ReplayWorkbenchCollaborationSelection, collaborationNoteSelection *app.ReplayWorkbenchCollaborationNoteSelection, providerUsageSummary app.ProviderUsageSummary, allowReportSelectionWrites bool, allowSessionSelectionWrites bool, allowCollaborationSelectionWrites bool, allowCollaborationPresenceWrites bool, allowCollaborationNoteWrites bool, allowCollaborationNoteSelectionWrites bool, enableCollaborationStream bool, sessionSelectionPollIntervalMS int, collaborationSelectionPollIntervalMS int, collaborationPresencePollIntervalMS int, collaborationNotesPollIntervalMS int, collaborationNoteSelectionPollIntervalMS int) error {
 	if len(exports) == 0 {
 		exports = []replayExport{{ReportPath: replayReportDisplay("")}}
 	}
@@ -3920,6 +3955,10 @@ func printReplayHTMLDocument(out io.Writer, exports []replayExport, session repl
 	reportExecutionData, err := json.Marshal(reportExecutions)
 	if err != nil {
 		return fmt.Errorf("encode replay html reports: %w", err)
+	}
+	providerUsageSummaryData, err := json.Marshal(providerUsageSummary)
+	if err != nil {
+		return fmt.Errorf("encode replay html provider usage summary: %w", err)
 	}
 	var reportSelectionData []byte
 	if reportSelection == nil {
@@ -4070,6 +4109,7 @@ func printReplayHTMLDocument(out io.Writer, exports []replayExport, session repl
       <select id="ouro-graph-edge-filter" aria-label="Evidence graph edge focus"></select>
 	    </div>
 	    <section id="ouro-replay-session-selection-summary" aria-label="Replay workbench session selection"></section>
+	    <section id="ouro-provider-usage-summary" aria-label="Provider usage summary"></section>
 	    <section id="ouro-replay-reports-summary" aria-label="Replay workbench reports"></section>
 	    <section id="ouro-replay-report-selection-summary" aria-label="Replay workbench report selection"></section>
 	    <section id="ouro-replay-collaboration-selection-summary" aria-label="Replay workbench collaboration selection"></section>
@@ -4094,6 +4134,7 @@ window.OURO_REPLAY_SESSION = %s;
 window.OURO_REPLAY_SESSIONS = %s;
 window.OURO_REPLAY_SESSION_SELECTION = %s;
 window.OURO_REPLAY_REPORTS = %s;
+window.OURO_REPLAY_PROVIDER_USAGE_SUMMARY = %s;
 window.OURO_REPLAY_REPORT_SELECTION = %s;
 window.OURO_REPLAY_COLLABORATIONS = %s;
 window.OURO_REPLAY_COLLABORATION_PRESENCE = %s;
@@ -4119,6 +4160,7 @@ window.OURO_REPLAY_COLLABORATION_NOTE_SELECTION_POLL_INTERVAL_MS = %d;
   const savedSessions = Array.isArray(window.OURO_REPLAY_SESSIONS) ? window.OURO_REPLAY_SESSIONS : [];
   let sessionSelection = window.OURO_REPLAY_SESSION_SELECTION || null;
   const reportExecutions = Array.isArray(window.OURO_REPLAY_REPORTS) ? window.OURO_REPLAY_REPORTS : [];
+  const providerUsageSummary = window.OURO_REPLAY_PROVIDER_USAGE_SUMMARY || {};
   let reportSelection = window.OURO_REPLAY_REPORT_SELECTION || null;
   const collaborations = Array.isArray(window.OURO_REPLAY_COLLABORATIONS) ? window.OURO_REPLAY_COLLABORATIONS : [];
   let collaborationPresence = Array.isArray(window.OURO_REPLAY_COLLABORATION_PRESENCE) ? window.OURO_REPLAY_COLLABORATION_PRESENCE : [];
@@ -4145,6 +4187,7 @@ window.OURO_REPLAY_COLLABORATION_NOTE_SELECTION_POLL_INTERVAL_MS = %d;
   const edgeFilter = document.getElementById("ouro-graph-edge-filter");
   const summary = document.getElementById("ouro-replay-summary");
   const selectionSummary = document.getElementById("ouro-replay-session-selection-summary");
+  const providerUsageSummaryElement = document.getElementById("ouro-provider-usage-summary");
   const reportsSummary = document.getElementById("ouro-replay-reports-summary");
   const reportSelectionSummary = document.getElementById("ouro-replay-report-selection-summary");
   const collaborationSelectionSummary = document.getElementById("ouro-replay-collaboration-selection-summary");
@@ -4354,6 +4397,25 @@ window.OURO_REPLAY_COLLABORATION_NOTE_SELECTION_POLL_INTERVAL_MS = %d;
         " · " + escapeReplayHTML(String(report.report_path || "none")) +
         "</span></article>";
     }).join("");
+  }
+  function renderReplayWorkbenchProviderUsageSummary() {
+    if (!providerUsageSummaryElement) return;
+    const records = Number(providerUsageSummary.record_count || 0);
+    if (!records) {
+      providerUsageSummaryElement.innerHTML = "";
+      return;
+    }
+    const providers = Array.isArray(providerUsageSummary.providers) ? JSON.stringify(providerUsageSummary.providers) : "[]";
+    const models = Array.isArray(providerUsageSummary.models) ? JSON.stringify(providerUsageSummary.models) : "[]";
+    providerUsageSummaryElement.innerHTML =
+      "<article class=\"event\"><strong>provider usage summary metadata-only records=" + escapeReplayHTML(String(records)) +
+      "</strong><span>providers " + escapeReplayHTML(providers || "none") +
+      " · models " + escapeReplayHTML(models || "none") +
+      " · input_tokens " + escapeReplayHTML(String(providerUsageSummary.input_tokens || 0)) +
+      " · output_tokens " + escapeReplayHTML(String(providerUsageSummary.output_tokens || 0)) +
+      " · total_tokens " + escapeReplayHTML(String(providerUsageSummary.total_tokens || 0)) +
+      " · estimated_cost_usd " + escapeReplayHTML(Number(providerUsageSummary.estimated_cost_usd || 0).toFixed(6)) +
+      "</span></article>";
   }
   function renderReplayWorkbenchReportSelection() {
     if (!reportSelectionSummary) return;
@@ -4652,6 +4714,7 @@ window.OURO_REPLAY_COLLABORATION_NOTE_SELECTION_POLL_INTERVAL_MS = %d;
   nodeFilter.addEventListener("change", () => { renderCurrentReplay(); updateReplayWorkbenchURL(); });
   edgeFilter.addEventListener("change", () => { renderCurrentReplay(); updateReplayWorkbenchURL(); });
   renderReplayWorkbenchSessionSelection();
+  renderReplayWorkbenchProviderUsageSummary();
   renderReplayWorkbenchReports();
   renderReplayWorkbenchReportSelection();
   renderReplayWorkbenchCollaborationSelection();
@@ -4664,7 +4727,7 @@ window.OURO_REPLAY_COLLABORATION_NOTE_SELECTION_POLL_INTERVAL_MS = %d;
   </script>
 </body>
 </html>
-		`, runID, runID, primary.EventCount, reportPath, collaborationControlsHTML, string(primaryData), string(allData), string(graphData), string(sessionData), string(sessionListData), string(selectionData), string(reportExecutionData), string(reportSelectionData), string(collaborationData), string(collaborationPresenceData), string(collaborationNotesData), string(collaborationSelectionData), string(collaborationNoteSelectionData), allowReportSelectionWrites, allowSessionSelectionWrites, allowCollaborationSelectionWrites, allowCollaborationPresenceWrites, allowCollaborationNoteWrites, allowCollaborationNoteSelectionWrites, enableCollaborationStream, sessionSelectionPollIntervalMS, collaborationSelectionPollIntervalMS, collaborationPresencePollIntervalMS, collaborationNotesPollIntervalMS, collaborationNoteSelectionPollIntervalMS, sessionSelectionPollIntervalMS, collaborationSelectionPollIntervalMS, collaborationPresencePollIntervalMS, collaborationNotesPollIntervalMS, collaborationNoteSelectionPollIntervalMS, sessionSelectionPollingScript, collaborationStreamScript, selectionPollingScript, noteSelectionPollingScript, sessionSelectionWriteScript, reportSelectionWriteScript, selectionWriteScript, presencePollingScript, presenceWriteScript, noteWriteScript, noteSelectionWriteScript, notesPollingScript)
+		`, runID, runID, primary.EventCount, reportPath, collaborationControlsHTML, string(primaryData), string(allData), string(graphData), string(sessionData), string(sessionListData), string(selectionData), string(reportExecutionData), string(providerUsageSummaryData), string(reportSelectionData), string(collaborationData), string(collaborationPresenceData), string(collaborationNotesData), string(collaborationSelectionData), string(collaborationNoteSelectionData), allowReportSelectionWrites, allowSessionSelectionWrites, allowCollaborationSelectionWrites, allowCollaborationPresenceWrites, allowCollaborationNoteWrites, allowCollaborationNoteSelectionWrites, enableCollaborationStream, sessionSelectionPollIntervalMS, collaborationSelectionPollIntervalMS, collaborationPresencePollIntervalMS, collaborationNotesPollIntervalMS, collaborationNoteSelectionPollIntervalMS, sessionSelectionPollIntervalMS, collaborationSelectionPollIntervalMS, collaborationPresencePollIntervalMS, collaborationNotesPollIntervalMS, collaborationNoteSelectionPollIntervalMS, sessionSelectionPollingScript, collaborationStreamScript, selectionPollingScript, noteSelectionPollingScript, sessionSelectionWriteScript, reportSelectionWriteScript, selectionWriteScript, presencePollingScript, presenceWriteScript, noteWriteScript, noteSelectionWriteScript, notesPollingScript)
 	return err
 }
 
@@ -5392,14 +5455,15 @@ func replayWorkbenchSessionFromExports(exports []replayExport) replayWorkbenchSe
 		RunIDs:        runIDs,
 		Filters:       map[string]string{},
 		Endpoints: map[string]string{
-			"html":            "/",
-			"replay":          "/api/replay",
-			"replays":         "/api/replays",
-			"sessions":        "/api/sessions",
-			"graph":           "/api/graph",
-			"graphs":          "/api/graphs",
-			"graph_ndjson":    "/api/graph.ndjson",
-			"timeline_ndjson": "/api/timeline.ndjson",
+			"html":                   "/",
+			"replay":                 "/api/replay",
+			"replays":                "/api/replays",
+			"sessions":               "/api/sessions",
+			"provider_usage_summary": "/api/provider-usage-summary",
+			"graph":                  "/api/graph",
+			"graphs":                 "/api/graphs",
+			"graph_ndjson":           "/api/graph.ndjson",
+			"timeline_ndjson":        "/api/timeline.ndjson",
 		},
 	}
 }

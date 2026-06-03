@@ -511,11 +511,12 @@ func TestNewTUIModelForWorkspaceShowsReplayWorkbenchSessionArtifacts(t *testing.
 	for _, want := range []string{
 		"replay workbench sessions: total=1 saved=1",
 		"replay workbench session artifact: status=saved mode=metadata-only primary=" + primary.RunID + " selected=" + comparison.RunID,
-		"runs=2 filters=3 endpoints=8 created_by=operator",
+		"runs=2 filters=3 endpoints=9 created_by=operator",
 		"decision=accepted reviewer=operator",
 		"replay workbench session reason: saved comparison focus",
 		"replay workbench session filter: edge=edge-1",
 		"replay workbench session endpoint: html=/?edge=edge-1&lane=toolchain&q=needle&run=" + comparison.RunID,
+		"replay workbench session endpoint: provider_usage_summary=/api/provider-usage-summary",
 	} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("expected TUI replay workbench session row %q:\n%s", want, view)
@@ -540,7 +541,7 @@ func TestNewTUIModelForWorkspaceShowsReplayWorkbenchSessionArtifacts(t *testing.
 		"selected run: " + comparison.RunID,
 		"run ids: 2",
 		"filters: 3",
-		"endpoints: 8",
+		"endpoints: 9",
 		"created by: operator",
 		"reason: saved comparison focus",
 		"decision: accepted",
@@ -1407,7 +1408,7 @@ func TestNewTUIModelForWorkspaceShowsReplayWorkbenchSessionSelection(t *testing.
 	}
 
 	model := NewTUIModelForWorkspace(root).SelectRuntimeTab(tui.RuntimeTabTimelineLanes)
-	resized, cmd := model.Update(tea.WindowSizeMsg{Width: 820, Height: 46})
+	resized, cmd := model.Update(tea.WindowSizeMsg{Width: 820, Height: 58})
 	if cmd != nil {
 		t.Fatalf("expected resize update to be synchronous")
 	}
@@ -1428,7 +1429,7 @@ func TestNewTUIModelForWorkspaceShowsReplayWorkbenchSessionSelection(t *testing.
 
 	model = selectRuntimeRowContaining(t, model, "> replay workbench session selection:")
 	model = model.ShowRuntimeActionDetails()
-	resized, cmd = model.Update(tea.WindowSizeMsg{Width: 820, Height: 46})
+	resized, cmd = model.Update(tea.WindowSizeMsg{Width: 820, Height: 58})
 	if cmd != nil {
 		t.Fatalf("expected runtime action details resize to be synchronous")
 	}

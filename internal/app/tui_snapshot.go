@@ -1286,7 +1286,7 @@ func replayWorkbenchSessionRuntimeRowsWithSelection(sessions []ReplayWorkbenchSe
 				rows = append(rows, fmt.Sprintf("replay workbench session filter: %s=%s", key, value))
 			}
 		}
-		for _, key := range []string{"html", "replay", "replays", "sessions", "graph", "graphs", "graph_ndjson", "timeline_ndjson"} {
+		for _, key := range []string{"html", "replay", "replays", "sessions", "provider_usage_summary", "graph", "graphs", "graph_ndjson", "timeline_ndjson"} {
 			if value := strings.TrimSpace(session.Endpoints[key]); value != "" {
 				rows = append(rows, fmt.Sprintf("replay workbench session endpoint: %s=%s", key, value))
 			}

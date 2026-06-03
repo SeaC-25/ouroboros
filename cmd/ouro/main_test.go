@@ -2203,9 +2203,22 @@ func TestReplayWorkbenchCommandServesHTMLAndReplayJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run workspace: %v", err)
 	}
+	if _, err := app.RecordProviderGenerationUsage(root, app.ProviderGenerationResult{
+		ProviderName: "local-openai",
+		Model:        "gpt-cli",
+		InputTokens:  40,
+		OutputTokens: 10,
+		TotalTokens:  50,
+	}, app.ProviderUsageRecordOptions{Now: time.Date(2026, 6, 4, 14, 0, 0, 0, time.UTC)}); err != nil {
+		t.Fatalf("record provider usage for workbench: %v", err)
+	}
 	before, err := app.ReplayWorkspace(context.Background(), root, run.RunID)
 	if err != nil {
 		t.Fatalf("replay before workbench: %v", err)
+	}
+	beforeUsage, err := app.ListProviderUsageRecords(root)
+	if err != nil {
+		t.Fatalf("list provider usage before workbench: %v", err)
 	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -2221,7 +2234,7 @@ func TestReplayWorkbenchCommandServesHTMLAndReplayJSON(t *testing.T) {
 	cmd.SetArgs([]string{
 		"replay-workbench", root, run.RunID,
 		"--listen", addr,
-		"--max-requests", "2",
+		"--max-requests", "3",
 	})
 	done := make(chan error, 1)
 	go func() {
@@ -2258,7 +2271,24 @@ func TestReplayWorkbenchCommandServesHTMLAndReplayJSON(t *testing.T) {
 		t.Fatalf("unexpected replay workbench payload: %#v", replayPayload)
 	}
 
-	response, err := client.Get("http://" + addr + "/")
+	response, err := client.Get("http://" + addr + "/api/provider-usage-summary")
+	if err != nil {
+		t.Fatalf("get replay workbench provider usage summary: %v", err)
+	}
+	var usageSummary app.ProviderUsageSummary
+	if err := json.NewDecoder(response.Body).Decode(&usageSummary); err != nil {
+		_ = response.Body.Close()
+		t.Fatalf("decode replay workbench provider usage summary: %v", err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("expected provider usage summary status 200, got %d", response.StatusCode)
+	}
+	if usageSummary.RecordCount != 1 || usageSummary.TotalTokens != 50 || strings.Join(usageSummary.Providers, "|") != "local-openai" {
+		t.Fatalf("unexpected replay workbench provider usage summary: %#v", usageSummary)
+	}
+
+	response, err = client.Get("http://" + addr + "/")
 	if err != nil {
 		t.Fatalf("get replay workbench html: %v", err)
 	}
@@ -2297,9 +2327,16 @@ func TestReplayWorkbenchCommandServesHTMLAndReplayJSON(t *testing.T) {
 	if after.EventCount != before.EventCount {
 		t.Fatalf("replay workbench must not mutate replay events, before=%d after=%d", before.EventCount, after.EventCount)
 	}
+	afterUsage, err := app.ListProviderUsageRecords(root)
+	if err != nil {
+		t.Fatalf("list provider usage after workbench: %v", err)
+	}
+	if len(afterUsage) != len(beforeUsage) {
+		t.Fatalf("replay workbench provider usage summary must not create usage records, before=%d after=%d", len(beforeUsage), len(afterUsage))
+	}
 	for _, want := range []string{
 		"replay-workbench: listen=http://" + addr,
-		"replay-workbench: accepted=2",
+		"replay-workbench: accepted=3",
 	} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("expected replay workbench output to contain %q, got %q", want, out.String())
@@ -4026,6 +4063,161 @@ func TestReplayWorkbenchHandlerServesReportSelectionReadOnly(t *testing.T) {
 	}
 }
 
+func TestReplayWorkbenchHandlerServesProviderUsageSummaryReadOnly(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace with space")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	run, err := app.RunWorkspace(context.Background(), root)
+	if err != nil {
+		t.Fatalf("run workspace: %v", err)
+	}
+	maxCost := 0.01
+	if _, err := app.RecordProviderGenerationUsage(root, app.ProviderGenerationResult{
+		ProviderName:           "local openai",
+		Model:                  "gpt a",
+		Text:                   "do not persist generated text Authorization Bearer secret-value",
+		InputTokens:            1000,
+		OutputTokens:           500,
+		TotalTokens:            1500,
+		EstimatedCostUSD:       0.0075,
+		EstimatedCostAvailable: true,
+	}, app.ProviderUsageRecordOptions{
+		Now:                 time.Date(2026, 6, 4, 12, 30, 0, 0, time.UTC),
+		MaxEstimatedCostUSD: &maxCost,
+	}); err != nil {
+		t.Fatalf("record first usage: %v", err)
+	}
+	if _, err := app.RecordProviderGenerationUsage(root, app.ProviderGenerationResult{
+		ProviderName: "pipe|provider",
+		Model:        "gpt|b",
+		Text:         "provider body should not appear in hosted replay workbench",
+		InputTokens:  200,
+		OutputTokens: 300,
+		TotalTokens:  500,
+	}, app.ProviderUsageRecordOptions{Now: time.Date(2026, 6, 4, 13, 0, 0, 0, time.UTC)}); err != nil {
+		t.Fatalf("record second usage: %v", err)
+	}
+	before, err := app.ReplayWorkspace(context.Background(), root, run.RunID)
+	if err != nil {
+		t.Fatalf("replay before hosted provider usage summary: %v", err)
+	}
+	beforeRecords, err := app.ListProviderUsageRecords(root)
+	if err != nil {
+		t.Fatalf("list provider usage before hosted summary: %v", err)
+	}
+	handler := newReplayWorkbenchHandlerWithOptions(replayWorkbenchHandlerOptions{WorkspaceRoot: root}, before)
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/provider-usage-summary", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected provider usage summary API status 200, got %d body=%q", recorder.Code, recorder.Body.String())
+	}
+	apiBody := recorder.Body.String()
+	var summary struct {
+		RecordCount              int      `json:"record_count"`
+		Providers                []string `json:"providers"`
+		Models                   []string `json:"models"`
+		InputTokens              int      `json:"input_tokens"`
+		OutputTokens             int      `json:"output_tokens"`
+		TotalTokens              int      `json:"total_tokens"`
+		EstimatedCostUSD         float64  `json:"estimated_cost_usd"`
+		EstimatedCostRecordCount int      `json:"estimated_cost_records"`
+		BudgetEnforcedCount      int      `json:"budget_enforced_records"`
+		BudgetWithinLimitCount   int      `json:"budget_within_limit_records"`
+		FirstCreatedAt           string   `json:"first_created_at"`
+		LastCreatedAt            string   `json:"last_created_at"`
+	}
+	if err := json.NewDecoder(strings.NewReader(apiBody)).Decode(&summary); err != nil {
+		t.Fatalf("decode provider usage summary API: %v body=%q", err, apiBody)
+	}
+	providersMatch := len(summary.Providers) == 2 &&
+		summary.Providers[0] == "local openai" &&
+		summary.Providers[1] == "pipe|provider"
+	modelsMatch := len(summary.Models) == 2 &&
+		summary.Models[0] == "gpt a" &&
+		summary.Models[1] == "gpt|b"
+	if summary.RecordCount != 2 ||
+		!providersMatch ||
+		!modelsMatch ||
+		summary.InputTokens != 1200 ||
+		summary.OutputTokens != 800 ||
+		summary.TotalTokens != 2000 ||
+		fmt.Sprintf("%.6f", summary.EstimatedCostUSD) != "0.007500" ||
+		summary.EstimatedCostRecordCount != 1 ||
+		summary.BudgetEnforcedCount != 1 ||
+		summary.BudgetWithinLimitCount != 1 ||
+		summary.FirstCreatedAt != "2026-06-04T12:30:00Z" ||
+		summary.LastCreatedAt != "2026-06-04T13:00:00Z" {
+		t.Fatalf("unexpected provider usage summary payload: %#v body=%q", summary, apiBody)
+	}
+	for _, forbidden := range []string{
+		"do not persist generated text",
+		"provider body should not appear",
+		"Authorization",
+		"Bearer",
+		"secret-value",
+	} {
+		if strings.Contains(apiBody, forbidden) {
+			t.Fatalf("provider usage summary API leaked %q in %q", forbidden, apiBody)
+		}
+	}
+
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected workbench HTML status 200, got %d body=%q", recorder.Code, recorder.Body.String())
+	}
+	htmlBody := recorder.Body.String()
+	for _, want := range []string{
+		"window.OURO_REPLAY_PROVIDER_USAGE_SUMMARY",
+		"id=\"ouro-provider-usage-summary\"",
+		"renderReplayWorkbenchProviderUsageSummary",
+		`"record_count":2`,
+		`"providers":["local openai","pipe|provider"]`,
+		`"models":["gpt a","gpt|b"]`,
+	} {
+		if !strings.Contains(htmlBody, want) {
+			t.Fatalf("expected hosted provider usage summary HTML to contain %q, got %q", want, htmlBody)
+		}
+	}
+	if strings.Contains(htmlBody, `.join("|")`) {
+		t.Fatalf("provider usage summary HTML must not flatten provider/model arrays with pipe delimiters, got %q", htmlBody)
+	}
+	for _, forbidden := range []string{
+		"do not persist generated text",
+		"provider body should not appear",
+		"Authorization",
+		"Bearer",
+		"secret-value",
+	} {
+		if strings.Contains(htmlBody, forbidden) {
+			t.Fatalf("provider usage summary HTML leaked %q in %q", forbidden, htmlBody)
+		}
+	}
+
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/api/provider-usage-summary", strings.NewReader(`{}`)))
+	if recorder.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected provider usage summary endpoint to remain read-only, got %d body=%q", recorder.Code, recorder.Body.String())
+	}
+
+	after, err := app.ReplayWorkspace(context.Background(), root, run.RunID)
+	if err != nil {
+		t.Fatalf("replay after hosted provider usage summary: %v", err)
+	}
+	if after.EventCount != before.EventCount {
+		t.Fatalf("hosted provider usage summary must not mutate replay events, before=%d after=%d", before.EventCount, after.EventCount)
+	}
+	afterRecords, err := app.ListProviderUsageRecords(root)
+	if err != nil {
+		t.Fatalf("list provider usage after hosted summary: %v", err)
+	}
+	if len(afterRecords) != len(beforeRecords) {
+		t.Fatalf("hosted provider usage summary must not create usage records, before=%d after=%d", len(beforeRecords), len(afterRecords))
+	}
+}
+
 func TestReplayWorkbenchHandlerWritesReportSelectionOnlyWithExplicitGate(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
 	execution := createReportProjectionDispatchExecutionForCLI(t, root)
@@ -4174,6 +4366,7 @@ func TestReplayWorkbenchHandlerRejectsPostOnAllReadOnlyRoutesByDefault(t *testin
 		"/api/session",
 		"/api/sessions",
 		"/api/session-selection",
+		"/api/provider-usage-summary",
 		"/api/replay",
 		"/api/replays",
 		"/api/graph",
@@ -6947,7 +7140,8 @@ func TestReplayWorkbenchSessionCommandWritesAndListsMetadataOnlyArtifacts(t *tes
 		t.Fatalf("execute replay-workbench-session dry run: %v", err)
 	}
 	if !strings.Contains(dryRunOut.String(), "replay-workbench-session: status=dry-run mode=metadata-only primary="+primary.RunID+" selected="+comparison.RunID) ||
-		!strings.Contains(dryRunOut.String(), "endpoint: graph=/api/graph?lane=toolchain&node=fact-target&q=needle") {
+		!strings.Contains(dryRunOut.String(), "endpoint: graph=/api/graph?lane=toolchain&node=fact-target&q=needle") ||
+		!strings.Contains(dryRunOut.String(), "endpoint: provider_usage_summary=/api/provider-usage-summary") {
 		t.Fatalf("expected dry-run session output, got %q", dryRunOut.String())
 	}
 	if sessions, err := app.ListReplayWorkbenchSessions(root); err != nil {
@@ -6985,6 +7179,9 @@ func TestReplayWorkbenchSessionCommandWritesAndListsMetadataOnlyArtifacts(t *tes
 	if len(sessions) != 1 || sessions[0].SelectedRunID != comparison.RunID || sessions[0].Filters["edge"] != "edge-1" {
 		t.Fatalf("unexpected persisted sessions: %#v", sessions)
 	}
+	if sessions[0].Endpoints["provider_usage_summary"] != "/api/provider-usage-summary" {
+		t.Fatalf("expected persisted session provider usage endpoint, got %#v", sessions[0].Endpoints)
+	}
 
 	var listOut bytes.Buffer
 	listCmd := newRootCommand(&listOut, new(bytes.Buffer))
@@ -7007,6 +7204,7 @@ func TestReplayWorkbenchSessionCommandWritesAndListsMetadataOnlyArtifacts(t *tes
 		"replay-workbench-session: status=saved mode=metadata-only",
 		"filter: edge=edge-1",
 		"endpoint: html=/?edge=edge-1&lane=toolchain&q=needle&run=" + comparison.RunID,
+		"endpoint: provider_usage_summary=/api/provider-usage-summary",
 	} {
 		if !strings.Contains(inspectOut.String(), want) {
 			t.Fatalf("expected inspect output to contain %q, got %q", want, inspectOut.String())
@@ -8257,7 +8455,7 @@ func TestReplayWorkbenchSessionSelectionCommandsSelectReadAndClearMetadataOnly(t
 	}
 	for _, want := range []string{
 		"replay-workbench-session-selection: status=current mode=metadata-only session=" + candidate.Path,
-		"primary=" + run.RunID + " selected=" + run.RunID + " runs=1 filters=1 endpoints=8 superseded=1 selected_by=alice selected_at=2026-06-01T02:42:00Z reason=current investigation focus",
+		"primary=" + run.RunID + " selected=" + run.RunID + " runs=1 filters=1 endpoints=9 superseded=1 selected_by=alice selected_at=2026-06-01T02:42:00Z reason=current investigation focus",
 		"replay-session-superseded: " + base.Path,
 	} {
 		if !strings.Contains(selectOut.String(), want) {

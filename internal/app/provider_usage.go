@@ -37,18 +37,18 @@ type ProviderUsageRecord struct {
 }
 
 type ProviderUsageSummary struct {
-	RecordCount              int
-	Providers                []string
-	Models                   []string
-	InputTokens              int
-	OutputTokens             int
-	TotalTokens              int
-	EstimatedCostUSD         float64
-	EstimatedCostRecordCount int
-	BudgetEnforcedCount      int
-	BudgetWithinLimitCount   int
-	FirstCreatedAt           string
-	LastCreatedAt            string
+	RecordCount              int      `json:"record_count"`
+	Providers                []string `json:"providers"`
+	Models                   []string `json:"models"`
+	InputTokens              int      `json:"input_tokens"`
+	OutputTokens             int      `json:"output_tokens"`
+	TotalTokens              int      `json:"total_tokens"`
+	EstimatedCostUSD         float64  `json:"estimated_cost_usd"`
+	EstimatedCostRecordCount int      `json:"estimated_cost_records"`
+	BudgetEnforcedCount      int      `json:"budget_enforced_records"`
+	BudgetWithinLimitCount   int      `json:"budget_within_limit_records"`
+	FirstCreatedAt           string   `json:"first_created_at"`
+	LastCreatedAt            string   `json:"last_created_at"`
 }
 
 type ProviderGenerationBudgetOptions struct {
