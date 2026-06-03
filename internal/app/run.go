@@ -1773,6 +1773,10 @@ func managedBinaryTargetKinds(binary string, operation string, node compiler.Pla
 		if binary == "katana" {
 			return []string{string(domain.TargetURL)}
 		}
+	case "archive_discovery":
+		if binary == "gau" || binary == "waybackurls" {
+			return []string{string(domain.TargetDomain)}
+		}
 	case "path_fuzz":
 		if binary == "ffuf" {
 			return []string{string(domain.TargetURL)}
@@ -1849,6 +1853,23 @@ func managedBinaryCommandFor(request ToolExecutionRequest, binary string, operat
 				return nil, false, nil
 			}
 			return []string{binary, "-u", target.Value, "-j", "-silent", "-or", "-ob", "-duc"}, true, nil
+		}
+	case "archive_discovery":
+		if binary == "gau" || binary == "waybackurls" {
+			if target.Kind != string(domain.TargetDomain) {
+				return nil, false, nil
+			}
+			if !targetPolicyDisabled(request.ScopeTargetPolicy) && scopeTargetExcludedForRequest(request, target) {
+				return nil, true, fmt.Errorf("scope target %s is excluded for capability %s", target.Value, request.Node.Capability)
+			}
+			domainTarget, ok := normalizeSubfinderDNSName(target.Value)
+			if !ok {
+				return nil, true, fmt.Errorf("%s command requires valid domain scope target", binary)
+			}
+			if binary == "gau" {
+				return []string{binary, domainTarget, "--subs", "--providers", "wayback,otx,commoncrawl"}, true, nil
+			}
+			return []string{binary, domainTarget}, true, nil
 		}
 	case "path_fuzz":
 		if binary == "ffuf" {

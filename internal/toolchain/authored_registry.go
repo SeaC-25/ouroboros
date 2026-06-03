@@ -71,8 +71,8 @@ func DefaultAuthoredToolRegistry() AuthoredToolRegistry {
 				},
 				{
 					ID:               "archive_discovery",
-					Description:      "Discover historical URLs for an in-scope web surface.",
-					RequiredInputs:   []AuthoredToolInputContract{{Name: "target_url", Types: []string{"url"}}},
+					Description:      "Discover historical URLs for an authorized root domain.",
+					RequiredInputs:   []AuthoredToolInputContract{{Name: "root_domain", Types: []string{"domain"}}},
 					SupportedParsers: []string{"url_list_text", "route_observation_parser", "generic_jsonl"},
 					DependencyNames:  []string{"gau", "waybackurls"},
 				},
