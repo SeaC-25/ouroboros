@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/netip"
 	"net/url"
 	"os"
@@ -1541,10 +1542,53 @@ func (offlineProviderAdapter) Prepare(ctx context.Context, provider Provider) (P
 	}, nil
 }
 
+type openAICompatibleProviderAdapter struct{}
+
+func (openAICompatibleProviderAdapter) Prepare(ctx context.Context, provider Provider) (ProviderRuntime, error) {
+	if err := ctx.Err(); err != nil {
+		return ProviderRuntime{}, err
+	}
+	baseURL, err := parseOpenAICompatibleProviderBaseURL(provider.BaseURL)
+	if err != nil {
+		return ProviderRuntime{}, fmt.Errorf("provider %s base_url is invalid: %w", provider.Name, err)
+	}
+	endpoint := strings.TrimRight(baseURL.String(), "/") + "/models/" + url.PathEscape(strings.TrimSpace(provider.Model))
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return ProviderRuntime{}, fmt.Errorf("provider %s preflight request: %w", provider.Name, err)
+	}
+	if envName := strings.TrimSpace(provider.APIKeyEnv); envName != "" {
+		apiKey, ok := os.LookupEnv(envName)
+		if !ok || strings.TrimSpace(apiKey) == "" {
+			return ProviderRuntime{}, fmt.Errorf("provider %s api key env %s is required", provider.Name, envName)
+		}
+		request.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	timeout := 5 * time.Second
+	if provider.TimeoutMS > 0 {
+		timeout = time.Duration(provider.TimeoutMS) * time.Millisecond
+	}
+	client := &http.Client{Timeout: timeout}
+	response, err := client.Do(request)
+	if err != nil {
+		return ProviderRuntime{}, fmt.Errorf("provider %s preflight failed: %w", provider.Name, err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return ProviderRuntime{}, fmt.Errorf("provider %s preflight failed with status %d", provider.Name, response.StatusCode)
+	}
+	return ProviderRuntime{
+		ProviderName: provider.Name,
+		Model:        provider.Model,
+	}, nil
+}
+
 func providerAdapterFor(provider Provider) (ProviderAdapter, error) {
 	switch strings.TrimSpace(provider.Type) {
 	case "offline":
 		return offlineProviderAdapter{}, nil
+	case providerTypeOpenAICompatible:
+		return openAICompatibleProviderAdapter{}, nil
 	default:
 		return nil, fmt.Errorf("provider adapter is not available for type %s", provider.Type)
 	}

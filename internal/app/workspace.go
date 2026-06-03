@@ -3,6 +3,7 @@ package app
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -65,11 +66,16 @@ type ProviderConfig struct {
 	Providers []Provider `yaml:"providers"`
 }
 
+const providerTypeOpenAICompatible = "openai_compatible"
+
 type Provider struct {
-	Name    string `yaml:"name"`
-	Type    string `yaml:"type"`
-	Model   string `yaml:"model"`
-	Enabled bool   `yaml:"enabled"`
+	Name      string `yaml:"name"`
+	Type      string `yaml:"type"`
+	Model     string `yaml:"model"`
+	BaseURL   string `yaml:"base_url,omitempty"`
+	APIKeyEnv string `yaml:"api_key_env,omitempty"`
+	TimeoutMS int    `yaml:"timeout_ms,omitempty"`
+	Enabled   bool   `yaml:"enabled"`
 }
 
 type AuthorizationConfig struct {
@@ -452,6 +458,14 @@ func ValidateProviderConfig(config ProviderConfig) error {
 		if strings.TrimSpace(provider.Model) == "" {
 			return fmt.Errorf("provider %s model is required", provider.Name)
 		}
+		if strings.TrimSpace(provider.Type) == providerTypeOpenAICompatible {
+			if _, err := parseOpenAICompatibleProviderBaseURL(provider.BaseURL); err != nil {
+				return fmt.Errorf("provider %s base_url is invalid: %w", provider.Name, err)
+			}
+			if provider.TimeoutMS < 0 {
+				return fmt.Errorf("provider %s timeout_ms must be non-negative", provider.Name)
+			}
+		}
 		if provider.Enabled {
 			enabled++
 		}
@@ -460,6 +474,29 @@ func ValidateProviderConfig(config ProviderConfig) error {
 		return errors.New("at least one provider must be enabled")
 	}
 	return nil
+}
+
+func parseOpenAICompatibleProviderBaseURL(raw string) (*url.URL, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil, errors.New("base_url is required")
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return nil, err
+	}
+	if parsed.Scheme == "" || parsed.Host == "" {
+		return nil, errors.New("base_url must be an absolute URL")
+	}
+	switch parsed.Scheme {
+	case "http", "https":
+	default:
+		return nil, fmt.Errorf("base_url scheme must be http or https, got %s", parsed.Scheme)
+	}
+	if parsed.RawQuery != "" || parsed.Fragment != "" {
+		return nil, errors.New("base_url must not include query or fragment")
+	}
+	return parsed, nil
 }
 
 func EnabledProvider(config ProviderConfig) (Provider, bool) {
