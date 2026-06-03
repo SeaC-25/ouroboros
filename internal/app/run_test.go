@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -10541,6 +10543,153 @@ providers:
 	}
 	if !strings.Contains(err.Error(), "provider adapter") {
 		t.Fatalf("expected provider adapter error, got %v", err)
+	}
+}
+
+func TestRunWorkspacePreflightsOpenAICompatibleProvider(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	called := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		if r.Method != http.MethodGet {
+			t.Fatalf("expected GET preflight, got %s", r.Method)
+		}
+		if r.URL.Path != "/v1/models/gpt-test" {
+			t.Fatalf("expected escaped model endpoint, got %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer secret-value" {
+			t.Fatalf("expected bearer header, got %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"gpt-test"}`))
+	}))
+	defer server.Close()
+	t.Setenv("OURO_TEST_PROVIDER_KEY", "secret-value")
+	providers := fmt.Sprintf(`version: 1
+providers:
+  - name: local-openai
+    type: openai_compatible
+    model: gpt-test
+    base_url: %s/v1
+    api_key_env: OURO_TEST_PROVIDER_KEY
+    timeout_ms: 5000
+    enabled: true
+`, server.URL)
+	if err := os.WriteFile(filepath.Join(root, "providers.yaml"), []byte(providers), 0o644); err != nil {
+		t.Fatalf("write providers: %v", err)
+	}
+
+	result, err := RunWorkspaceWithOptions(context.Background(), root, RunOptions{DeferReportProjection: true})
+	if err != nil {
+		t.Fatalf("run workspace: %v", err)
+	}
+	if !called {
+		t.Fatalf("expected provider preflight request")
+	}
+	if !strings.Contains(result.StatusLine, "model:gpt-test") {
+		t.Fatalf("expected configured model in status line, got %q", result.StatusLine)
+	}
+}
+
+func TestRunWorkspaceRejectsOpenAICompatibleProviderMissingAPIKeyEnv(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	called := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	providers := fmt.Sprintf(`version: 1
+providers:
+  - name: local-openai
+    type: openai_compatible
+    model: gpt-test
+    base_url: %s
+    api_key_env: OURO_MISSING_PROVIDER_KEY
+    enabled: true
+`, server.URL)
+	if err := os.WriteFile(filepath.Join(root, "providers.yaml"), []byte(providers), 0o644); err != nil {
+		t.Fatalf("write providers: %v", err)
+	}
+
+	_, err := RunWorkspace(context.Background(), root)
+	if err == nil {
+		t.Fatalf("expected missing api key env to fail")
+	}
+	if called {
+		t.Fatalf("expected missing api key env to fail before HTTP preflight")
+	}
+	if !strings.Contains(err.Error(), "OURO_MISSING_PROVIDER_KEY") || !strings.Contains(err.Error(), "local-openai") {
+		t.Fatalf("expected provider/env error, got %v", err)
+	}
+}
+
+func TestRunWorkspaceRejectsOpenAICompatibleProviderNon2xxPreflight(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "secret-value should not leak", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	t.Setenv("OURO_TEST_PROVIDER_KEY", "secret-value")
+	providers := fmt.Sprintf(`version: 1
+providers:
+  - name: local-openai
+    type: openai_compatible
+    model: gpt-test
+    base_url: %s
+    api_key_env: OURO_TEST_PROVIDER_KEY
+    enabled: true
+`, server.URL)
+	if err := os.WriteFile(filepath.Join(root, "providers.yaml"), []byte(providers), 0o644); err != nil {
+		t.Fatalf("write providers: %v", err)
+	}
+
+	_, err := RunWorkspace(context.Background(), root)
+	if err == nil {
+		t.Fatalf("expected non-2xx provider preflight to fail")
+	}
+	if !strings.Contains(err.Error(), "local-openai") || !strings.Contains(err.Error(), "status 503") {
+		t.Fatalf("expected provider/status error, got %v", err)
+	}
+	for _, secret := range []string{"secret-value", "should not leak"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("provider error leaked response or secret material: %v", err)
+		}
+	}
+}
+
+func TestRunWorkspaceRejectsOpenAICompatibleProviderInvalidBaseURL(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	providers := `version: 1
+providers:
+  - name: local-openai
+    type: openai_compatible
+    model: gpt-test
+    base_url: /not-absolute
+    enabled: true
+`
+	if err := os.WriteFile(filepath.Join(root, "providers.yaml"), []byte(providers), 0o644); err != nil {
+		t.Fatalf("write providers: %v", err)
+	}
+
+	_, err := RunWorkspace(context.Background(), root)
+	if err == nil {
+		t.Fatalf("expected invalid base_url to fail")
+	}
+	if !strings.Contains(err.Error(), "base_url") || !strings.Contains(err.Error(), "local-openai") {
+		t.Fatalf("expected provider base_url error, got %v", err)
 	}
 }
 

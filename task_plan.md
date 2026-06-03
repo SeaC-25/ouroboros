@@ -1,7 +1,7 @@
 # Ouroboros Architecture Analysis Plan
 
 ## Goal
-Produce a phased Chinese architecture design document for Ouroboros by dissecting the three pentest-related projects under `model/`.
+Continue the Ouroboros TUI-first pentest IDE implementation by using the local reference archives, milestone records, and current Go workspace as planning evidence.
 
 ## Current Feature Work
 | Workstream | Status | Notes |
@@ -16,6 +16,7 @@ Produce a phased Chinese architecture design document for Ouroboros by dissectin
 | Sqlmap managed argv and parser evidence promotion | complete | Added explicit-URL `sqlmap/injection_test` detection-only argv generation through a workspace-confined output directory plus `sqlmap_json` SQL injection finding promotion with scoped URL and raw payload/output redaction. |
 | Sqlmap managed log artifact wrapper | complete | Added real sqlmap `log` fallback under the managed output directory, converting only parameter/type/title/DBMS lines into the existing `sqlmap_json` transcript while rejecting symlinked or ambiguous logs. |
 | Container-mode managed execution | complete | Allowed catalog tool-level managed argv builders to run through existing container isolation without resolving host workspace binaries, leaving the configured container image responsible for inner tools while preserving scope and audit controls. |
+| OpenAI-compatible provider adapter | complete | Added an `openai_compatible` provider readiness preflight with environment-based bearer credentials, sanitized errors, and provider/model replay usage while leaving generation calls as a future slice. |
 
 ## Phases
 | Phase | Status | Notes |

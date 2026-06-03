@@ -77,6 +77,35 @@ GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro toolchain managed-install ./
 
 `make doctor` creates a temporary workspace, initializes it, and runs `ouro doctor` against it. `make doctor-strict` runs the same initialized workspace through `ouro doctor --require-safety-authorization`, which is the CI-oriented safety-bypass gate.
 
+## Provider Configuration
+
+Fresh workspaces default to an `offline` provider:
+
+```yaml
+version: 1
+providers:
+  - name: offline
+    type: offline
+    model: offline-model
+    enabled: true
+```
+
+`openai_compatible` providers add a real readiness preflight before run events are written:
+
+```yaml
+version: 1
+providers:
+  - name: local-openai-compatible
+    type: openai_compatible
+    model: gpt-4.1
+    base_url: http://127.0.0.1:8000/v1
+    api_key_env: OURO_OPENAI_COMPATIBLE_API_KEY
+    timeout_ms: 5000
+    enabled: true
+```
+
+The preflight performs `GET <base_url>/models/<model>` and accepts only 2xx responses. When `api_key_env` is set, the environment variable must exist and is sent as a bearer token; the token value is not persisted in provider config, run events, or provider errors. `base_url` must be an absolute `http` or `https` URL without query or fragment. `timeout_ms` defaults to 5000 when omitted. This path validates provider reachability and records the configured provider/model in replay model usage, but it does not yet call model generation APIs or implement provider failover.
+
 ## Run Event Streaming
 
 `internal/app.RunWorkspaceWithOptions` accepts `RunOptions` with event and snapshot observers. Observers are called only after the event has been appended to SQLite, so they receive durable event IDs and timestamps. Snapshot observers receive replay snapshots rebuilt from the persisted events seen so far.
