@@ -6020,6 +6020,83 @@ touch `+marker+`
 	}
 }
 
+func TestRunWorkspacePromotesURLListTextToEvidenceSurface(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	scope := `version: 1
+scope:
+  target_policy: enforce
+  targets:
+    - kind: domain
+      value: example.com
+  exclusions: []
+execution:
+  isolation: process
+  tool_concurrency: 1
+`
+	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
+		t.Fatalf("write domain scope: %v", err)
+	}
+	writeManagedBundleFixture(t, root, "gau", "binary", "2.2.4", `#!/usr/bin/env sh
+cat <<'URLS'
+https://www.example.com/login?token=secret-token#frag
+https://evil.example.net/admin
+URLS
+`)
+	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "gau", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed gau bundle: %v", err)
+	}
+
+	result, err := RunWorkspaceWithOptions(ctx, root, RunOptions{Action: compiler.ActionEnumeratePaths, DeferReportProjection: true})
+	if err != nil {
+		t.Fatalf("run workspace with url list parser: %v", err)
+	}
+	store, err := eventlog.OpenSQLite(filepath.Join(root, "replay", "events.db"))
+	if err != nil {
+		t.Fatalf("open event log: %v", err)
+	}
+	defer store.Close()
+	events, err := store.Replay(ctx, result.RunID)
+	if err != nil {
+		t.Fatalf("replay events: %v", err)
+	}
+	snapshot, err := eventlog.BuildReplaySnapshot(events)
+	if err != nil {
+		t.Fatalf("build replay snapshot: %v", err)
+	}
+
+	var surfaceID string
+	for _, fact := range snapshot.Blackboard.Facts {
+		if fact.Source != "parser.url_list_text" {
+			continue
+		}
+		surfaceID = fact.ID
+		if fact.Kind != "surface" {
+			t.Fatalf("expected URL list parser fact kind surface, got %#v", fact)
+		}
+		for _, want := range []string{"archive", "https://www.example.com/login", "domain=example.com"} {
+			if !strings.Contains(fact.Statement, want) {
+				t.Fatalf("expected URL list surface to contain %q, got %#v", want, fact)
+			}
+		}
+		for _, leaked := range []string{"secret-token", "evil.example.net"} {
+			if strings.Contains(fact.Statement, leaked) {
+				t.Fatalf("URL list surface statement leaked untrusted output %q: %#v", leaked, fact)
+			}
+		}
+		break
+	}
+	if surfaceID == "" {
+		t.Fatalf("expected URL list parser surface fact in replay snapshot, facts=%#v", snapshot.Blackboard.Facts)
+	}
+	if _, ok := snapshot.Evidence.Node(surfaceID); !ok {
+		t.Fatalf("expected URL list parser fact to project into evidence graph")
+	}
+}
+
 func TestNativeManagedRunCommandBuildsDalfoxXSSScanArgvForURLScope(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
 	if err := InitWorkspace(root); err != nil {
@@ -6059,6 +6136,148 @@ func TestNativeManagedRunCommandBuildsDalfoxXSSScanArgvForURLScope(t *testing.T)
 	want := []string{payloadPath, "url", "https://app.example/search?q=hello", "--format", "json", "--silence", "--no-color", "--no-spinner"}
 	if strings.Join(command, "\x00") != strings.Join(want, "\x00") {
 		t.Fatalf("unexpected dalfox argv: got %#v want %#v", command, want)
+	}
+}
+
+func TestNativeManagedRunCommandBuildsArchiveDiscoveryArgvForDomainScope(t *testing.T) {
+	for _, tt := range []struct {
+		toolID  string
+		version string
+		want    []string
+	}{
+		{toolID: "gau", version: "2.2.4", want: []string{"example.com", "--subs", "--providers", "wayback,otx,commoncrawl"}},
+		{toolID: "waybackurls", version: "0.1.0", want: []string{"example.com"}},
+	} {
+		t.Run(tt.toolID, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "workspace")
+			if err := InitWorkspace(root); err != nil {
+				t.Fatalf("init workspace: %v", err)
+			}
+			payloadPath := writeManagedBundleFixture(t, root, tt.toolID, "binary", tt.version, "#!/usr/bin/env sh\nprintf 'archive-url-list\\n'\n")
+			if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", tt.toolID, ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+				t.Fatalf("install managed %s bundle: %v", tt.toolID, err)
+			}
+			request := ToolExecutionRequest{
+				WorkspaceRoot: root,
+				Node: compiler.PlanNode{
+					ID:             tt.toolID + "-archive-domain:01",
+					Capability:     "web.route_enumeration",
+					ManifestName:   "web-api-pack",
+					ToolID:         tt.toolID,
+					AdapterID:      "managed_binary",
+					Operation:      "archive_discovery",
+					ParserID:       "url_list_text",
+					TargetKind:     "domain",
+					DependencyName: tt.toolID,
+					DependencyKind: "binary",
+					Runner:         "native",
+				},
+				ScopeTargets:      []ScopeTarget{{Kind: "domain", Value: "example.com"}},
+				ScopeTargetPolicy: "enforce",
+				IsolationMode:     "process",
+			}
+
+			command, target, ok, err := nativeManagedRunCommandWithTarget(request)
+			if err != nil || !ok {
+				t.Fatalf("expected %s archive discovery command for domain scope, command=%#v target=%#v ok=%v err=%v", tt.toolID, command, target, ok, err)
+			}
+			if target.Kind != "domain" || target.Value != "example.com" {
+				t.Fatalf("expected selected domain target, got %#v", target)
+			}
+			want := append([]string{payloadPath}, tt.want...)
+			if strings.Join(command, "\x00") != strings.Join(want, "\x00") {
+				t.Fatalf("unexpected %s argv: got %#v want %#v", tt.toolID, command, want)
+			}
+		})
+	}
+}
+
+func TestNativeManagedRunCommandKeepsArchiveDiscoveryOfflineForNonDomainScope(t *testing.T) {
+	for _, tt := range []struct {
+		toolID  string
+		version string
+	}{
+		{toolID: "gau", version: "2.2.4"},
+		{toolID: "waybackurls", version: "0.1.0"},
+	} {
+		t.Run(tt.toolID, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "workspace")
+			if err := InitWorkspace(root); err != nil {
+				t.Fatalf("init workspace: %v", err)
+			}
+			writeManagedBundleFixture(t, root, tt.toolID, "binary", tt.version, "#!/usr/bin/env sh\nprintf 'archive-non-domain\\n'\n")
+			if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", tt.toolID, ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+				t.Fatalf("install managed %s bundle: %v", tt.toolID, err)
+			}
+			for _, scopeTarget := range []ScopeTarget{
+				{Kind: "url", Value: "https://example.com"},
+				{Kind: "host", Value: "www.example.com"},
+				{Kind: "cidr", Value: "10.0.0.0/24"},
+			} {
+				t.Run(scopeTarget.Kind, func(t *testing.T) {
+					request := ToolExecutionRequest{
+						WorkspaceRoot: root,
+						Node: compiler.PlanNode{
+							ID:             tt.toolID + "-archive-non-domain:01",
+							Capability:     "web.route_enumeration",
+							ManifestName:   "web-api-pack",
+							ToolID:         tt.toolID,
+							AdapterID:      "managed_binary",
+							Operation:      "archive_discovery",
+							ParserID:       "url_list_text",
+							TargetKind:     "domain",
+							DependencyName: tt.toolID,
+							DependencyKind: "binary",
+							Runner:         "native",
+						},
+						ScopeTargets:      []ScopeTarget{scopeTarget},
+						ScopeTargetPolicy: "enforce",
+						IsolationMode:     "process",
+					}
+
+					command, ok, err := nativeManagedRunCommand(request)
+					if err != nil || ok || len(command) > 0 {
+						t.Fatalf("%s must stay offline for non-domain scope %#v, command=%#v ok=%v err=%v", tt.toolID, scopeTarget, command, ok, err)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestNativeManagedRunCommandRejectsExcludedArchiveDiscoveryDomain(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	writeManagedBundleFixture(t, root, "gau", "binary", "2.2.4", "#!/usr/bin/env sh\nprintf 'archive-excluded\\n'")
+	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "gau", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed gau bundle: %v", err)
+	}
+	request := ToolExecutionRequest{
+		WorkspaceRoot: root,
+		Node: compiler.PlanNode{
+			ID:             "gau-excluded-domain:01",
+			Capability:     "web.route_enumeration",
+			ManifestName:   "web-api-pack",
+			ToolID:         "gau",
+			AdapterID:      "managed_binary",
+			Operation:      "archive_discovery",
+			ParserID:       "url_list_text",
+			TargetKind:     "domain",
+			DependencyName: "gau",
+			DependencyKind: "binary",
+			Runner:         "native",
+		},
+		ScopeTargets:      []ScopeTarget{{Kind: "domain", Value: "example.com"}},
+		ScopeExclusions:   []string{"example.com"},
+		ScopeTargetPolicy: "enforce",
+		IsolationMode:     "process",
+	}
+
+	command, ok, err := nativeManagedRunCommand(request)
+	if err == nil || !strings.Contains(err.Error(), "excluded") || !ok || len(command) > 0 {
+		t.Fatalf("expected excluded archive discovery domain to fail before argv, command=%#v ok=%v err=%v", command, ok, err)
 	}
 }
 

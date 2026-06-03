@@ -68,6 +68,25 @@ func TestBuiltInAppSecToolsDeclareToolLevelContracts(t *testing.T) {
 	}
 }
 
+func TestArchiveDiscoveryToolsUseDomainScopeContracts(t *testing.T) {
+	registry := DefaultAuthoredToolRegistry()
+	operation, ok := registry.AdapterOperation("managed_binary", "archive_discovery")
+	if !ok {
+		t.Fatalf("expected archive_discovery operation to be registered")
+	}
+	if len(operation.RequiredInputs) != 1 || operation.RequiredInputs[0].Name != "root_domain" || !containsTrimmed(operation.RequiredInputs[0].Types, "domain") {
+		t.Fatalf("expected archive_discovery to require root_domain domain input, got %#v", operation.RequiredInputs)
+	}
+
+	byName := builtInToolByNameForTest(t)
+	for _, name := range []string{"gau", "waybackurls"} {
+		tool := byName[name]
+		if tool.TargetKind != "domain" || tool.Operation != "archive_discovery" || tool.Parser != "url_list_text" {
+			t.Fatalf("expected %s archive discovery to use domain scope and url_list_text parser, got %#v", name, tool)
+		}
+	}
+}
+
 func TestBuiltInAppSecToolsCoverManifestDependencies(t *testing.T) {
 	manifests, err := LoadManifests(filepath.Join("..", "..", "toolchains"))
 	if err != nil {
