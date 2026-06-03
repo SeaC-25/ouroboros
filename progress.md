@@ -1,6 +1,15 @@
 # Ouroboros Analysis Progress
 
 ## 2026-06-03
+- Started `subfinder_jsonl` parser evidence promotion in isolated worktree `.worktrees/subfinder-parser-evidence` on branch `feat/subfinder-parser-evidence`.
+- Confirmed sibling nmap worktree has already claimed `docs/progress/milestone-30-nmap-parser-evidence.md`; using `docs/progress/milestone-31-subfinder-parser-evidence.md` for this branch.
+- Baseline validation was already run before edits with `GOPROXY=https://goproxy.cn,direct go test ./...` and passed.
+- Added RED parser-level tests for `subfinder_jsonl` promotion, explicit domain-scope requirement, out-of-scope/excluded skipping, unsafe DNS value rejection, parse failure without facts, and raw 1 MiB output cap.
+- Added RED run-level tests using a fake workspace-managed `subfinder` bundle that prints JSONL, proving valid explicit-domain output promotes Evidence Graph surface facts and malformed output records `parse_failed` without failing the completed run.
+- Implemented `internal/app/subfinder_parser.go` and registered `subfinder_jsonl` in the app parser dispatcher.
+- Focused GREEN validation passed with `GOPROXY=https://goproxy.cn,direct go test ./internal/app -run 'Subfinder' -count=1 -v`.
+- Parser regression, app package tests, full repository tests, strict doctor, diff hygiene, and touched-file formatting checks passed before commit.
+- Updated README, development docs, findings, task plan, progress log, and wrote `docs/progress/milestone-31-subfinder-parser-evidence.md`; milestone 30 was already occupied by the parallel nmap worktree.
 - Continued managed binary execution work in isolated worktree `.worktrees/managed-binary-argv-builders` from `main` commit `43d9a5f`.
 - Baseline validation passed before edits with `GOPROXY=https://goproxy.cn,direct go test ./... -count=1`.
 - Added RED app tests proving tool-level catalog nodes with installed `httpx` and `nmap` managed fixture binaries still stayed offline before registered argv builders existed, and proving excluded tool-level targets must fail before payload execution.

@@ -3,6 +3,11 @@
 ## Goal
 Produce a phased Chinese architecture design document for Ouroboros by dissecting the three pentest-related projects under `model/`.
 
+## Current Feature Work
+| Workstream | Status | Notes |
+|---|---|---|
+| Subfinder JSONL parser evidence promotion | complete | Added `subfinder_jsonl` parser promotion for completed `subfinder/subdomain_discovery` runs, requiring explicit `kind: domain` scope and preserving parser failure as non-fatal replay evidence. |
+
 ## Phases
 | Phase | Status | Notes |
 |---|---|---|
@@ -40,6 +45,7 @@ Produce a phased Chinese architecture design document for Ouroboros by dissectin
 - `mobsfscan_json` parser dispatch is now a narrow app-level post-tool parser path. Completed `mobsfscan/static_code_scan` output can create `EventParser` and `EventFact(kind=finding)` records that project into the evidence graph, while parse failure emits only `parse_failed` and keeps the completed tool run from failing. Reported file paths in MobSF JSON are untrusted: findings persist an `artifact_target` plus an artifact-scoped `file_path`, and absolute/traversal/drive-qualified paths collapse to the scoped artifact target instead of bypassing artifact isolation through evidence text.
 - `nuclei_jsonl` parser dispatch is the second narrow app-level post-tool parser path. Completed URL-scoped `nuclei/template_scan` output can create `EventParser` and `EventFact(kind=finding)` records that project into the evidence graph, while parse failure emits only `parse_failed` and keeps the completed tool run from failing. Nuclei `matched-at` values are untrusted: out-of-scope URLs collapse to the scoped URL target, and durable statements avoid curl commands, extracted secrets, host/template URL noise, and request/response blobs.
 - `httpx_jsonl` parser dispatch is the third narrow app-level post-tool parser path. Completed URL-scoped `httpx/http_probe` output can create `EventParser` and `EventFact(kind=surface)` records that project into the evidence graph, while parse failure emits only `parse_failed` and keeps the completed tool run from failing. HTTP probe URLs, final/redirect URLs, titles, headers, raw traffic, bodies, screenshots, webserver labels, and technology labels are untrusted; out-of-scope URLs collapse to the scoped URL target, and durable statements persist only scoped surface metadata. This requires a workspace-managed `httpx` payload and is not full Web scanner, bundled-payload, or all-parser coverage.
+- `subfinder_jsonl` parser dispatch is the fourth narrow app-level post-tool parser path. Completed explicit-domain `subfinder/subdomain_discovery` output can create `EventParser` and `EventFact(kind=surface)` records for normalized in-scope DNS names, while parse failure emits only `parse_failed` and keeps the completed tool run from failing. URL scope, including URL scope with `scope.target_policy: disabled`, does not authorize domain promotion; unsafe, excluded, and out-of-scope names are skipped rather than collapsed. The parser persists only parser/tool/execution identity, domain, subdomain, confidence, and statement fields, with ASCII LDH-only normalization for this slice.
 - Production hardening now has the first live streaming foundation: run observers receive durable events and replay snapshots, and the TUI model can apply replay snapshot messages through `Update`.
 - `run --interactive` now sends live replay snapshot messages from `RunWorkspaceWithOptions.OnSnapshot` into the active TUI session; real long-running worker/tool execution is still pending.
 - `run --interactive` now has a double-confirm cancel control through the TUI model: `c` arms confirmation, the second `c` invokes a runtime control requester wired to the CLI run context cancel function, and Agent Runtime rows retain cancel feedback.
