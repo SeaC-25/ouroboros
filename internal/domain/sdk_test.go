@@ -52,7 +52,7 @@ func TestFakeDomainPackExposesSDKContracts(t *testing.T) {
 	if len(pack.Parsers()) != 1 || pack.Parsers()[0].Name != "route_observation_parser" {
 		t.Fatalf("unexpected parsers: %#v", pack.Parsers())
 	}
-	if len(pack.StrategyPatterns()) != 1 || pack.StrategyPatterns()[0].Name != "explore-plan-execute" {
+	if len(pack.StrategyPatterns()) != 1 || pack.StrategyPatterns()[0].Name != "explore_plan_execute" {
 		t.Fatalf("unexpected patterns: %#v", pack.StrategyPatterns())
 	}
 }
@@ -111,7 +111,7 @@ func (fakePack) Parsers() []compiler.ParserSpec {
 }
 
 func (fakePack) StrategyPatterns() []patterns.Pattern {
-	return []patterns.Pattern{{Name: "explore-plan-execute", Version: "0.1.0"}}
+	return []patterns.Pattern{{Name: "explore_plan_execute", Version: "0.1.0"}}
 }
 
 type incompletePack struct{}

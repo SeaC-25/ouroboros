@@ -20,6 +20,7 @@ import (
 	"unicode"
 
 	"github.com/ouroboros/ouroboros/internal/compiler"
+	"github.com/ouroboros/ouroboros/internal/contracts"
 	"github.com/ouroboros/ouroboros/internal/eventlog"
 	"github.com/ouroboros/ouroboros/internal/evidence"
 	"github.com/ouroboros/ouroboros/internal/frontier"
@@ -36,6 +37,17 @@ type ToolchainStatus struct {
 	Health          toolchain.HealthReport
 	Dependencies    []toolchain.DependencyReport
 	InstallPlan     []toolchain.DependencyInstallStep
+}
+
+type ToolchainContractCheck struct {
+	Status              string
+	Mode                string
+	ManifestCount       int
+	ToolCount           int
+	DomainPackCount     int
+	PatternCount        int
+	SemanticActionCount int
+	Errors              []string
 }
 
 type AuthoredToolArtifact struct {
@@ -2317,6 +2329,59 @@ func InspectToolchains(root string) ([]ToolchainStatus, error) {
 		})
 	}
 	return statuses, nil
+}
+
+func CheckToolchainContracts(root string) (ToolchainContractCheck, error) {
+	doctor, err := DoctorWorkspaceWithOptions(root, DoctorOptions{SkipContainerRuntimeCheck: true})
+	if err != nil {
+		return ToolchainContractCheck{}, err
+	}
+	if !doctor.Ready {
+		return ToolchainContractCheck{}, fmt.Errorf("workspace is not ready: %v", doctor.Errors)
+	}
+
+	manifests, err := toolchain.LoadManifests(filepath.Join(root, "toolchain"))
+	if err != nil {
+		return ToolchainContractCheck{}, err
+	}
+	catalog := toolchain.BuiltInAppSecTools()
+	packs := contracts.BuiltInDomainPacks()
+	patternContracts := contracts.BuiltInPatternContracts()
+	check := ToolchainContractCheck{
+		Status:              "ready",
+		Mode:                "read-only",
+		ManifestCount:       len(manifests),
+		ToolCount:           len(catalog),
+		DomainPackCount:     len(packs),
+		PatternCount:        len(patternContracts),
+		SemanticActionCount: len(compiler.DeclaredSemanticActions()),
+	}
+	if err := contracts.Validate(contracts.Inputs{
+		Manifests:   manifests,
+		ToolCatalog: catalog,
+		DomainPacks: packs,
+		Patterns:    patternContracts,
+	}); err != nil {
+		check.Status = "blocked"
+		check.Errors = splitContractValidationErrors(err)
+	}
+	return check, nil
+}
+
+func splitContractValidationErrors(err error) []string {
+	if err == nil {
+		return nil
+	}
+	lines := strings.Split(err.Error(), "\n")
+	errors := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		errors = append(errors, line)
+	}
+	return errors
 }
 
 func CreateAuthoredTool(root string, spec toolchain.AuthoredToolSpec) (AuthoredToolArtifact, error) {

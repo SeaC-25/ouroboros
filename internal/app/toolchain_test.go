@@ -117,6 +117,49 @@ func TestCreateAuthoredToolRejectsRawScriptWithoutWriting(t *testing.T) {
 	}
 }
 
+func TestCheckToolchainContractsDoesNotRunContainerRuntimeDoctor(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	engineDir := t.TempDir()
+	engine := filepath.Join(engineDir, "fake-container-engine")
+	marker := filepath.Join(engineDir, "container-runtime-was-called")
+	engineScript := `#!/bin/sh
+touch "` + marker + `"
+printf 'container runtime should not be inspected during contract check\n' >&2
+exit 1
+`
+	if err := os.WriteFile(engine, []byte(engineScript), 0o755); err != nil {
+		t.Fatalf("write fake engine: %v", err)
+	}
+	scope := `version: 1
+scope:
+  target_policy: enforce
+  targets: []
+  exclusions: []
+execution:
+  isolation: container
+  container:
+    engine: ` + engine + `
+    image: ouro-worker:test
+`
+	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
+		t.Fatalf("write container scope: %v", err)
+	}
+
+	check, err := CheckToolchainContracts(root)
+	if err != nil {
+		t.Fatalf("contract check should not run container doctor checks: %v", err)
+	}
+	if check.Status != "ready" {
+		t.Fatalf("expected ready contract check, got %#v", check)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("contract check must not inspect container runtime, marker stat err=%v", err)
+	}
+}
+
 func TestAuthoredToolMetadataPathsDoNotRunContainerRuntimeDoctor(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
 	if err := InitWorkspace(root); err != nil {
