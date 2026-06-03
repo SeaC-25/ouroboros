@@ -1765,6 +1765,10 @@ func managedBinaryTargetKinds(binary string, operation string, node compiler.Pla
 		if binary == "nuclei" {
 			return []string{string(domain.TargetURL)}
 		}
+	case "crawl":
+		if binary == "katana" {
+			return []string{string(domain.TargetURL)}
+		}
 	case "port_scan":
 		if binary == "naabu" {
 			return []string{string(domain.TargetCIDR)}
@@ -1817,6 +1821,13 @@ func managedBinaryCommandFor(request ToolExecutionRequest, binary string, operat
 				return nil, false, nil
 			}
 			return []string{binary, "-jsonl", "-silent", "-no-color", "-disable-update-check", "-no-stdin", "-ni", "-t", rulesPath, "-u", target.Value}, true, nil
+		}
+	case "crawl":
+		if binary == "katana" {
+			if target.Kind != string(domain.TargetURL) {
+				return nil, false, nil
+			}
+			return []string{binary, "-u", target.Value, "-j", "-silent", "-or", "-ob", "-duc"}, true, nil
 		}
 	case "port_scan":
 		if binary == "naabu" {
