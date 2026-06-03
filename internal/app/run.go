@@ -1778,6 +1778,10 @@ func managedBinaryTargetKinds(binary string, operation string, node compiler.Pla
 		if binary == "dalfox" {
 			return []string{string(domain.TargetURL)}
 		}
+	case "parameter_discovery":
+		if binary == "arjun" {
+			return []string{string(domain.TargetURL)}
+		}
 	case "crawl":
 		if binary == "katana" {
 			return []string{string(domain.TargetURL)}
@@ -1875,6 +1879,23 @@ func managedBinaryCommandFor(request ToolExecutionRequest, binary string, operat
 				return nil, true, fmt.Errorf("dalfox command requires valid url scope target")
 			}
 			return []string{binary, "url", target.Value, "--format", "json", "--silence", "--no-color", "--no-spinner"}, true, nil
+		}
+	case "parameter_discovery":
+		if binary == "arjun" {
+			if target.Kind != string(domain.TargetURL) {
+				return nil, false, nil
+			}
+			if !targetPolicyDisabled(request.ScopeTargetPolicy) && scopeTargetExcludedForRequest(request, target) {
+				return nil, true, fmt.Errorf("scope target %s is excluded for capability %s", target.Value, request.Node.Capability)
+			}
+			if parsedWebURL(target.Value) == nil {
+				return nil, true, fmt.Errorf("arjun command requires valid url scope target")
+			}
+			outputPath, err := managedOutputPathForRequest(request, binary)
+			if err != nil {
+				return nil, true, err
+			}
+			return []string{binary, "-u", target.Value, "-oJ", outputPath, "-q", "-t", "1"}, true, nil
 		}
 	case "crawl":
 		if binary == "katana" {
@@ -2025,6 +2046,10 @@ func managedOutputTranscriptForRequest(request ToolExecutionRequest) (string, bo
 		}
 	case "dnsrecon_json":
 		if binary != "dnsrecon" {
+			return "", false, nil
+		}
+	case "arjun_json":
+		if binary != "arjun" {
 			return "", false, nil
 		}
 	default:
