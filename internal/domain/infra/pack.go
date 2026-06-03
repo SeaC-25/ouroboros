@@ -76,7 +76,7 @@ func (Pack) Parsers() []compiler.ParserSpec {
 
 func (Pack) StrategyPatterns() []patterns.Pattern {
 	return []patterns.Pattern{
-		{Name: "explore-plan-execute", Version: "0.1.0"},
-		{Name: "ant-colony", Version: "0.1.0"},
+		{Name: "explore_plan_execute", Version: "0.1.0"},
+		{Name: "ant_colony", Version: "0.1.0"},
 	}
 }

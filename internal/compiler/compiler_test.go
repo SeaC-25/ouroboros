@@ -170,6 +170,32 @@ func TestCompileIncludesRuleBundleDependencyForToolLevelTemplateScan(t *testing.
 	}
 }
 
+func TestCompileKeepsManifestLevelCapabilityWhenSamePackHasToolLevelCandidate(t *testing.T) {
+	manifests, err := toolchain.LoadManifests(filepath.Join("..", "..", "toolchains"))
+	if err != nil {
+		t.Fatalf("load root manifests: %v", err)
+	}
+
+	plan, err := NewCompiler().Compile(CompileRequest{
+		Action:    ActionProduceReport,
+		Manifests: manifests,
+	})
+	if err != nil {
+		t.Fatalf("compile plan: %v", err)
+	}
+
+	foundCTFProof := false
+	for _, node := range plan.Nodes {
+		if node.ManifestName == "ctf-pack" && node.Capability == "ctf.result_proof" && node.ToolID == "" {
+			foundCTFProof = true
+			break
+		}
+	}
+	if !foundCTFProof {
+		t.Fatalf("expected ctf.result_proof manifest-level node alongside tool-level candidates, got %#v", plan.Nodes)
+	}
+}
+
 func TestCompileRejectsActionWithoutAvailableCapability(t *testing.T) {
 	_, err := NewCompiler().Compile(CompileRequest{
 		Action: ActionVerifyCandidate,

@@ -77,6 +77,6 @@ func (Pack) Parsers() []compiler.ParserSpec {
 func (Pack) StrategyPatterns() []patterns.Pattern {
 	return []patterns.Pattern{
 		{Name: "ralphloop", Version: "0.1.0"},
-		{Name: "explore-plan-execute", Version: "0.1.0"},
+		{Name: "explore_plan_execute", Version: "0.1.0"},
 	}
 }

@@ -8971,6 +8971,50 @@ func TestToolchainCommandsInspectWorkspaceManifests(t *testing.T) {
 	if !strings.Contains(healthOut.String(), "ready") || !strings.Contains(healthOut.String(), "web-api-pack") {
 		t.Fatalf("expected health output, got %q", healthOut.String())
 	}
+
+	var contractOut bytes.Buffer
+	contractCmd := newRootCommand(&contractOut, new(bytes.Buffer))
+	contractCmd.SetArgs([]string{"toolchain", "contract-check", root})
+	if err := contractCmd.Execute(); err != nil {
+		t.Fatalf("execute toolchain contract-check: %v", err)
+	}
+	for _, want := range []string{"toolchain-contract: status=ready mode=read-only", "manifests=3", "domain_packs=3", "patterns=3", "semantic_actions=7"} {
+		if !strings.Contains(contractOut.String(), want) {
+			t.Fatalf("expected contract-check output to contain %q, got %q", want, contractOut.String())
+		}
+	}
+}
+
+func TestToolchainContractCheckCommandReportsBlockedContract(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	manifestPath := filepath.Join(root, "toolchain", "web-api-pack", "manifest.yaml")
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	withoutAuthState := strings.ReplaceAll(string(data), "  - web.auth_state_tracking\n", "")
+	if err := os.WriteFile(manifestPath, []byte(withoutAuthState), 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{"toolchain", "contract-check", root})
+	err = cmd.Execute()
+	if err == nil {
+		t.Fatalf("expected contract-check to fail for missing workspace capability")
+	}
+	for _, want := range []string{
+		"toolchain-contract: status=blocked mode=read-only",
+		"contract-error: domain capability web.auth_state_tracking is not provided by workspace manifests or built-in tools",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("expected contract-check output to contain %q, got %q", want, out.String())
+		}
+	}
 }
 
 func TestToolchainAuthoredToolCommandsValidateWriteListAndRead(t *testing.T) {

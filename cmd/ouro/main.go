@@ -5617,6 +5617,7 @@ func newToolchainCommand(out io.Writer) *cobra.Command {
 	}
 	cmd.AddCommand(newToolchainListCommand(out))
 	cmd.AddCommand(newToolchainHealthCommand(out))
+	cmd.AddCommand(newToolchainContractCheckCommand(out))
 	cmd.AddCommand(newToolchainAuthoredToolValidateCommand(out))
 	cmd.AddCommand(newToolchainAuthoredToolWriteCommand(out))
 	cmd.AddCommand(newToolchainAuthoredToolsCommand(out))
@@ -10681,6 +10682,42 @@ func newToolchainHealthCommand(out io.Writer) *cobra.Command {
 						return err
 					}
 				}
+			}
+			return nil
+		},
+	}
+}
+
+func newToolchainContractCheckCommand(out io.Writer) *cobra.Command {
+	return &cobra.Command{
+		Use:   "contract-check <workspace>",
+		Short: "Check compiler, domain pack, manifest, and strategy contracts",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			check, err := app.CheckToolchainContracts(args[0])
+			if err != nil {
+				return err
+			}
+			if _, err := fmt.Fprintf(
+				out,
+				"toolchain-contract: status=%s mode=%s manifests=%d tools=%d domain_packs=%d patterns=%d semantic_actions=%d\n",
+				check.Status,
+				check.Mode,
+				check.ManifestCount,
+				check.ToolCount,
+				check.DomainPackCount,
+				check.PatternCount,
+				check.SemanticActionCount,
+			); err != nil {
+				return err
+			}
+			for _, validationError := range check.Errors {
+				if _, err := fmt.Fprintf(out, "contract-error: %s\n", validationError); err != nil {
+					return err
+				}
+			}
+			if check.Status != "ready" {
+				return fmt.Errorf("toolchain contract check failed")
 			}
 			return nil
 		},

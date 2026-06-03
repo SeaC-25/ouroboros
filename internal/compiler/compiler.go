@@ -116,12 +116,14 @@ func matchCapabilities(manifests []toolchain.Manifest, catalog []toolchain.Built
 		if err := toolchain.ValidateManifest(manifest); err != nil {
 			return nil, fmt.Errorf("validate manifest %s: %w", manifest.Name, err)
 		}
+		seen := map[string]bool{}
 		toolCandidates := matchToolCapabilities(manifest, catalogByPack[manifest.Name], wantedPriority)
 		if len(toolCandidates) > 0 {
 			candidates = append(candidates, toolCandidates...)
-			continue
+			for _, candidate := range toolCandidates {
+				seen[candidate.capability] = true
+			}
 		}
-		seen := map[string]bool{}
 		for _, capability := range manifest.Capabilities {
 			normalized := strings.TrimSpace(capability)
 			priority, ok := wantedPriority[normalized]
@@ -369,6 +371,25 @@ func evidenceInputNodeIDs(nodes []evidence.Node) []string {
 	return ids
 }
 
+func DeclaredSemanticActions() []SemanticAction {
+	actions := make([]SemanticAction, 0, len(semanticCapabilities))
+	for action := range semanticCapabilities {
+		actions = append(actions, action)
+	}
+	sort.Slice(actions, func(i, j int) bool {
+		return actions[i] < actions[j]
+	})
+	return actions
+}
+
+func CapabilitiesForAction(action SemanticAction) ([]string, bool) {
+	capabilities, ok := capabilitiesForAction(action)
+	if !ok {
+		return nil, false
+	}
+	return append([]string(nil), capabilities...), true
+}
+
 func capabilitiesForAction(action SemanticAction) ([]string, bool) {
 	capabilities, ok := semanticCapabilities[action]
 	return capabilities, ok
@@ -381,32 +402,29 @@ var semanticCapabilities = map[SemanticAction][]string{
 		"ctf.challenge_classification",
 	},
 	ActionFingerprintSurface: {
-		"web.fingerprint",
+		"web.auth_state_tracking",
 		"infra.service_enumeration",
+		"infra.identity_graph",
+		"ctf.challenge_classification",
 		"ctf.artifact_analysis",
 		"web.discovery",
 	},
 	ActionEnumeratePaths: {
 		"web.route_enumeration",
-		"infra.path_hypothesis",
-		"ctf.hypothesis_generation",
 	},
 	ActionGenerateCandidates: {
 		"web.candidate_generation",
 		"infra.path_hypothesis",
-		"ctf.hypothesis_generation",
+		"ctf.fast_hypothesis",
 	},
 	ActionVerifyCandidate: {
-		"web.candidate_verification",
-		"infra.candidate_verification",
 		"ctf.candidate_verification",
 	},
 	ActionCollectEvidence: {
 		"evidence.collection",
-		"ctf.result_proof",
+		"ctf.artifact_analysis",
 	},
 	ActionProduceReport: {
-		"report.produce",
 		"ctf.result_proof",
 		"evidence.collection",
 	},

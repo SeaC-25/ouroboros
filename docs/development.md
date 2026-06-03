@@ -68,6 +68,7 @@ GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro provider usage ./workspace
 GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro provider usage ./workspace --summary
 GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro toolchain list ./workspace
 GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro toolchain health ./workspace
+GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro toolchain contract-check ./workspace
 GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro toolchain authored-tool-validate ./authored-tool.yaml
 GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro toolchain authored-tool-write ./workspace ./authored-tool.yaml
 GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro toolchain authored-tools ./workspace
@@ -81,6 +82,8 @@ GOPROXY=https://goproxy.cn,direct go run ./cmd/ouro toolchain managed-install ./
 `scripts/install.sh` installs only from a local release archive or extracted release directory. It deliberately rejects HTTP(S) sources, writes to `${PREFIX:-$HOME/.local}/bin/ouro`, and requires no network access. When installing a `.tar.gz` archive and a `SHA256SUMS` file exists in the same directory, the installer requires a matching checksum entry for that archive before extraction.
 
 Release archives include `toolchains/managed-bundles/nuclei-templates/`, a minimal digest-verified managed rule-bundle seed. After installing a release, import it into a workspace with `ouro toolchain release-managed-install <workspace> "${PREFIX}/share/ouroboros" web-api-pack nuclei-templates --execute`; this copies the bundle under `workspace/toolchain/managed-bundles/` and links `workspace/toolchain/rules/nuclei-templates` without network access.
+
+`ouro toolchain contract-check <workspace>` is a read-only health surface for compiler/domain/manifest/strategy consistency. It checks workspace toolchain manifests against the built-in AppSec catalog, built-in domain packs, built-in strategy pattern contract names, and compiler semantic action mappings. It also rejects catalog tools whose capabilities or dependencies are not declared by their selected pack manifest. The operator command uses metadata-only workspace readiness checks and skips container runtime probing; it reports `status=ready` or `status=blocked` plus `contract-error:` rows and does not execute health commands, run tools, write artifacts, contact providers, or contact scoped targets. Source-level `contracts.ValidateBuiltIn` tests additionally load the real YAML files under `configs/patterns/`.
 
 `make doctor` creates a temporary workspace, initializes it, and runs `ouro doctor` against it. `make doctor-strict` runs the same initialized workspace through `ouro doctor --require-safety-authorization`, which is the CI-oriented safety-bypass gate.
 
