@@ -5173,6 +5173,204 @@ execution:
 	t.Fatalf("expected naabu tool-level execution event, got %#v", events)
 }
 
+func TestRunWorkspacePromotesNaabuJSONLToEvidenceSurface(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	scope := `version: 1
+scope:
+  target_policy: enforce
+  targets:
+    - kind: cidr
+      value: 10.0.0.0/24
+  exclusions: []
+execution:
+  isolation: process
+  tool_concurrency: 1
+`
+	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
+		t.Fatalf("write CIDR scope: %v", err)
+	}
+	writeManagedBundleFixture(t, root, "naabu", "binary", "2.3.4", `#!/usr/bin/env sh
+cat <<'JSONL'
+{"ip":"10.0.0.5","port":443,"host":"leak.example","timestamp":"secret-token","banner":"secret-token"}
+JSONL
+`)
+	if _, err := ExecuteManagedToolBundleInstall(root, "infra-pack", "naabu", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed naabu bundle: %v", err)
+	}
+
+	result, err := RunWorkspaceWithOptions(ctx, root, RunOptions{DeferReportProjection: true})
+	if err != nil {
+		t.Fatalf("run workspace with naabu parser: %v", err)
+	}
+	store, err := eventlog.OpenSQLite(filepath.Join(root, "replay", "events.db"))
+	if err != nil {
+		t.Fatalf("open event log: %v", err)
+	}
+	defer store.Close()
+	events, err := store.Replay(ctx, result.RunID)
+	if err != nil {
+		t.Fatalf("replay events: %v", err)
+	}
+	snapshot, err := eventlog.BuildReplaySnapshot(events)
+	if err != nil {
+		t.Fatalf("build replay snapshot: %v", err)
+	}
+
+	var surfaceID string
+	for _, fact := range snapshot.Blackboard.Facts {
+		if fact.Source != "parser.naabu_jsonl" {
+			continue
+		}
+		surfaceID = fact.ID
+		if fact.Kind != "surface" {
+			t.Fatalf("expected naabu parser fact kind surface, got %#v", fact)
+		}
+		for _, want := range []string{"naabu", "10.0.0.5:443", "open"} {
+			if !strings.Contains(fact.Statement, want) {
+				t.Fatalf("expected naabu surface to contain %q, got %#v", want, fact)
+			}
+		}
+		if strings.Contains(fact.Statement, "secret-token") || strings.Contains(fact.Statement, "leak.example") {
+			t.Fatalf("naabu surface statement leaked redacted output: %#v", fact)
+		}
+		break
+	}
+	if surfaceID == "" {
+		t.Fatalf("expected naabu parser surface fact in replay snapshot, facts=%#v", snapshot.Blackboard.Facts)
+	}
+	node, ok := snapshot.Evidence.Node(surfaceID)
+	if !ok {
+		t.Fatalf("expected naabu parser fact to project into evidence graph")
+	}
+	if node.Type != evidence.NodeSurface {
+		t.Fatalf("expected evidence surface node, got %#v", node)
+	}
+
+	foundFactEvent := false
+	foundParserEvent := false
+	for _, event := range events {
+		switch event.Type {
+		case eventlog.EventFact:
+			var payload struct {
+				FactID     string `json:"fact_id"`
+				Source     string `json:"source"`
+				IP         string `json:"ip"`
+				Port       int    `json:"port"`
+				Endpoint   string `json:"endpoint"`
+				TargetCIDR string `json:"target_cidr"`
+				ParserID   string `json:"parser_id"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatalf("decode fact event: %v", err)
+			}
+			if payload.FactID != surfaceID || payload.Source != "parser.naabu_jsonl" {
+				continue
+			}
+			foundFactEvent = true
+			if payload.IP != "10.0.0.5" || payload.Port != 443 || payload.Endpoint != "10.0.0.5:443" || payload.TargetCIDR != "10.0.0.0/24" || payload.ParserID != "naabu_jsonl" {
+				t.Fatalf("expected structured naabu fact metadata, got %#v", payload)
+			}
+			if strings.Contains(string(event.Payload), "secret-token") || strings.Contains(string(event.Payload), "leak.example") {
+				t.Fatalf("naabu fact payload leaked redacted output: %s", string(event.Payload))
+			}
+		case eventlog.EventParser:
+			var payload struct {
+				Parser string `json:"parser"`
+				Status string `json:"status"`
+				ToolID string `json:"tool_id"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatalf("decode parser event: %v", err)
+			}
+			if payload.Parser == "naabu_jsonl" && payload.Status == "parsed" && payload.ToolID == "naabu" {
+				foundParserEvent = true
+			}
+		}
+	}
+	if !foundFactEvent {
+		t.Fatalf("expected raw naabu fact event for %s", surfaceID)
+	}
+	if !foundParserEvent {
+		t.Fatalf("expected parsed naabu parser event, events=%#v", events)
+	}
+}
+
+func TestRunWorkspaceRecordsNaabuParseFailureWithoutSurface(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	scope := `version: 1
+scope:
+  target_policy: enforce
+  targets:
+    - kind: cidr
+      value: 10.0.0.0/24
+  exclusions: []
+execution:
+  isolation: process
+  tool_concurrency: 1
+`
+	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
+		t.Fatalf("write CIDR scope: %v", err)
+	}
+	writeManagedBundleFixture(t, root, "naabu", "binary", "2.3.4", "#!/usr/bin/env sh\nprintf 'not-jsonl\\n'\n")
+	if _, err := ExecuteManagedToolBundleInstall(root, "infra-pack", "naabu", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed naabu bundle: %v", err)
+	}
+
+	result, err := RunWorkspaceWithOptions(ctx, root, RunOptions{DeferReportProjection: true})
+	if err != nil {
+		t.Fatalf("parse failure should not fail completed naabu run: %v", err)
+	}
+	store, err := eventlog.OpenSQLite(filepath.Join(root, "replay", "events.db"))
+	if err != nil {
+		t.Fatalf("open event log: %v", err)
+	}
+	defer store.Close()
+	events, err := store.Replay(ctx, result.RunID)
+	if err != nil {
+		t.Fatalf("replay events: %v", err)
+	}
+
+	foundParseFailure := false
+	for _, event := range events {
+		switch event.Type {
+		case eventlog.EventParser:
+			var payload struct {
+				Parser       string `json:"parser"`
+				Status       string `json:"status"`
+				ToolID       string `json:"tool_id"`
+				FindingCount int    `json:"finding_count"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatalf("decode parser event: %v", err)
+			}
+			if payload.Parser == "naabu_jsonl" && payload.Status == "parse_failed" && payload.ToolID == "naabu" && payload.FindingCount == 0 {
+				foundParseFailure = true
+			}
+		case eventlog.EventFact:
+			var payload struct {
+				Source string `json:"source"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatalf("decode fact event: %v", err)
+			}
+			if payload.Source == "parser.naabu_jsonl" {
+				t.Fatalf("parse failure must not emit naabu parser fact: %#v", payload)
+			}
+		}
+	}
+	if !foundParseFailure {
+		t.Fatalf("expected run-level naabu parse_failed event, events=%#v", events)
+	}
+}
+
 func TestRunWorkspaceRejectsExcludedCIDRBeforeNaabuExecutionWhenHostScopePresent(t *testing.T) {
 	ctx := context.Background()
 	root := filepath.Join(t.TempDir(), "workspace")
