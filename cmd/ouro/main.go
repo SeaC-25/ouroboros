@@ -266,6 +266,7 @@ func newProviderGenerateCommand(out io.Writer) *cobra.Command {
 	var userPrompt string
 	var maxTokens int
 	var recordUsage bool
+	var maxEstimatedCostUSD float64
 	cmd := &cobra.Command{
 		Use:   "generate <workspace>",
 		Short: "Generate a manual provider preview message",
@@ -273,6 +274,13 @@ func newProviderGenerateCommand(out io.Writer) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if strings.TrimSpace(userPrompt) == "" {
 				return fmt.Errorf("provider generation prompt is required")
+			}
+			var budgetMax *float64
+			if cmd.Flags().Changed("max-estimated-cost-usd") {
+				if maxEstimatedCostUSD < 0 {
+					return fmt.Errorf("provider generation max_estimated_cost_usd must be non-negative")
+				}
+				budgetMax = &maxEstimatedCostUSD
 			}
 			result, err := app.GenerateProviderMessage(cmd.Context(), args[0], app.ProviderGenerationRequest{
 				SystemPrompt: systemPrompt,
@@ -282,11 +290,24 @@ func newProviderGenerateCommand(out io.Writer) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			budget, err := app.EnforceProviderGenerationBudget(result, app.ProviderGenerationBudgetOptions{
+				MaxEstimatedCostUSD: budgetMax,
+			})
+			if err != nil {
+				return err
+			}
 			if err := printProviderGenerationResult(out, result); err != nil {
 				return err
 			}
+			if budget.Enforced {
+				if err := printProviderGenerationBudget(out, budget); err != nil {
+					return err
+				}
+			}
 			if recordUsage {
-				record, err := app.RecordProviderGenerationUsage(args[0], result, app.ProviderUsageRecordOptions{})
+				record, err := app.RecordProviderGenerationUsage(args[0], result, app.ProviderUsageRecordOptions{
+					MaxEstimatedCostUSD: budgetMax,
+				})
 				if err != nil {
 					return err
 				}
@@ -300,6 +321,7 @@ func newProviderGenerateCommand(out io.Writer) *cobra.Command {
 	cmd.Flags().StringVar(&userPrompt, "prompt", "", "user prompt for the provider preview")
 	cmd.Flags().IntVar(&maxTokens, "max-tokens", 0, "maximum completion tokens for the provider preview")
 	cmd.Flags().BoolVar(&recordUsage, "record-usage", false, "write a metadata-only provider usage record for this preview")
+	cmd.Flags().Float64Var(&maxEstimatedCostUSD, "max-estimated-cost-usd", 0, "maximum allowed estimated provider preview cost in USD")
 	return cmd
 }
 
@@ -364,6 +386,11 @@ func compactProviderText(text string) string {
 	return strings.Join(strings.Fields(text), " ")
 }
 
+func printProviderGenerationBudget(out io.Writer, budget app.ProviderGenerationBudgetDecision) error {
+	_, err := fmt.Fprintf(out, "budget_status=%s\nbudget_max_estimated_cost_usd=%.6f\n", budget.Status, budget.MaxEstimatedCostUSD)
+	return err
+}
+
 func printProviderUsageRecord(out io.Writer, record app.ProviderUsageRecord) error {
 	parts := []string{
 		"provider-usage:",
@@ -385,6 +412,12 @@ func printProviderUsageRecord(out io.Writer, record app.ProviderUsageRecord) err
 	}
 	if len(record.Capabilities) > 0 {
 		parts = append(parts, fmt.Sprintf("capabilities=%s", strings.Join(record.Capabilities, "|")))
+	}
+	if record.BudgetEnforced {
+		parts = append(parts,
+			fmt.Sprintf("budget_status=%s", record.BudgetStatus),
+			fmt.Sprintf("budget_max_estimated_cost_usd=%.6f", record.BudgetMaxEstimatedCostUSD),
+		)
 	}
 	_, err := fmt.Fprintln(out, strings.Join(parts, " "))
 	return err

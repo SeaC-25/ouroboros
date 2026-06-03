@@ -273,6 +273,159 @@ providers:
 	}
 }
 
+func TestProviderGenerateCommandRejectsOverBudgetWithoutWritingUsage(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"choices": [{"message": {"role": "assistant", "content": "approved plan"}}],
+			"usage": {"prompt_tokens": 1000, "completion_tokens": 500, "total_tokens": 1500}
+		}`))
+	}))
+	defer server.Close()
+	t.Setenv("OURO_TEST_PROVIDER_KEY", "secret-value")
+	providers := fmt.Sprintf(`version: 1
+providers:
+  - name: local-openai
+    type: openai_compatible
+    model: gpt-test
+    base_url: %s/v1
+    api_key_env: OURO_TEST_PROVIDER_KEY
+    input_price_per_million_tokens: 2.50
+    output_price_per_million_tokens: 10.00
+    enabled: true
+`, server.URL)
+	if err := os.WriteFile(filepath.Join(root, "providers.yaml"), []byte(providers), 0o644); err != nil {
+		t.Fatalf("write providers: %v", err)
+	}
+
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{"provider", "generate", root, "--prompt", "Summarize scope.", "--record-usage", "--max-estimated-cost-usd", "0.001"})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "exceeds budget") {
+		t.Fatalf("expected budget error, got %v output=%q", err, out.String())
+	}
+	for _, leaked := range []string{"text=approved plan", "usage_record="} {
+		if strings.Contains(out.String(), leaked) {
+			t.Fatalf("expected budget rejection to suppress %q, got %q", leaked, out.String())
+		}
+	}
+
+	var usageOut bytes.Buffer
+	usage := newRootCommand(&usageOut, new(bytes.Buffer))
+	usage.SetArgs([]string{"provider", "usage", root})
+	if err := usage.Execute(); err != nil {
+		t.Fatalf("list provider usage: %v output=%q", err, usageOut.String())
+	}
+	if strings.Contains(usageOut.String(), "provider-usage:") {
+		t.Fatalf("expected no provider usage records after over-budget rejection, got %q", usageOut.String())
+	}
+}
+
+func TestProviderGenerateCommandPrintsAndRecordsBudgetWhenWithinLimit(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"choices": [{"message": {"role": "assistant", "content": "approved plan"}}],
+			"usage": {"prompt_tokens": 1000, "completion_tokens": 500, "total_tokens": 1500}
+		}`))
+	}))
+	defer server.Close()
+	t.Setenv("OURO_TEST_PROVIDER_KEY", "secret-value")
+	providers := fmt.Sprintf(`version: 1
+providers:
+  - name: local-openai
+    type: openai_compatible
+    model: gpt-test
+    base_url: %s/v1
+    api_key_env: OURO_TEST_PROVIDER_KEY
+    input_price_per_million_tokens: 2.50
+    output_price_per_million_tokens: 10.00
+    enabled: true
+`, server.URL)
+	if err := os.WriteFile(filepath.Join(root, "providers.yaml"), []byte(providers), 0o644); err != nil {
+		t.Fatalf("write providers: %v", err)
+	}
+
+	var out bytes.Buffer
+	generate := newRootCommand(&out, new(bytes.Buffer))
+	generate.SetArgs([]string{"provider", "generate", root, "--prompt", "Summarize scope.", "--record-usage", "--max-estimated-cost-usd", "0.01"})
+	if err := generate.Execute(); err != nil {
+		t.Fatalf("execute provider generate: %v output=%q", err, out.String())
+	}
+	for _, want := range []string{
+		"budget_status=within_limit",
+		"budget_max_estimated_cost_usd=0.010000",
+		"usage_record=",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("expected provider generate output to contain %q, got %q", want, out.String())
+		}
+	}
+
+	var usageOut bytes.Buffer
+	usage := newRootCommand(&usageOut, new(bytes.Buffer))
+	usage.SetArgs([]string{"provider", "usage", root})
+	if err := usage.Execute(); err != nil {
+		t.Fatalf("list provider usage: %v output=%q", err, usageOut.String())
+	}
+	for _, want := range []string{
+		"budget_status=within_limit",
+		"budget_max_estimated_cost_usd=0.010000",
+	} {
+		if !strings.Contains(usageOut.String(), want) {
+			t.Fatalf("expected provider usage output to contain %q, got %q", want, usageOut.String())
+		}
+	}
+}
+
+func TestProviderGenerateCommandRejectsBudgetWithoutPricingMetadata(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"choices": [{"message": {"role": "assistant", "content": "approved plan"}}],
+			"usage": {"prompt_tokens": 1000, "completion_tokens": 500, "total_tokens": 1500}
+		}`))
+	}))
+	defer server.Close()
+	t.Setenv("OURO_TEST_PROVIDER_KEY", "secret-value")
+	providers := fmt.Sprintf(`version: 1
+providers:
+  - name: local-openai
+    type: openai_compatible
+    model: gpt-test
+    base_url: %s/v1
+    api_key_env: OURO_TEST_PROVIDER_KEY
+    enabled: true
+`, server.URL)
+	if err := os.WriteFile(filepath.Join(root, "providers.yaml"), []byte(providers), 0o644); err != nil {
+		t.Fatalf("write providers: %v", err)
+	}
+
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{"provider", "generate", root, "--prompt", "Summarize scope.", "--max-estimated-cost-usd", "0.01"})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "estimated cost metadata") {
+		t.Fatalf("expected estimated-cost-required error, got %v output=%q", err, out.String())
+	}
+	if strings.Contains(out.String(), "text=approved plan") {
+		t.Fatalf("expected budget rejection to suppress assistant text, got %q", out.String())
+	}
+}
+
 func TestProviderGenerateCommandRequiresPrompt(t *testing.T) {
 	var out bytes.Buffer
 	cmd := newRootCommand(&out, new(bytes.Buffer))

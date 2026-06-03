@@ -3,6 +3,7 @@ package app
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -11,27 +12,48 @@ import (
 )
 
 type ProviderUsageRecordOptions struct {
-	Now time.Time
+	Now                 time.Time
+	MaxEstimatedCostUSD *float64
 }
 
 type ProviderUsageRecord struct {
-	SchemaVersion          int      `json:"schema_version"`
-	Path                   string   `json:"-"`
-	RecordID               string   `json:"record_id"`
-	Source                 string   `json:"source"`
-	CreatedAt              string   `json:"created_at"`
-	ProviderName           string   `json:"provider_name"`
-	Model                  string   `json:"model"`
-	InputTokens            int      `json:"input_tokens"`
-	OutputTokens           int      `json:"output_tokens"`
-	TotalTokens            int      `json:"total_tokens"`
-	ContextWindowTokens    int      `json:"context_window_tokens,omitempty"`
-	Capabilities           []string `json:"capabilities,omitempty"`
-	EstimatedCostUSD       float64  `json:"estimated_cost_usd,omitempty"`
-	EstimatedCostAvailable bool     `json:"estimated_cost_available"`
+	SchemaVersion             int      `json:"schema_version"`
+	Path                      string   `json:"-"`
+	RecordID                  string   `json:"record_id"`
+	Source                    string   `json:"source"`
+	CreatedAt                 string   `json:"created_at"`
+	ProviderName              string   `json:"provider_name"`
+	Model                     string   `json:"model"`
+	InputTokens               int      `json:"input_tokens"`
+	OutputTokens              int      `json:"output_tokens"`
+	TotalTokens               int      `json:"total_tokens"`
+	ContextWindowTokens       int      `json:"context_window_tokens,omitempty"`
+	Capabilities              []string `json:"capabilities,omitempty"`
+	EstimatedCostUSD          float64  `json:"estimated_cost_usd,omitempty"`
+	EstimatedCostAvailable    bool     `json:"estimated_cost_available"`
+	BudgetEnforced            bool     `json:"budget_enforced,omitempty"`
+	BudgetStatus              string   `json:"budget_status,omitempty"`
+	BudgetMaxEstimatedCostUSD float64  `json:"budget_max_estimated_cost_usd,omitempty"`
+}
+
+type ProviderGenerationBudgetOptions struct {
+	MaxEstimatedCostUSD *float64
+}
+
+type ProviderGenerationBudgetDecision struct {
+	Enforced            bool
+	Status              string
+	MaxEstimatedCostUSD float64
+	EstimatedCostUSD    float64
 }
 
 func RecordProviderGenerationUsage(root string, result ProviderGenerationResult, options ProviderUsageRecordOptions) (ProviderUsageRecord, error) {
+	budget, err := EnforceProviderGenerationBudget(result, ProviderGenerationBudgetOptions{
+		MaxEstimatedCostUSD: options.MaxEstimatedCostUSD,
+	})
+	if err != nil {
+		return ProviderUsageRecord{}, err
+	}
 	usageDir := providerUsageDirectory(root)
 	if err := ensureProviderUsageDirectory(usageDir); err != nil {
 		return ProviderUsageRecord{}, err
@@ -61,10 +83,46 @@ func RecordProviderGenerationUsage(root string, result ProviderGenerationResult,
 		EstimatedCostUSD:       result.EstimatedCostUSD,
 		EstimatedCostAvailable: result.EstimatedCostAvailable,
 	}
+	if budget.Enforced {
+		record.BudgetEnforced = true
+		record.BudgetStatus = budget.Status
+		record.BudgetMaxEstimatedCostUSD = budget.MaxEstimatedCostUSD
+	}
 	if err := writeProviderUsageRecord(recordPath, record); err != nil {
 		return ProviderUsageRecord{}, err
 	}
 	return record, nil
+}
+
+func EnforceProviderGenerationBudget(result ProviderGenerationResult, options ProviderGenerationBudgetOptions) (ProviderGenerationBudgetDecision, error) {
+	if options.MaxEstimatedCostUSD == nil {
+		return ProviderGenerationBudgetDecision{}, nil
+	}
+	maxCost := *options.MaxEstimatedCostUSD
+	if math.IsNaN(maxCost) || math.IsInf(maxCost, 0) {
+		return ProviderGenerationBudgetDecision{}, fmt.Errorf("provider generation max_estimated_cost_usd must be finite")
+	}
+	if maxCost < 0 {
+		return ProviderGenerationBudgetDecision{}, fmt.Errorf("provider generation max_estimated_cost_usd must be non-negative")
+	}
+	if !result.EstimatedCostAvailable {
+		return ProviderGenerationBudgetDecision{}, fmt.Errorf("provider generation budget requires estimated cost metadata")
+	}
+	if math.IsNaN(result.EstimatedCostUSD) || math.IsInf(result.EstimatedCostUSD, 0) {
+		return ProviderGenerationBudgetDecision{}, fmt.Errorf("provider generation estimated cost must be finite")
+	}
+	if result.EstimatedCostUSD < 0 {
+		return ProviderGenerationBudgetDecision{}, fmt.Errorf("provider generation estimated cost must be non-negative")
+	}
+	if result.EstimatedCostUSD > maxCost {
+		return ProviderGenerationBudgetDecision{}, fmt.Errorf("provider generation estimated cost %.6f exceeds budget %.6f", result.EstimatedCostUSD, maxCost)
+	}
+	return ProviderGenerationBudgetDecision{
+		Enforced:            true,
+		Status:              "within_limit",
+		MaxEstimatedCostUSD: maxCost,
+		EstimatedCostUSD:    result.EstimatedCostUSD,
+	}, nil
 }
 
 func ListProviderUsageRecords(root string) ([]ProviderUsageRecord, error) {

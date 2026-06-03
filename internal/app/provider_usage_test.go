@@ -1,6 +1,7 @@
 package app
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -66,6 +67,108 @@ func TestRecordProviderGenerationUsageWritesMetadataOnlyRecord(t *testing.T) {
 	}
 	if read.RecordID != record.RecordID || read.Path != record.Path {
 		t.Fatalf("unexpected read record: %#v", read)
+	}
+}
+
+func TestRecordProviderGenerationUsagePersistsBudgetDecision(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	maxCost := 0.01
+	record, err := RecordProviderGenerationUsage(root, ProviderGenerationResult{
+		ProviderName:           "local-openai",
+		Model:                  "gpt-test",
+		InputTokens:            1000,
+		OutputTokens:           500,
+		TotalTokens:            1500,
+		EstimatedCostUSD:       0.0075,
+		EstimatedCostAvailable: true,
+	}, ProviderUsageRecordOptions{MaxEstimatedCostUSD: &maxCost})
+	if err != nil {
+		t.Fatalf("record provider generation usage: %v", err)
+	}
+	if !record.BudgetEnforced || record.BudgetStatus != "within_limit" || record.BudgetMaxEstimatedCostUSD != 0.01 {
+		t.Fatalf("expected persisted budget decision, got %#v", record)
+	}
+}
+
+func TestRecordProviderGenerationUsageRejectsOverBudgetWithoutWritingRecord(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	maxCost := 0.001
+	_, err := RecordProviderGenerationUsage(root, ProviderGenerationResult{
+		ProviderName:           "local-openai",
+		Model:                  "gpt-test",
+		InputTokens:            1000,
+		OutputTokens:           500,
+		TotalTokens:            1500,
+		EstimatedCostUSD:       0.0075,
+		EstimatedCostAvailable: true,
+	}, ProviderUsageRecordOptions{MaxEstimatedCostUSD: &maxCost})
+	if err == nil || !strings.Contains(err.Error(), "exceeds budget") {
+		t.Fatalf("expected over-budget error, got %v", err)
+	}
+	records, listErr := ListProviderUsageRecords(root)
+	if listErr != nil {
+		t.Fatalf("list provider usage records: %v", listErr)
+	}
+	if len(records) != 0 {
+		t.Fatalf("expected no usage records after rejected budget, got %#v", records)
+	}
+}
+
+func TestRecordProviderGenerationUsageRejectsBudgetWithoutEstimatedCost(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	maxCost := 0.01
+	_, err := RecordProviderGenerationUsage(root, ProviderGenerationResult{
+		ProviderName: "local-openai",
+		Model:        "gpt-test",
+		InputTokens:  1000,
+		OutputTokens: 500,
+		TotalTokens:  1500,
+	}, ProviderUsageRecordOptions{MaxEstimatedCostUSD: &maxCost})
+	if err == nil || !strings.Contains(err.Error(), "estimated cost metadata") {
+		t.Fatalf("expected estimated-cost-required error, got %v", err)
+	}
+	records, listErr := ListProviderUsageRecords(root)
+	if listErr != nil {
+		t.Fatalf("list provider usage records: %v", listErr)
+	}
+	if len(records) != 0 {
+		t.Fatalf("expected no usage records without estimated cost, got %#v", records)
+	}
+}
+
+func TestRecordProviderGenerationUsageRejectsNonFiniteBudget(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	maxCost := math.NaN()
+	_, err := RecordProviderGenerationUsage(root, ProviderGenerationResult{
+		ProviderName:           "local-openai",
+		Model:                  "gpt-test",
+		InputTokens:            1000,
+		OutputTokens:           500,
+		TotalTokens:            1500,
+		EstimatedCostUSD:       0.0075,
+		EstimatedCostAvailable: true,
+	}, ProviderUsageRecordOptions{MaxEstimatedCostUSD: &maxCost})
+	if err == nil || !strings.Contains(err.Error(), "finite") {
+		t.Fatalf("expected finite-budget error, got %v", err)
+	}
+	records, listErr := ListProviderUsageRecords(root)
+	if listErr != nil {
+		t.Fatalf("list provider usage records: %v", listErr)
+	}
+	if len(records) != 0 {
+		t.Fatalf("expected no usage records with non-finite budget, got %#v", records)
 	}
 }
 
