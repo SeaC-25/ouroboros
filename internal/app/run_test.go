@@ -5878,6 +5878,269 @@ execution:
 	}
 }
 
+func TestRunWorkspacePromotesDalfoxJSONToEvidenceFinding(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	scope := `version: 1
+scope:
+  target_policy: enforce
+  targets:
+    - kind: url
+      value: https://app.example/search?q=hello
+  exclusions: []
+execution:
+  isolation: process
+  tool_concurrency: 1
+`
+	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
+		t.Fatalf("write URL scope: %v", err)
+	}
+	marker := filepath.Join(t.TempDir(), "tool-level-dalfox-ran")
+	writeManagedBundleFixture(t, root, "dalfox", "binary", "2.12.0", `#!/usr/bin/env sh
+cat <<'JSON'
+{"pocs":[{"type":"V","inject_type":"inHTML","poc_type":"verified","method":"GET","data":"https://app.example/search?q=%3Cscript%3Esecret-token%3C%2Fscript%3E#frag","param":"q","payload":"secret-token","evidence":"secret-token","cwe":"CWE-79","severity":"high","raw_request":"Authorization: Bearer secret-token","raw_response":"secret-token"}]}
+JSON
+touch `+marker+`
+`)
+	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "dalfox", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed dalfox bundle: %v", err)
+	}
+
+	result, err := RunWorkspaceWithOptions(ctx, root, RunOptions{
+		Action:                compiler.ActionGenerateCandidates,
+		DeferReportProjection: true,
+	})
+	if err != nil {
+		t.Fatalf("run workspace with dalfox parser: %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("expected dalfox payload to run through registered argv builder: %v", err)
+	}
+	store, err := eventlog.OpenSQLite(filepath.Join(root, "replay", "events.db"))
+	if err != nil {
+		t.Fatalf("open event log: %v", err)
+	}
+	defer store.Close()
+	events, err := store.Replay(ctx, result.RunID)
+	if err != nil {
+		t.Fatalf("replay events: %v", err)
+	}
+	snapshot, err := eventlog.BuildReplaySnapshot(events)
+	if err != nil {
+		t.Fatalf("build replay snapshot: %v", err)
+	}
+
+	var findingID string
+	for _, fact := range snapshot.Blackboard.Facts {
+		if fact.Source != "parser.dalfox_json" {
+			continue
+		}
+		findingID = fact.ID
+		if fact.Kind != "finding" {
+			t.Fatalf("expected dalfox parser fact kind finding, got %#v", fact)
+		}
+		for _, want := range []string{"dalfox", "V", "HIGH", "https://app.example/search", "q", "CWE-79"} {
+			if !strings.Contains(fact.Statement, want) {
+				t.Fatalf("expected dalfox finding to contain %q, got %#v", want, fact)
+			}
+		}
+		if strings.Contains(fact.Statement, "secret-token") || strings.Contains(fact.Statement, "?") || strings.Contains(fact.Statement, "#") {
+			t.Fatalf("dalfox finding statement leaked redacted output: %#v", fact)
+		}
+		if fact.Confidence < 0.85 {
+			t.Fatalf("expected high-confidence dalfox finding, got %#v", fact)
+		}
+		break
+	}
+	if findingID == "" {
+		t.Fatalf("expected dalfox parser finding fact in replay snapshot, facts=%#v", snapshot.Blackboard.Facts)
+	}
+	node, ok := snapshot.Evidence.Node(findingID)
+	if !ok {
+		t.Fatalf("expected dalfox parser fact to project into evidence graph")
+	}
+	if node.Type != evidence.NodeFinding {
+		t.Fatalf("expected evidence finding node, got %#v", node)
+	}
+
+	foundFactEvent := false
+	foundParserEvent := false
+	for _, event := range events {
+		switch event.Type {
+		case eventlog.EventFact:
+			var payload struct {
+				FactID     string `json:"fact_id"`
+				Source     string `json:"source"`
+				Type       string `json:"type"`
+				InjectType string `json:"inject_type"`
+				PoCType    string `json:"poc_type"`
+				Method     string `json:"method"`
+				Param      string `json:"param"`
+				Severity   string `json:"severity"`
+				CWE        string `json:"cwe"`
+				MatchedURL string `json:"matched_url"`
+				TargetURL  string `json:"target_url"`
+				ParserID   string `json:"parser_id"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatalf("decode fact event: %v", err)
+			}
+			if payload.FactID != findingID || payload.Source != "parser.dalfox_json" {
+				continue
+			}
+			foundFactEvent = true
+			if payload.Type != "V" || payload.InjectType != "inHTML" || payload.PoCType != "verified" || payload.Method != "GET" || payload.Param != "q" || payload.Severity != "HIGH" || payload.CWE != "CWE-79" || payload.MatchedURL != "https://app.example/search" || payload.TargetURL != "https://app.example/search" || payload.ParserID != "dalfox_json" {
+				t.Fatalf("expected structured dalfox finding metadata, got %#v", payload)
+			}
+			if strings.Contains(string(event.Payload), "secret-token") || strings.Contains(string(event.Payload), "Authorization") || strings.Contains(string(event.Payload), "raw_request") || strings.Contains(string(event.Payload), "raw_response") || strings.Contains(string(event.Payload), "payload") || strings.Contains(string(event.Payload), "evidence") {
+				t.Fatalf("dalfox finding fact payload leaked redacted output: %s", string(event.Payload))
+			}
+		case eventlog.EventParser:
+			var payload struct {
+				Parser string `json:"parser"`
+				Status string `json:"status"`
+				ToolID string `json:"tool_id"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatalf("decode parser event: %v", err)
+			}
+			if payload.Parser == "dalfox_json" && payload.Status == "parsed" && payload.ToolID == "dalfox" {
+				foundParserEvent = true
+			}
+		}
+	}
+	if !foundFactEvent {
+		t.Fatalf("expected raw dalfox fact event for %s", findingID)
+	}
+	if !foundParserEvent {
+		t.Fatalf("expected parsed dalfox parser event, events=%#v", events)
+	}
+}
+
+func TestNativeManagedRunCommandBuildsDalfoxXSSScanArgvForURLScope(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	payloadPath := writeManagedBundleFixture(t, root, "dalfox", "binary", "2.12.0", "#!/usr/bin/env sh\nprintf 'dalfox-url\\n'\n")
+	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "dalfox", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed dalfox bundle: %v", err)
+	}
+	request := ToolExecutionRequest{
+		WorkspaceRoot: root,
+		Node: compiler.PlanNode{
+			ID:             "dalfox-url-scope:01",
+			Capability:     "web.candidate_generation",
+			ManifestName:   "web-api-pack",
+			ToolID:         "dalfox",
+			AdapterID:      "managed_binary",
+			Operation:      "xss_scan",
+			ParserID:       "dalfox_json",
+			TargetKind:     "url",
+			DependencyName: "dalfox",
+			DependencyKind: "binary",
+			Runner:         "native",
+		},
+		ScopeTargets:      []ScopeTarget{{Kind: "url", Value: "https://app.example/search?q=hello"}},
+		ScopeTargetPolicy: "enforce",
+		IsolationMode:     "process",
+	}
+
+	command, target, ok, err := nativeManagedRunCommandWithTarget(request)
+	if err != nil || !ok {
+		t.Fatalf("expected dalfox command for URL scope, command=%#v target=%#v ok=%v err=%v", command, target, ok, err)
+	}
+	if target.Kind != "url" || target.Value != "https://app.example/search?q=hello" {
+		t.Fatalf("expected selected URL target, got %#v", target)
+	}
+	want := []string{payloadPath, "url", "https://app.example/search?q=hello", "--format", "json", "--silence", "--no-color", "--no-spinner"}
+	if strings.Join(command, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("unexpected dalfox argv: got %#v want %#v", command, want)
+	}
+}
+
+func TestNativeManagedRunCommandKeepsDalfoxOfflineForNonURLScope(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	writeManagedBundleFixture(t, root, "dalfox", "binary", "2.12.0", "#!/usr/bin/env sh\nprintf 'dalfox-non-url\\n'\n")
+	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "dalfox", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed dalfox bundle: %v", err)
+	}
+	for _, scopeTarget := range []ScopeTarget{
+		{Kind: "domain", Value: "example.com"},
+		{Kind: "host", Value: "app.example.com"},
+		{Kind: "cidr", Value: "10.0.0.0/24"},
+	} {
+		t.Run(scopeTarget.Kind, func(t *testing.T) {
+			request := ToolExecutionRequest{
+				WorkspaceRoot: root,
+				Node: compiler.PlanNode{
+					ID:             "dalfox-non-url-scope:01",
+					Capability:     "web.candidate_generation",
+					ManifestName:   "web-api-pack",
+					ToolID:         "dalfox",
+					AdapterID:      "managed_binary",
+					Operation:      "xss_scan",
+					ParserID:       "dalfox_json",
+					TargetKind:     "url",
+					DependencyName: "dalfox",
+					DependencyKind: "binary",
+					Runner:         "native",
+				},
+				ScopeTargets:      []ScopeTarget{scopeTarget},
+				ScopeTargetPolicy: "enforce",
+				IsolationMode:     "process",
+			}
+
+			command, ok, err := nativeManagedRunCommand(request)
+			if err != nil || ok || len(command) > 0 {
+				t.Fatalf("dalfox must stay offline for non-URL scope %#v, command=%#v ok=%v err=%v", scopeTarget, command, ok, err)
+			}
+		})
+	}
+}
+
+func TestNativeManagedRunCommandRejectsExcludedDalfoxURL(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	writeManagedBundleFixture(t, root, "dalfox", "binary", "2.12.0", "#!/usr/bin/env sh\nprintf 'dalfox-excluded\\n'")
+	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "dalfox", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed dalfox bundle: %v", err)
+	}
+	request := ToolExecutionRequest{
+		WorkspaceRoot: root,
+		Node: compiler.PlanNode{
+			ID:             "dalfox-excluded-url:01",
+			Capability:     "web.candidate_generation",
+			ManifestName:   "web-api-pack",
+			ToolID:         "dalfox",
+			AdapterID:      "managed_binary",
+			Operation:      "xss_scan",
+			ParserID:       "dalfox_json",
+			TargetKind:     "url",
+			DependencyName: "dalfox",
+			DependencyKind: "binary",
+			Runner:         "native",
+		},
+		ScopeTargets:      []ScopeTarget{{Kind: "url", Value: "https://app.example/search?q=hello"}},
+		ScopeExclusions:   []string{"https://app.example/search"},
+		ScopeTargetPolicy: "enforce",
+		IsolationMode:     "process",
+	}
+
+	command, ok, err := nativeManagedRunCommand(request)
+	if err == nil || !strings.Contains(err.Error(), "excluded") || !ok || len(command) > 0 {
+		t.Fatalf("expected excluded dalfox URL to fail before argv, command=%#v ok=%v err=%v", command, ok, err)
+	}
+}
+
 func TestNativeManagedRunCommandBuildsFfufPathFuzzArgvForURLScope(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
 	if err := InitWorkspace(root); err != nil {
