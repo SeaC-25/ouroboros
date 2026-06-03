@@ -1769,6 +1769,10 @@ func managedBinaryTargetKinds(binary string, operation string, node compiler.Pla
 		if binary == "naabu" {
 			return []string{string(domain.TargetCIDR)}
 		}
+	case "dns_probe":
+		if binary == "dnsx" {
+			return []string{string(domain.TargetDomain)}
+		}
 	case "service_fingerprint":
 		if binary == "nmap" {
 			return []string{string(domain.TargetHost), string(domain.TargetCIDR)}
@@ -1821,6 +1825,24 @@ func managedBinaryCommandFor(request ToolExecutionRequest, binary string, operat
 			}
 			return []string{binary, "-json", "-host", target.Value}, true, nil
 		}
+	case "dns_probe":
+		if binary == "dnsx" {
+			if target.Kind != string(domain.TargetDomain) {
+				return nil, false, nil
+			}
+			if !targetPolicyDisabled(request.ScopeTargetPolicy) && scopeTargetExcludedForRequest(request, target) {
+				return nil, true, fmt.Errorf("scope target %s is excluded for capability %s", target.Value, request.Node.Capability)
+			}
+			domainName, ok := normalizeSubfinderDNSName(target.Value)
+			if !ok {
+				return nil, true, fmt.Errorf("dnsx command requires valid domain scope target")
+			}
+			inputPath, err := writeDnsxManagedInputFile(request.WorkspaceRoot, request.Node.ID, domainName)
+			if err != nil {
+				return nil, true, err
+			}
+			return []string{binary, "-j", "-silent", "-omit-raw", "-l", inputPath}, true, nil
+		}
 	case "service_fingerprint":
 		if binary == "nmap" {
 			if target.Kind != string(domain.TargetHost) && target.Kind != string(domain.TargetCIDR) {
@@ -1837,6 +1859,22 @@ func managedBinaryCommandFor(request ToolExecutionRequest, binary string, operat
 		}
 	}
 	return nil, false, nil
+}
+
+func writeDnsxManagedInputFile(root string, nodeID string, domainName string) (string, error) {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		return "", fmt.Errorf("dnsx command requires workspace root")
+	}
+	inputDir := filepath.Join(root, "toolchain", "managed-inputs", "dnsx", safeFactIDPart(nodeID))
+	if err := os.MkdirAll(inputDir, 0o755); err != nil {
+		return "", fmt.Errorf("create dnsx managed input directory: %w", err)
+	}
+	inputPath := filepath.Join(inputDir, "dnsx-targets.txt")
+	if err := os.WriteFile(inputPath, []byte(domainName+"\n"), 0o644); err != nil {
+		return "", fmt.Errorf("write dnsx managed input file: %w", err)
+	}
+	return inputPath, nil
 }
 
 func managedBinaryHasRuleBundleDependency(node compiler.PlanNode, name string) bool {
