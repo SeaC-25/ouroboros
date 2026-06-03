@@ -9,6 +9,17 @@
 - Focused GREEN validation passed for the new nmap parser tests and run-level fake managed nmap fixtures.
 - Parser regression passed across Nmap, Httpx, Nuclei, and Mobsfscan parser promotion tests.
 - Updated README, development docs, findings, task plan, and prepared `docs/progress/milestone-30-nmap-parser-evidence.md`.
+- Started `subfinder_jsonl` parser evidence promotion in isolated worktree `.worktrees/subfinder-parser-evidence` on branch `feat/subfinder-parser-evidence`.
+- Confirmed sibling nmap worktree has already claimed `docs/progress/milestone-30-nmap-parser-evidence.md`; using `docs/progress/milestone-31-subfinder-parser-evidence.md` for this branch.
+- Baseline validation was already run before edits with `GOPROXY=https://goproxy.cn,direct go test ./...` and passed.
+- Added RED parser-level tests for `subfinder_jsonl` promotion, explicit domain-scope requirement, out-of-scope/excluded skipping, unsafe DNS value rejection, parse failure without facts, and raw 1 MiB output cap.
+- Added RED run-level tests using a fake workspace-managed `subfinder` bundle that prints JSONL, proving valid explicit-domain output promotes Evidence Graph surface facts and malformed output records `parse_failed` without failing the completed run.
+- Implemented `internal/app/subfinder_parser.go` and registered `subfinder_jsonl` in the app parser dispatcher.
+- Focused GREEN validation passed with `GOPROXY=https://goproxy.cn,direct go test ./internal/app -run 'Subfinder' -count=1 -v`.
+- Parser regression, app package tests, full repository tests, strict doctor, diff hygiene, and touched-file formatting checks passed before commit.
+- Updated README, development docs, findings, task plan, progress log, and wrote `docs/progress/milestone-31-subfinder-parser-evidence.md`; milestone 30 was already occupied by the parallel nmap worktree.
+- 2026-06-03 18:40 CST: Integrated the completed `feat/nmap-parser-evidence` branch into `main` as merge commit `63abf2d`; the first sandboxed merge attempt failed on `.git/ORIG_HEAD.lock`, then the same merge succeeded after the permissions context changed. Focused nmap regression passed with `GOCACHE=/tmp/ouro-go-cache GOPROXY=https://goproxy.cn,direct go test ./internal/app -run 'TestParserEventsForToolExecution.*Nmap|TestRunWorkspace.*Nmap' -count=1 -v`.
+- 2026-06-03 18:45 CST: Resolved `feat/subfinder-parser-evidence` merge conflicts by keeping both `nmap_xml` and `subfinder_jsonl` dispatcher cases, both run-level parser promotion test sets, and both milestone/documentation updates. Focused combined parser/run regression passed with `GOCACHE=/tmp/ouro-go-cache GOPROXY=https://goproxy.cn,direct go test ./internal/app -run 'TestParserEventsForToolExecution.*(Nmap|Subfinder)|TestRunWorkspace.*(Nmap|Subfinder)' -count=1 -v`; `git diff --check` was clean. App package/full-suite verification is pending after this progress update and merge commit.
 - Continued managed binary execution work in isolated worktree `.worktrees/managed-binary-argv-builders` from `main` commit `43d9a5f`.
 - Baseline validation passed before edits with `GOPROXY=https://goproxy.cn,direct go test ./... -count=1`.
 - Added RED app tests proving tool-level catalog nodes with installed `httpx` and `nmap` managed fixture binaries still stayed offline before registered argv builders existed, and proving excluded tool-level targets must fail before payload execution.

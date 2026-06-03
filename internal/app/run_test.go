@@ -4844,6 +4844,210 @@ execution:
 	}
 }
 
+func TestRunWorkspacePromotesSubfinderJSONLToEvidenceSurface(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	scope := `version: 1
+scope:
+  target_policy: enforce
+  targets:
+    - kind: domain
+      value: example.com
+  exclusions: []
+execution:
+  isolation: process
+  tool_concurrency: 1
+`
+	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
+		t.Fatalf("write domain scope: %v", err)
+	}
+	writeManagedBundleFixture(t, root, "subfinder", "binary", "2.7.0", `#!/usr/bin/env sh
+cat <<'JSONL'
+{"host":"api.example.com","source":"secret-token","ip":"192.0.2.10","resolver":"8.8.8.8"}
+{"host":"evil.example.net","source":"secret-token"}
+JSONL
+`)
+	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "subfinder", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed subfinder bundle: %v", err)
+	}
+
+	result, err := RunWorkspaceWithOptions(ctx, root, RunOptions{DeferReportProjection: true})
+	if err != nil {
+		t.Fatalf("run workspace with subfinder parser: %v", err)
+	}
+	store, err := eventlog.OpenSQLite(filepath.Join(root, "replay", "events.db"))
+	if err != nil {
+		t.Fatalf("open event log: %v", err)
+	}
+	defer store.Close()
+	events, err := store.Replay(ctx, result.RunID)
+	if err != nil {
+		t.Fatalf("replay events: %v", err)
+	}
+	snapshot, err := eventlog.BuildReplaySnapshot(events)
+	if err != nil {
+		t.Fatalf("build replay snapshot: %v", err)
+	}
+
+	var surfaceID string
+	for _, fact := range snapshot.Blackboard.Facts {
+		if fact.Source != "parser.subfinder_jsonl" {
+			continue
+		}
+		surfaceID = fact.ID
+		if fact.Kind != "surface" {
+			t.Fatalf("expected subfinder parser fact kind surface, got %#v", fact)
+		}
+		for _, want := range []string{"subfinder", "api.example.com", "domain=example.com"} {
+			if !strings.Contains(fact.Statement, want) {
+				t.Fatalf("expected subfinder surface to contain %q, got %#v", want, fact)
+			}
+		}
+		for _, leaked := range []string{"secret-token", "192.0.2.10", "8.8.8.8", "evil.example.net"} {
+			if strings.Contains(fact.Statement, leaked) {
+				t.Fatalf("subfinder surface statement leaked untrusted output %q: %#v", leaked, fact)
+			}
+		}
+		if fact.Confidence < 0.6 {
+			t.Fatalf("expected completed subfinder surface confidence, got %#v", fact)
+		}
+		break
+	}
+	if surfaceID == "" {
+		t.Fatalf("expected subfinder parser surface fact in replay snapshot, facts=%#v", snapshot.Blackboard.Facts)
+	}
+	node, ok := snapshot.Evidence.Node(surfaceID)
+	if !ok {
+		t.Fatalf("expected subfinder parser fact to project into evidence graph")
+	}
+	if node.Type != evidence.NodeSurface {
+		t.Fatalf("expected evidence surface node, got %#v", node)
+	}
+
+	foundFactEvent := false
+	foundParserEvent := false
+	for _, event := range events {
+		switch event.Type {
+		case eventlog.EventFact:
+			var payload struct {
+				FactID    string `json:"fact_id"`
+				Source    string `json:"source"`
+				Domain    string `json:"domain"`
+				Subdomain string `json:"subdomain"`
+				ParserID  string `json:"parser_id"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatalf("decode fact event: %v", err)
+			}
+			if payload.FactID != surfaceID || payload.Source != "parser.subfinder_jsonl" {
+				continue
+			}
+			foundFactEvent = true
+			if payload.Domain != "example.com" || payload.Subdomain != "api.example.com" || payload.ParserID != "subfinder_jsonl" {
+				t.Fatalf("expected structured subfinder fact metadata, got %#v", payload)
+			}
+			for _, leaked := range []string{"secret-token", "192.0.2.10", "8.8.8.8", "evil.example.net"} {
+				if strings.Contains(string(event.Payload), leaked) {
+					t.Fatalf("subfinder fact payload leaked untrusted output %q: %s", leaked, string(event.Payload))
+				}
+			}
+		case eventlog.EventParser:
+			var payload struct {
+				Parser string `json:"parser"`
+				Status string `json:"status"`
+				ToolID string `json:"tool_id"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatalf("decode parser event: %v", err)
+			}
+			if payload.Parser == "subfinder_jsonl" && payload.Status == "parsed" && payload.ToolID == "subfinder" {
+				foundParserEvent = true
+			}
+		}
+	}
+	if !foundFactEvent {
+		t.Fatalf("expected raw subfinder fact event for %s", surfaceID)
+	}
+	if !foundParserEvent {
+		t.Fatalf("expected parsed subfinder parser event, events=%#v", events)
+	}
+}
+
+func TestRunWorkspaceRecordsSubfinderParseFailureWithoutSurface(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	scope := `version: 1
+scope:
+  target_policy: enforce
+  targets:
+    - kind: domain
+      value: example.com
+  exclusions: []
+execution:
+  isolation: process
+  tool_concurrency: 1
+`
+	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
+		t.Fatalf("write domain scope: %v", err)
+	}
+	writeManagedBundleFixture(t, root, "subfinder", "binary", "2.7.0", "#!/usr/bin/env sh\nprintf 'not-jsonl\\n'\n")
+	if _, err := ExecuteManagedToolBundleInstall(root, "web-api-pack", "subfinder", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed subfinder bundle: %v", err)
+	}
+
+	result, err := RunWorkspaceWithOptions(ctx, root, RunOptions{DeferReportProjection: true})
+	if err != nil {
+		t.Fatalf("parse failure should not fail completed subfinder run: %v", err)
+	}
+	store, err := eventlog.OpenSQLite(filepath.Join(root, "replay", "events.db"))
+	if err != nil {
+		t.Fatalf("open event log: %v", err)
+	}
+	defer store.Close()
+	events, err := store.Replay(ctx, result.RunID)
+	if err != nil {
+		t.Fatalf("replay events: %v", err)
+	}
+
+	foundParseFailure := false
+	for _, event := range events {
+		switch event.Type {
+		case eventlog.EventParser:
+			var payload struct {
+				Parser       string `json:"parser"`
+				Status       string `json:"status"`
+				ToolID       string `json:"tool_id"`
+				FindingCount int    `json:"finding_count"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatalf("decode parser event: %v", err)
+			}
+			if payload.Parser == "subfinder_jsonl" && payload.Status == "parse_failed" && payload.ToolID == "subfinder" && payload.FindingCount == 0 {
+				foundParseFailure = true
+			}
+		case eventlog.EventFact:
+			var payload struct {
+				Source string `json:"source"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatalf("decode fact event: %v", err)
+			}
+			if payload.Source == "parser.subfinder_jsonl" {
+				t.Fatalf("parse failure must not emit subfinder parser fact: %#v", payload)
+			}
+		}
+	}
+	if !foundParseFailure {
+		t.Fatalf("expected run-level subfinder parse_failed event, events=%#v", events)
+	}
+}
+
 func TestRunWorkspaceRejectsExcludedArtifactBeforeMobsfscanExecution(t *testing.T) {
 	ctx := context.Background()
 	root := filepath.Join(t.TempDir(), "workspace")
