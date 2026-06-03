@@ -1,0 +1,21 @@
+id: ouro-default-healthcheck
+
+info:
+  name: Ouroboros Default HTTP Healthcheck
+  author: ouroboros
+  severity: info
+  description: Minimal release-packaged template used to verify managed rule bundle installation.
+  tags: ouroboros,healthcheck
+
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/"
+    matchers:
+      - type: status
+        status:
+          - 200
+          - 301
+          - 302
+          - 401
+          - 403

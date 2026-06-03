@@ -62,6 +62,68 @@ func TestReleaseScriptCreatesArchiveAndChecksums(t *testing.T) {
 	}
 }
 
+func TestReleaseScriptPackagesBuiltInManagedRuleBundle(t *testing.T) {
+	dist := t.TempDir()
+	version := "0.1.0-rule-bundle-test"
+	env := append(os.Environ(),
+		"GOPROXY=https://goproxy.cn,direct",
+		"DIST_DIR="+dist,
+		"VERSION="+version,
+		"GOOS="+runtime.GOOS,
+		"GOARCH="+runtime.GOARCH,
+	)
+	cmd := exec.Command("sh", "./scripts/release.sh")
+	cmd.Env = env
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("release script failed: %v\n%s", err, output)
+	}
+
+	packageName := "ouro_" + version + "_" + runtime.GOOS + "_" + runtime.GOARCH
+	archivePath := filepath.Join(dist, packageName+".tar.gz")
+	members := tarGzMembers(t, archivePath)
+	for _, want := range []string{
+		packageName + "/toolchains/managed-bundles/nuclei-templates/bundle.yaml",
+		packageName + "/toolchains/managed-bundles/nuclei-templates/payload/http/ouro-default-healthcheck.yaml",
+	} {
+		if !members[want] {
+			t.Fatalf("expected built-in managed rule bundle member %q in %#v\noutput:\n%s", want, members, output)
+		}
+	}
+
+	prefix := filepath.Join(t.TempDir(), "prefix")
+	installCmd := exec.Command("sh", "./scripts/install.sh", archivePath)
+	installCmd.Env = append(os.Environ(), "PREFIX="+prefix)
+	installOutput, err := installCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("install release archive failed: %v\n%s", err, installOutput)
+	}
+
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	releaseRoot := filepath.Join(prefix, "share", "ouroboros")
+	result, err := app.ExecuteReleaseManagedToolBundleInstall(root, releaseRoot, "web-api-pack", "nuclei-templates", app.ManagedToolBundleInstallOptions{Execute: true})
+	if err != nil {
+		t.Fatalf("install built-in managed rule bundle from release: %v", err)
+	}
+	if result.Kind != "rule_bundle" || result.Mode != "workspace-copy-link" {
+		t.Fatalf("unexpected managed rule bundle install result: %#v", result)
+	}
+	installedRule := filepath.Join(root, "toolchain", "managed-bundles", "nuclei-templates", "payload", "http", "ouro-default-healthcheck.yaml")
+	if _, err := os.Stat(installedRule); err != nil {
+		t.Fatalf("expected installed managed rule payload %s: %v", installedRule, err)
+	}
+	linkInfo, err := os.Lstat(filepath.Join(root, "toolchain", "rules", "nuclei-templates"))
+	if err != nil {
+		t.Fatalf("expected managed rule bundle link: %v", err)
+	}
+	if linkInfo.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("expected managed rule bundle install to create symlink, mode=%v", linkInfo.Mode())
+	}
+}
+
 func TestInstallScriptInstallsFromLocalArchiveWithoutNetwork(t *testing.T) {
 	releaseRoot := t.TempDir()
 	payloadDir := filepath.Join(releaseRoot, "ouro_0.1.0-test_linux_amd64")

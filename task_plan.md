@@ -18,6 +18,7 @@ Continue the Ouroboros TUI-first pentest IDE implementation by using the local r
 | Container-mode managed execution | complete | Allowed catalog tool-level managed argv builders to run through existing container isolation without resolving host workspace binaries, leaving the configured container image responsible for inner tools while preserving scope and audit controls. |
 | OpenAI-compatible provider adapter | complete | Added an `openai_compatible` provider readiness preflight with environment-based bearer credentials, sanitized errors, and provider/model replay usage while leaving generation calls as a future slice. |
 | Release install checksum verification | complete | `scripts/install.sh` now verifies the matching `SHA256SUMS` archive entry when present before extracting or installing a local release tarball. |
+| Release managed rule bundle seed | complete | Release archives now include a digest-verified managed `nuclei-templates` rule bundle seed that can be imported into a workspace and linked under `toolchain/rules/` without network access. |
 
 ## Phases
 | Phase | Status | Notes |
