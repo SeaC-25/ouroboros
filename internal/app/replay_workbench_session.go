@@ -411,14 +411,15 @@ func replayWorkbenchSessionEndpoints(selectedRunID string, filters map[string]st
 		htmlQuery.Set("run", selectedRunID)
 	}
 	return map[string]string{
-		"html":            replayWorkbenchSessionPathWithQuery("/", htmlQuery),
-		"replay":          replayWorkbenchSessionPathWithQuery("/api/replay", filterQuery),
-		"replays":         replayWorkbenchSessionPathWithQuery("/api/replays", filterQuery),
-		"sessions":        "/api/sessions",
-		"graph":           replayWorkbenchSessionPathWithQuery("/api/graph", filterQuery),
-		"graphs":          replayWorkbenchSessionPathWithQuery("/api/graphs", filterQuery),
-		"graph_ndjson":    replayWorkbenchSessionPathWithQuery("/api/graph.ndjson", filterQuery),
-		"timeline_ndjson": replayWorkbenchSessionPathWithQuery("/api/timeline.ndjson", filterQuery),
+		"html":                   replayWorkbenchSessionPathWithQuery("/", htmlQuery),
+		"replay":                 replayWorkbenchSessionPathWithQuery("/api/replay", filterQuery),
+		"replays":                replayWorkbenchSessionPathWithQuery("/api/replays", filterQuery),
+		"sessions":               "/api/sessions",
+		"provider_usage_summary": "/api/provider-usage-summary",
+		"graph":                  replayWorkbenchSessionPathWithQuery("/api/graph", filterQuery),
+		"graphs":                 replayWorkbenchSessionPathWithQuery("/api/graphs", filterQuery),
+		"graph_ndjson":           replayWorkbenchSessionPathWithQuery("/api/graph.ndjson", filterQuery),
+		"timeline_ndjson":        replayWorkbenchSessionPathWithQuery("/api/timeline.ndjson", filterQuery),
 	}
 }
 
