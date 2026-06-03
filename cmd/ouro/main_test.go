@@ -519,6 +519,66 @@ func TestRunCommandCanDeferReportProjection(t *testing.T) {
 	}
 }
 
+func TestRunCommandCanSelectFingerprintSurfaceActionForArtifactScope(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	artifactPath := filepath.Join(root, "artifacts", "samples", "app.apk")
+	if err := os.MkdirAll(filepath.Dir(artifactPath), 0o755); err != nil {
+		t.Fatalf("create artifact dir: %v", err)
+	}
+	if err := os.WriteFile(artifactPath, []byte("apk fixture"), 0o644); err != nil {
+		t.Fatalf("write artifact: %v", err)
+	}
+	scope := `version: 1
+scope:
+  target_policy: enforce
+  targets:
+    - kind: artifact
+      value: samples/app.apk
+  exclusions: []
+execution:
+  isolation: process
+`
+	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
+		t.Fatalf("write scope: %v", err)
+	}
+	marker := filepath.Join(t.TempDir(), "cli-action-mobsfscan-ran")
+	writeManagedBundleFixtureForCLITest(t, root, "mobsfscan", "#!/bin/sh\nprintf 'cli-mobsfscan args=%s target=%s\\n' \"$*\" \"$OURO_TARGET\"\ntouch "+marker+"\n")
+	if _, err := app.ExecuteManagedToolBundleInstall(root, "ctf-pack", "mobsfscan", app.ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed mobsfscan bundle: %v", err)
+	}
+
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{"run", root, "--action", "fingerprint_surface", "--defer-report-projection"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute run with fingerprint_surface action: %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("expected run --action fingerprint_surface to execute mobsfscan payload: %v", err)
+	}
+	if !strings.Contains(out.String(), "report: not-generated") {
+		t.Fatalf("expected deferred action run output to show report not-generated, got %q", out.String())
+	}
+}
+
+func TestRunCommandRejectsUnknownAction(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{"run", root, "--action", "definitely_unknown"})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "unknown semantic action") {
+		t.Fatalf("expected unknown action error, got err=%v output=%q", err, out.String())
+	}
+}
+
 func TestReportProjectCommandWritesDeferredRunReport(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
 	if err := app.InitWorkspace(root); err != nil {

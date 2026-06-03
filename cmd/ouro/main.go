@@ -253,6 +253,7 @@ func printDoctorWarnings(out io.Writer, warnings []string) error {
 func newRunCommand(out io.Writer) *cobra.Command {
 	var printTUI bool
 	var interactive bool
+	var action string
 	var deferReportProjection bool
 	var requireSafetyAuthorization bool
 	cmd := &cobra.Command{
@@ -261,9 +262,10 @@ func newRunCommand(out io.Writer) *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if interactive {
-				return runInteractiveWorkspace(context.Background(), args[0], out, printTUI, deferReportProjection, requireSafetyAuthorization)
+				return runInteractiveWorkspace(context.Background(), args[0], out, printTUI, compiler.SemanticAction(action), deferReportProjection, requireSafetyAuthorization)
 			}
 			result, err := app.RunWorkspaceWithOptions(context.Background(), args[0], app.RunOptions{
+				Action:                     compiler.SemanticAction(action),
 				DeferReportProjection:      deferReportProjection,
 				RequireSafetyAuthorization: requireSafetyAuthorization,
 			})
@@ -275,6 +277,7 @@ func newRunCommand(out io.Writer) *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&printTUI, "tui", false, "Print a non-interactive TUI snapshot after the run")
 	cmd.Flags().BoolVar(&interactive, "interactive", false, "Launch an interactive TUI after the run")
+	cmd.Flags().StringVar(&action, "action", "", "Semantic action to compile for this run (default discover_assets)")
 	cmd.Flags().BoolVar(&deferReportProjection, "defer-report-projection", false, "Skip synchronous report projection so it can be projected later")
 	cmd.Flags().BoolVar(&requireSafetyAuthorization, "require-safety-authorization", false, "Fail run when disabled safety boundaries lack current authorization.yaml metadata")
 	return cmd
@@ -285,7 +288,7 @@ type runOutcome struct {
 	err    error
 }
 
-func runInteractiveWorkspace(ctx context.Context, root string, out io.Writer, printTUI bool, deferReportProjection bool, requireSafetyAuthorization bool) error {
+func runInteractiveWorkspace(ctx context.Context, root string, out io.Writer, printTUI bool, action compiler.SemanticAction, deferReportProjection bool, requireSafetyAuthorization bool) error {
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
 	pauseController := app.NewRunPauseController()
@@ -309,6 +312,7 @@ func runInteractiveWorkspace(ctx context.Context, root string, out io.Writer, pr
 	go func() {
 		result, err := app.RunWorkspaceWithOptions(runCtx, root, app.RunOptions{
 			PauseController:            pauseController,
+			Action:                     action,
 			DeferReportProjection:      deferReportProjection,
 			RequireSafetyAuthorization: requireSafetyAuthorization,
 			OnSnapshot: func(snapshot eventlog.ReplaySnapshot) error {

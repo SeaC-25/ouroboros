@@ -44,6 +44,7 @@ type RunOptions struct {
 	OnSnapshot                 func(eventlog.ReplaySnapshot) error
 	ToolRunner                 ToolExecutionRunner
 	ToolConcurrency            int
+	Action                     compiler.SemanticAction
 	PauseController            *RunPauseController
 	DeferReportProjection      bool
 	RequireSafetyAuthorization bool
@@ -515,7 +516,7 @@ func runToolExecutionStage(ctx context.Context, root string, runID string, manif
 	}
 
 	plan, err := compiler.NewCompiler().Compile(compiler.CompileRequest{
-		Action: compiler.ActionDiscoverAssets,
+		Action: runActionFromOptions(options),
 		Evidence: compiler.EvidenceSlice{
 			Nodes: []evidence.Node{
 				{
@@ -1246,6 +1247,13 @@ func ValidateScopeConfig(config ScopeConfig) error {
 	return nil
 }
 
+func runActionFromOptions(options RunOptions) compiler.SemanticAction {
+	if strings.TrimSpace(string(options.Action)) == "" {
+		return compiler.ActionDiscoverAssets
+	}
+	return options.Action
+}
+
 func validatePackExecutionPoliciesAgainstManifests(policies []PackExecutionPolicy, manifests []toolchain.Manifest) error {
 	if len(policies) == 0 {
 		return nil
@@ -1509,7 +1517,7 @@ func packForTargetKind(kind domain.TargetKind) (domain.Pack, bool) {
 		return webapi.NewPack(), true
 	case domain.TargetCIDR, domain.TargetDomain, domain.TargetHost:
 		return infra.NewPack(), true
-	case domain.TargetChallenge:
+	case domain.TargetChallenge, domain.TargetArtifact:
 		return ctf.NewPack(), true
 	default:
 		return nil, false
@@ -1705,6 +1713,13 @@ func managedBinaryRunCommand(request ToolExecutionRequest) ([]string, ScopeTarge
 	if !hasTarget {
 		return nil, ScopeTarget{}, false, nil
 	}
+	if strings.TrimSpace(target.Kind) == string(domain.TargetArtifact) {
+		resolvedArtifact, err := workspaceArtifactPath(request.WorkspaceRoot, target.Value)
+		if err != nil {
+			return nil, target, true, err
+		}
+		target.Value = resolvedArtifact
+	}
 	command, ok, err := managedBinaryCommandFor(request, binary, node.Operation, target)
 	return command, target, ok, err
 }
@@ -1752,6 +1767,10 @@ func managedBinaryTargetKinds(binary string, operation string, node compiler.Pla
 	case "service_fingerprint":
 		if binary == "nmap" {
 			return []string{string(domain.TargetHost), string(domain.TargetCIDR)}
+		}
+	case "static_code_scan":
+		if binary == "mobsfscan" {
+			return []string{string(domain.TargetArtifact)}
 		}
 	}
 	return targetKindsForExecutionNode(node)
@@ -1803,6 +1822,13 @@ func managedBinaryCommandFor(request ToolExecutionRequest, binary string, operat
 				return nil, false, nil
 			}
 			return []string{binary, "-oX", "-", target.Value}, true, nil
+		}
+	case "static_code_scan":
+		if binary == "mobsfscan" {
+			if target.Kind != string(domain.TargetArtifact) {
+				return nil, false, nil
+			}
+			return []string{binary, "--json", "--no-fail", target.Value}, true, nil
 		}
 	}
 	return nil, false, nil
@@ -1941,6 +1967,65 @@ func workspaceToolchainRuleBundle(root string, name string) (string, bool, error
 		return "", true, fmt.Errorf("workspace toolchain rule bundle must be a directory or managed symlink: %s", candidate)
 	}
 	return candidate, true, nil
+}
+
+func workspaceArtifactPath(root string, value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", fmt.Errorf("workspace artifact target is required")
+	}
+	artifactRoot, err := filepath.Abs(filepath.Join(root, "artifacts"))
+	if err != nil {
+		return "", fmt.Errorf("resolve workspace artifact root: %w", err)
+	}
+	rootInfo, err := os.Lstat(artifactRoot)
+	if err != nil {
+		return "", fmt.Errorf("inspect workspace artifact root: %w", err)
+	}
+	if rootInfo.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("workspace artifact root must not be a symlink: %s", artifactRoot)
+	}
+	if !rootInfo.IsDir() {
+		return "", fmt.Errorf("workspace artifact root must be a directory: %s", artifactRoot)
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(artifactRoot)
+	if err != nil {
+		return "", fmt.Errorf("resolve workspace artifact root: %w", err)
+	}
+	candidate := value
+	if !filepath.IsAbs(candidate) {
+		candidate = filepath.Join(artifactRoot, candidate)
+	}
+	candidate, err = filepath.Abs(candidate)
+	if err != nil {
+		return "", fmt.Errorf("resolve workspace artifact target: %w", err)
+	}
+	resolvedTarget, err := filepath.EvalSymlinks(candidate)
+	if err != nil {
+		return "", fmt.Errorf("resolve workspace artifact target: %w", err)
+	}
+	if err := requirePathUnderRoot(resolvedRoot, resolvedTarget, "workspace artifact target"); err != nil {
+		return "", err
+	}
+	info, err := os.Stat(resolvedTarget)
+	if err != nil {
+		return "", fmt.Errorf("inspect workspace artifact target: %w", err)
+	}
+	if info.IsDir() || !info.Mode().IsRegular() {
+		return "", fmt.Errorf("workspace artifact target must be a regular file: %s", resolvedTarget)
+	}
+	return resolvedTarget, nil
+}
+
+func requirePathUnderRoot(root string, target string, label string) error {
+	rel, err := filepath.Rel(root, target)
+	if err != nil {
+		return fmt.Errorf("resolve %s relative path: %w", label, err)
+	}
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+		return fmt.Errorf("%s must stay under %s", label, root)
+	}
+	return nil
 }
 
 func requireWorkspaceManagedBundleTarget(root string, target string) error {
@@ -2245,21 +2330,24 @@ func requireCommandScopeTarget(request ToolExecutionRequest) error {
 	if !ok {
 		return fmt.Errorf("command runner requires %s scope target for capability %s", strings.Join(requiredKinds, " or "), request.Node.Capability)
 	}
-	if scopeTargetExcluded(target, request.ScopeExclusions) {
+	if scopeTargetExcludedForRequest(request, target) {
 		return fmt.Errorf("scope target %s is excluded for capability %s", target.Value, request.Node.Capability)
 	}
 	return nil
 }
 
 func validateRunCommandArguments(command []string, request ToolExecutionRequest) error {
-	if targetPolicyDisabled(request.ScopeTargetPolicy) {
-		return nil
-	}
 	target, ok := scopedTargetForExecutionNode(request.Node, request.ScopeTargets)
 	if !ok {
 		return nil
 	}
 	targetKind := strings.TrimSpace(target.Kind)
+	if targetKind == string(domain.TargetArtifact) {
+		return validateArtifactRunCommandArguments(command, request, target)
+	}
+	if targetPolicyDisabled(request.ScopeTargetPolicy) {
+		return nil
+	}
 	if targetKind == string(domain.TargetCIDR) {
 		return validateCIDRRunCommandArguments(command, request, target)
 	}
@@ -2270,6 +2358,65 @@ func validateRunCommandArguments(command []string, request ToolExecutionRequest)
 		return validateWebRunCommandArguments(command, request, target)
 	}
 	return nil
+}
+
+func validateArtifactRunCommandArguments(command []string, request ToolExecutionRequest, target ScopeTarget) error {
+	resolvedTarget, err := workspaceArtifactPath(request.WorkspaceRoot, target.Value)
+	if err != nil {
+		return err
+	}
+	for i, argument := range command {
+		if i == 0 {
+			continue
+		}
+		for _, candidate := range artifactPathLiterals(argument) {
+			resolvedCandidate, err := workspaceArtifactPath(request.WorkspaceRoot, candidate)
+			if err != nil {
+				return err
+			}
+			if resolvedCandidate != resolvedTarget {
+				return fmt.Errorf("out-of-scope artifact argument %s for capability %s", candidate, request.Node.Capability)
+			}
+		}
+	}
+	return nil
+}
+
+func artifactPathLiterals(argument string) []string {
+	argument = strings.TrimSpace(argument)
+	if argument == "" {
+		return nil
+	}
+	candidates := []string{}
+	seen := map[string]bool{}
+	appendCandidate := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			return
+		}
+		seen[value] = true
+		candidates = append(candidates, value)
+	}
+	if artifactPathLiteralFragment(argument) {
+		appendWhole := true
+		if prefix, _, ok := strings.Cut(argument, "="); ok && !artifactPathLiteralFragment(prefix) {
+			appendWhole = false
+		}
+		if appendWhole {
+			appendCandidate(argument)
+		}
+	}
+	if _, rhs, ok := strings.Cut(argument, "="); ok {
+		for _, candidate := range artifactPathLiterals(rhs) {
+			appendCandidate(candidate)
+		}
+	}
+	return candidates
+}
+
+func artifactPathLiteralFragment(value string) bool {
+	value = strings.TrimSpace(value)
+	return filepath.IsAbs(value) || strings.Contains(value, string(os.PathSeparator)) || strings.HasPrefix(value, ".")
 }
 
 func validateWebRunCommandArguments(command []string, request ToolExecutionRequest, target ScopeTarget) error {
@@ -2661,6 +2808,48 @@ func scopeTargetExcluded(target ScopeTarget, exclusions []string) bool {
 			if wildcardPatternMatches(exclusion, targetValue) {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+func scopeTargetExcludedForRequest(request ToolExecutionRequest, target ScopeTarget) bool {
+	if strings.TrimSpace(target.Kind) == string(domain.TargetArtifact) {
+		return artifactScopeTargetExcluded(request.WorkspaceRoot, target, request.ScopeExclusions)
+	}
+	return scopeTargetExcluded(target, request.ScopeExclusions)
+}
+
+func artifactScopeTargetExcluded(root string, target ScopeTarget, exclusions []string) bool {
+	targetValue := strings.TrimSpace(target.Value)
+	if targetValue == "" {
+		return false
+	}
+	resolvedTarget, err := workspaceArtifactPath(root, targetValue)
+	if err != nil {
+		return scopeTargetExcluded(target, exclusions)
+	}
+	artifactRoot, err := filepath.EvalSymlinks(filepath.Join(root, "artifacts"))
+	if err != nil {
+		return scopeTargetExcluded(target, exclusions)
+	}
+	relativeTarget, err := filepath.Rel(artifactRoot, resolvedTarget)
+	if err != nil {
+		relativeTarget = ""
+	}
+	for _, exclusion := range exclusions {
+		exclusion = strings.TrimSpace(exclusion)
+		if exclusion == "" {
+			continue
+		}
+		if exclusion == targetValue || exclusion == resolvedTarget || (relativeTarget != "" && exclusion == relativeTarget) {
+			return true
+		}
+		if wildcardPatternMatches(exclusion, targetValue) || wildcardPatternMatches(exclusion, resolvedTarget) || (relativeTarget != "" && wildcardPatternMatches(exclusion, relativeTarget)) {
+			return true
+		}
+		if resolvedExclusion, err := workspaceArtifactPath(root, exclusion); err == nil && resolvedExclusion == resolvedTarget {
+			return true
 		}
 	}
 	return false

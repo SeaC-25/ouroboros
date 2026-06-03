@@ -3550,6 +3550,348 @@ func TestNativeManagedRunCommandKeepsNucleiOfflineForNonURLScope(t *testing.T) {
 	}
 }
 
+func TestNativeManagedRunCommandBuildsMobsfscanStaticCodeScanArgvForArtifactScope(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	artifactPath := filepath.Join(root, "artifacts", "samples", "app.apk")
+	if err := os.MkdirAll(filepath.Dir(artifactPath), 0o755); err != nil {
+		t.Fatalf("create artifact dir: %v", err)
+	}
+	if err := os.WriteFile(artifactPath, []byte("apk fixture"), 0o644); err != nil {
+		t.Fatalf("write artifact fixture: %v", err)
+	}
+	payloadPath := writeManagedBundleFixture(t, root, "mobsfscan", "binary", "0.4.0", "#!/usr/bin/env sh\nprintf 'mobsfscan-fixture\\n'\n")
+	if _, err := ExecuteManagedToolBundleInstall(root, "ctf-pack", "mobsfscan", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed mobsfscan bundle: %v", err)
+	}
+	request := ToolExecutionRequest{
+		WorkspaceRoot: root,
+		Node: compiler.PlanNode{
+			ID:             "mobsfscan-static-code-scan:01",
+			Capability:     "ctf.artifact_analysis",
+			ManifestName:   "ctf-pack",
+			ToolID:         "mobsfscan",
+			AdapterID:      "managed_binary",
+			Operation:      "static_code_scan",
+			ParserID:       "mobsfscan_json",
+			TargetKind:     "artifact",
+			DependencyName: "mobsfscan",
+			DependencyKind: "binary",
+			Runner:         "native",
+		},
+		ScopeTargets:  []ScopeTarget{{Kind: "artifact", Value: "samples/app.apk"}},
+		IsolationMode: "process",
+	}
+
+	command, ok, err := nativeManagedRunCommand(request)
+	if err != nil || !ok {
+		t.Fatalf("expected mobsfscan static-code-scan builder command, command=%#v ok=%v err=%v", command, ok, err)
+	}
+	want := []string{payloadPath, "--json", "--no-fail", artifactPath}
+	if !reflect.DeepEqual(command, want) {
+		t.Fatalf("unexpected mobsfscan argv\nwant=%#v\n got=%#v", want, command)
+	}
+}
+
+func TestNativeManagedRunCommandKeepsMobsfscanOfflineWithoutArtifactScope(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	writeManagedBundleFixture(t, root, "mobsfscan", "binary", "0.4.0", "#!/usr/bin/env sh\nprintf 'mobsfscan-non-artifact\\n'\n")
+	if _, err := ExecuteManagedToolBundleInstall(root, "ctf-pack", "mobsfscan", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed mobsfscan bundle: %v", err)
+	}
+	for _, scopeTarget := range []ScopeTarget{
+		{Kind: "url", Value: "https://app.example"},
+		{Kind: "challenge", Value: "mobile-reverse"},
+	} {
+		t.Run(scopeTarget.Kind, func(t *testing.T) {
+			request := ToolExecutionRequest{
+				WorkspaceRoot: root,
+				Node: compiler.PlanNode{
+					ID:             "mobsfscan-non-artifact-scope:01",
+					Capability:     "ctf.artifact_analysis",
+					ManifestName:   "ctf-pack",
+					ToolID:         "mobsfscan",
+					AdapterID:      "managed_binary",
+					Operation:      "static_code_scan",
+					ParserID:       "mobsfscan_json",
+					TargetKind:     "artifact",
+					DependencyName: "mobsfscan",
+					DependencyKind: "binary",
+					Runner:         "native",
+				},
+				ScopeTargets:  []ScopeTarget{scopeTarget},
+				IsolationMode: "process",
+			}
+
+			command, ok, err := nativeManagedRunCommand(request)
+			if err != nil || ok || len(command) > 0 {
+				t.Fatalf("mobsfscan must stay offline for non-artifact scope %#v, command=%#v ok=%v err=%v", scopeTarget, command, ok, err)
+			}
+		})
+	}
+}
+
+func TestNativeManagedRunCommandRejectsEscapingArtifactSymlink(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	outsideArtifact := filepath.Join(t.TempDir(), "outside.apk")
+	if err := os.WriteFile(outsideArtifact, []byte("outside"), 0o644); err != nil {
+		t.Fatalf("write outside artifact: %v", err)
+	}
+	artifactLink := filepath.Join(root, "artifacts", "samples", "app.apk")
+	if err := os.MkdirAll(filepath.Dir(artifactLink), 0o755); err != nil {
+		t.Fatalf("create artifact dir: %v", err)
+	}
+	if err := os.Symlink(outsideArtifact, artifactLink); err != nil {
+		t.Fatalf("write artifact symlink: %v", err)
+	}
+	writeManagedBundleFixture(t, root, "mobsfscan", "binary", "0.4.0", "#!/usr/bin/env sh\nprintf 'should-not-run-escaping-artifact\\n'\n")
+	if _, err := ExecuteManagedToolBundleInstall(root, "ctf-pack", "mobsfscan", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed mobsfscan bundle: %v", err)
+	}
+	request := ToolExecutionRequest{
+		WorkspaceRoot: root,
+		Node: compiler.PlanNode{
+			ID:             "mobsfscan-escaping-artifact:01",
+			Capability:     "ctf.artifact_analysis",
+			ManifestName:   "ctf-pack",
+			ToolID:         "mobsfscan",
+			AdapterID:      "managed_binary",
+			Operation:      "static_code_scan",
+			ParserID:       "mobsfscan_json",
+			TargetKind:     "artifact",
+			DependencyName: "mobsfscan",
+			DependencyKind: "binary",
+			Runner:         "native",
+		},
+		ScopeTargets:  []ScopeTarget{{Kind: "artifact", Value: "samples/app.apk"}},
+		IsolationMode: "process",
+	}
+
+	command, ok, err := nativeManagedRunCommand(request)
+	if err == nil || !strings.Contains(err.Error(), "artifact target must stay under") || !ok || len(command) > 0 {
+		t.Fatalf("expected escaping artifact symlink rejection, command=%#v ok=%v err=%v", command, ok, err)
+	}
+}
+
+func TestNativeManagedRunCommandRejectsSymlinkedArtifactRoot(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	outsideRoot := filepath.Join(t.TempDir(), "outside-artifacts")
+	outsideArtifact := filepath.Join(outsideRoot, "samples", "app.apk")
+	if err := os.MkdirAll(filepath.Dir(outsideArtifact), 0o755); err != nil {
+		t.Fatalf("create outside artifact dir: %v", err)
+	}
+	if err := os.WriteFile(outsideArtifact, []byte("outside artifact"), 0o644); err != nil {
+		t.Fatalf("write outside artifact: %v", err)
+	}
+	artifactRoot := filepath.Join(root, "artifacts")
+	if err := os.RemoveAll(artifactRoot); err != nil {
+		t.Fatalf("remove artifact root: %v", err)
+	}
+	if err := os.Symlink(outsideRoot, artifactRoot); err != nil {
+		t.Fatalf("symlink artifact root: %v", err)
+	}
+	writeManagedBundleFixture(t, root, "mobsfscan", "binary", "0.4.0", "#!/usr/bin/env sh\nprintf 'should-not-run-symlinked-root\\n'\n")
+	if _, err := ExecuteManagedToolBundleInstall(root, "ctf-pack", "mobsfscan", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed mobsfscan bundle: %v", err)
+	}
+	request := ToolExecutionRequest{
+		WorkspaceRoot: root,
+		Node: compiler.PlanNode{
+			ID:             "mobsfscan-symlinked-artifact-root:01",
+			Capability:     "ctf.artifact_analysis",
+			ManifestName:   "ctf-pack",
+			ToolID:         "mobsfscan",
+			AdapterID:      "managed_binary",
+			Operation:      "static_code_scan",
+			ParserID:       "mobsfscan_json",
+			TargetKind:     "artifact",
+			DependencyName: "mobsfscan",
+			DependencyKind: "binary",
+			Runner:         "native",
+		},
+		ScopeTargets:  []ScopeTarget{{Kind: "artifact", Value: "samples/app.apk"}},
+		IsolationMode: "process",
+	}
+
+	command, ok, err := nativeManagedRunCommand(request)
+	if err == nil || !strings.Contains(err.Error(), "workspace artifact root must not be a symlink") || !ok || len(command) > 0 {
+		t.Fatalf("expected symlinked artifact root rejection, command=%#v ok=%v err=%v", command, ok, err)
+	}
+}
+
+func TestValidateArtifactRunCommandArgumentsRejectsAbsolutePathContainingEquals(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	artifactPath := filepath.Join(root, "artifacts", "sample.apk")
+	if err := os.WriteFile(artifactPath, []byte("scoped artifact"), 0o644); err != nil {
+		t.Fatalf("write scoped artifact: %v", err)
+	}
+	outsideArtifact := filepath.Join(t.TempDir(), "outside=sample.apk")
+	if err := os.WriteFile(outsideArtifact, []byte("outside artifact"), 0o644); err != nil {
+		t.Fatalf("write outside artifact: %v", err)
+	}
+	target := ScopeTarget{Kind: "artifact", Value: "sample.apk"}
+	request := ToolExecutionRequest{
+		WorkspaceRoot: root,
+		Node: compiler.PlanNode{
+			ID:         "artifact-argument-with-equals:01",
+			Capability: "ctf.artifact_analysis",
+			TargetKind: "artifact",
+		},
+		ScopeTargets: []ScopeTarget{target},
+	}
+
+	err := validateArtifactRunCommandArguments([]string{"mobsfscan", outsideArtifact}, request, target)
+	if err == nil || !strings.Contains(err.Error(), "workspace artifact target must stay under") {
+		t.Fatalf("expected absolute artifact path with equals to be rejected, err=%v", err)
+	}
+}
+
+func TestRunWorkspaceExecutesToolLevelMobsfscanThroughExplicitArtifactScope(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	artifactPath := filepath.Join(root, "artifacts", "samples", "app.apk")
+	if err := os.MkdirAll(filepath.Dir(artifactPath), 0o755); err != nil {
+		t.Fatalf("create artifact dir: %v", err)
+	}
+	if err := os.WriteFile(artifactPath, []byte("apk fixture"), 0o644); err != nil {
+		t.Fatalf("write artifact fixture: %v", err)
+	}
+	scope := `version: 1
+scope:
+  target_policy: enforce
+  targets:
+    - kind: artifact
+      value: samples/app.apk
+  exclusions: []
+execution:
+  isolation: process
+`
+	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
+		t.Fatalf("write scope: %v", err)
+	}
+	marker := filepath.Join(t.TempDir(), "tool-level-catalog-mobsfscan-ran")
+	writeManagedBundleFixture(t, root, "mobsfscan", "binary", "0.4.0", "#!/usr/bin/env sh\nprintf 'tool-level-mobsfscan-output args=%s target=%s tool_id=%s operation=%s parser=%s dep=%s target_kind=%s scope_target_kind=%s\\n' \"$*\" \"$OURO_TARGET\" \"$OURO_TOOL_ID\" \"$OURO_OPERATION\" \"$OURO_PARSER_ID\" \"$OURO_DEPENDENCY_NAME\" \"$OURO_TARGET_KIND\" \"$OURO_SCOPE_TARGET_KIND\"\ntouch "+marker+"\n")
+	if _, err := ExecuteManagedToolBundleInstall(root, "ctf-pack", "mobsfscan", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed mobsfscan bundle: %v", err)
+	}
+
+	result, err := RunWorkspaceWithOptions(ctx, root, RunOptions{Action: compiler.ActionFingerprintSurface})
+	if err != nil {
+		t.Fatalf("run workspace: %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("expected mobsfscan artifact payload to run through registered argv builder: %v", err)
+	}
+	store, err := eventlog.OpenSQLite(filepath.Join(root, "replay", "events.db"))
+	if err != nil {
+		t.Fatalf("open event log: %v", err)
+	}
+	defer store.Close()
+	events, err := store.Replay(ctx, result.RunID)
+	if err != nil {
+		t.Fatalf("replay events: %v", err)
+	}
+	for _, event := range events {
+		if event.Type != eventlog.EventTool {
+			continue
+		}
+		var payload struct {
+			Tool            string `json:"tool"`
+			Parser          string `json:"parser"`
+			ExecutionStatus string `json:"execution_status"`
+			Transcript      string `json:"transcript"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatalf("decode tool payload: %v", err)
+		}
+		if payload.Tool != "ctf-pack" || payload.Parser != "mobsfscan_json" || payload.ExecutionStatus == "" {
+			continue
+		}
+		if payload.ExecutionStatus != "completed" {
+			t.Fatalf("expected mobsfscan tool-level node to complete, got %#v", payload)
+		}
+		for _, want := range []string{
+			"tool-level-mobsfscan-output",
+			"args=--json --no-fail " + artifactPath,
+			"target=" + artifactPath,
+			"tool_id=mobsfscan",
+			"operation=static_code_scan",
+			"parser=mobsfscan_json",
+			"dep=mobsfscan",
+			"target_kind=artifact",
+			"scope_target_kind=artifact",
+		} {
+			if !strings.Contains(payload.Transcript, want) {
+				t.Fatalf("expected mobsfscan tool-level transcript to contain %q, got %#v", want, payload)
+			}
+		}
+		if strings.Contains(payload.Transcript, "offline tool execution boundary") {
+			t.Fatalf("mobsfscan tool-level execution must not use offline runner, got %#v", payload)
+		}
+		return
+	}
+	t.Fatalf("expected mobsfscan tool-level execution event, got %#v", events)
+}
+
+func TestRunWorkspaceRejectsExcludedArtifactBeforeMobsfscanExecution(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	artifactPath := filepath.Join(root, "artifacts", "samples", "app.apk")
+	if err := os.MkdirAll(filepath.Dir(artifactPath), 0o755); err != nil {
+		t.Fatalf("create artifact dir: %v", err)
+	}
+	if err := os.WriteFile(artifactPath, []byte("apk fixture"), 0o644); err != nil {
+		t.Fatalf("write artifact fixture: %v", err)
+	}
+	scope := `version: 1
+scope:
+  target_policy: enforce
+  targets:
+    - kind: artifact
+      value: samples/app.apk
+  exclusions:
+    - samples/app.apk
+execution:
+  isolation: process
+`
+	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
+		t.Fatalf("write scope: %v", err)
+	}
+	marker := filepath.Join(t.TempDir(), "excluded-artifact-mobsfscan-ran")
+	writeManagedBundleFixture(t, root, "mobsfscan", "binary", "0.4.0", "#!/usr/bin/env sh\nprintf 'should-not-run-excluded-artifact-mobsfscan\\n'\ntouch "+marker+"\n")
+	if _, err := ExecuteManagedToolBundleInstall(root, "ctf-pack", "mobsfscan", ManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("install managed mobsfscan bundle: %v", err)
+	}
+
+	_, err := RunWorkspaceWithOptions(ctx, root, RunOptions{Action: compiler.ActionFingerprintSurface})
+	if err == nil || !strings.Contains(err.Error(), "excluded") {
+		t.Fatalf("expected excluded artifact failure before mobsfscan execution, got %v", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("excluded artifact mobsfscan payload must not run, marker stat err=%v", err)
+	}
+}
+
 func TestRunWorkspaceExecutesToolLevelNaabuThroughRegisteredArgvBuilder(t *testing.T) {
 	ctx := context.Background()
 	root := filepath.Join(t.TempDir(), "workspace")
@@ -6309,8 +6651,8 @@ func TestRunWorkspaceRejectsInvalidScope(t *testing.T) {
 	scope := `version: 1
 scope:
   targets:
-    - kind: artifact
-      value: sample.bin
+    - kind: unsupported
+      value: sample
   exclusions: []
 `
 	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
@@ -6323,6 +6665,35 @@ scope:
 	}
 	if !strings.Contains(err.Error(), "scope.yaml") {
 		t.Fatalf("expected scope.yaml error, got %v", err)
+	}
+}
+
+func TestValidateScopeConfigAcceptsArtifactTargets(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	scope := `version: 1
+scope:
+  target_policy: enforce
+  targets:
+    - kind: artifact
+      value: samples/app.apk
+  exclusions: []
+execution:
+  isolation: process
+`
+	scopePath := filepath.Join(root, "scope.yaml")
+	if err := os.WriteFile(scopePath, []byte(scope), 0o644); err != nil {
+		t.Fatalf("write scope: %v", err)
+	}
+	config, err := LoadScopeConfig(scopePath)
+	if err != nil {
+		t.Fatalf("load scope: %v", err)
+	}
+
+	if err := ValidateScopeConfig(config); err != nil {
+		t.Fatalf("expected artifact scope target to validate: %v", err)
 	}
 }
 
@@ -6544,6 +6915,7 @@ func TestRunWorkspaceRejectsMissingStorageDirectory(t *testing.T) {
 }
 
 type recordingToolExecutionRunner struct {
+	mu       sync.Mutex
 	requests []ToolExecutionRequest
 }
 
@@ -6551,7 +6923,9 @@ func (r *recordingToolExecutionRunner) Execute(ctx context.Context, request Tool
 	if err := ctx.Err(); err != nil {
 		return ToolExecutionResult{}, err
 	}
+	r.mu.Lock()
 	r.requests = append(r.requests, request)
+	r.mu.Unlock()
 	return ToolExecutionResult{
 		ExecutionID: "recorded-" + request.Node.ID,
 		Status:      "completed",

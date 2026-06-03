@@ -91,12 +91,37 @@ func TestChallengeTargetProducesThreeHypothesesBeforeBroadEnumeration(t *testing
 	}
 }
 
+func TestArtifactTargetProducesArtifactAnalysisHypothesis(t *testing.T) {
+	pack := NewPack()
+
+	hypotheses, err := pack.InitialHypotheses(domain.Target{Kind: domain.TargetArtifact, Value: "samples/app.apk"})
+	if err != nil {
+		t.Fatalf("initial artifact hypotheses: %v", err)
+	}
+	if len(hypotheses) != 1 {
+		t.Fatalf("expected exactly one artifact hypothesis, got %#v", hypotheses)
+	}
+	hypothesis := hypotheses[0]
+	if hypothesis.Target != "samples/app.apk" {
+		t.Fatalf("artifact hypothesis target not propagated: %#v", hypothesis)
+	}
+	if hypothesis.Action != compiler.ActionCollectEvidence {
+		t.Fatalf("expected artifact hypothesis to collect evidence, got %s", hypothesis.Action)
+	}
+	if hypothesis.CoverageDimension != frontier.DimensionArtifacts {
+		t.Fatalf("expected artifact coverage dimension, got %s", hypothesis.CoverageDimension)
+	}
+	if !strings.Contains(strings.ToLower(hypothesis.Title), "artifact") {
+		t.Fatalf("expected artifact-focused title, got %#v", hypothesis)
+	}
+}
+
 func TestPackRejectsNonChallengeTarget(t *testing.T) {
 	_, err := NewPack().InitialHypotheses(domain.Target{Kind: domain.TargetURL, Value: "https://app.example"})
 	if err == nil {
 		t.Fatalf("expected URL target to fail")
 	}
-	if !strings.Contains(err.Error(), "challenge target") {
-		t.Fatalf("expected challenge target error, got %v", err)
+	if !strings.Contains(err.Error(), "challenge or artifact target") {
+		t.Fatalf("expected challenge or artifact target error, got %v", err)
 	}
 }

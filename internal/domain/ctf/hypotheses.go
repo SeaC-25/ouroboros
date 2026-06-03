@@ -11,12 +11,26 @@ import (
 )
 
 func (Pack) InitialHypotheses(target domain.Target) ([]domain.Hypothesis, error) {
-	if target.Kind != domain.TargetChallenge {
-		return nil, fmt.Errorf("ctf-lab pack requires challenge target, got %s", target.Kind)
+	if target.Kind != domain.TargetChallenge && target.Kind != domain.TargetArtifact {
+		return nil, fmt.Errorf("ctf-lab pack requires challenge or artifact target, got %s", target.Kind)
 	}
 	targetValue := strings.TrimSpace(target.Value)
 	if targetValue == "" {
-		return nil, fmt.Errorf("ctf-lab pack requires non-empty challenge target")
+		return nil, fmt.Errorf("ctf-lab pack requires non-empty challenge or artifact target")
+	}
+	if target.Kind == domain.TargetArtifact {
+		return []domain.Hypothesis{
+			{
+				ID:                "ctf-analyze-artifact",
+				Title:             "analyze provided artifact",
+				Target:            targetValue,
+				Rationale:         "explicit local artifacts can contain the strongest static signals before broader challenge solving",
+				Action:            compiler.ActionCollectEvidence,
+				CoverageDimension: frontier.DimensionArtifacts,
+				ExpectedEvidence:  []evidence.NodeType{evidence.NodeArtifact},
+				Confidence:        0.7,
+			},
+		}, nil
 	}
 
 	return []domain.Hypothesis{
