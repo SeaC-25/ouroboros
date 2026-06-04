@@ -70,6 +70,31 @@ func TestRuntimeTabsSelectActiveRows(t *testing.T) {
 	}
 }
 
+func TestRuntimeTabsRenderKeepsSelectedRowVisible(t *testing.T) {
+	rows := []string{
+		"toolchain: unknown",
+		"contract summary",
+		"contract error 1",
+		"contract error 2",
+		"contract error 3",
+		"compile-preview reviews: total=1",
+		"compile-preview review artifact: candidate.json",
+		"compile-preview review selection: status=current current=true review=candidate.json",
+	}
+	tabs := DefaultRuntimeTabs().
+		Select(RuntimeTabToolchainHealth).
+		WithRows(RuntimeTabToolchainHealth, rows).
+		SelectRow(7)
+
+	view := tabs.Render(96, 7)
+	if !strings.Contains(view, "> compile-preview review selection: status=current current=true") {
+		t.Fatalf("expected selected row to stay visible in short runtime tab:\n%s", view)
+	}
+	if strings.Contains(view, "toolchain: unknown") {
+		t.Fatalf("expected short runtime tab to scroll past unselected top rows:\n%s", view)
+	}
+}
+
 func TestModelUpdateMovesRuntimeTabSelection(t *testing.T) {
 	tabs := DefaultRuntimeTabs().
 		Select(RuntimeTabToolchainHealth).
@@ -1092,6 +1117,17 @@ func TestModelUpdateDoesNotRequestReadOnlyRuntimeActions(t *testing.T) {
 			name: "provider usage summary",
 			row:  "provider usage summary: mode=metadata-only records=2 providers=local-openai|second-openai models=gpt-a|gpt-b input_tokens=1200 output_tokens=800 total_tokens=2000 estimated_cost_usd=0.007500 estimated_cost_records=1 budget_enforced_records=1 budget_within_limit_records=1 first_created_at=2026-06-04T12:30:00Z last_created_at=2026-06-04T13:00:00Z source=/tmp/ouro/runtime/model-usage",
 			kind: "provider-usage-summary",
+		},
+		{
+			name: "toolchain contract summary",
+			row:  "toolchain contract: status=ready mode=metadata-only manifests=3 tools=14 domain_packs=3 patterns=3 semantic_actions=7 errors=0",
+			kind: "toolchain-contract",
+		},
+		{
+			name:  "toolchain contract error",
+			row:   "toolchain contract error: domain capability web.auth_state_tracking is not provided by workspace manifests or built-in tools",
+			kind:  "toolchain-contract-error",
+			state: "blocked",
 		},
 		{
 			name: "workspace safety strict gate",
@@ -3316,6 +3352,66 @@ func TestModelUpdateShowsSelectedRuntimeActionDetails(t *testing.T) {
 		if !strings.Contains(view, want) {
 			t.Fatalf("runtime action details missing %q:\n%s", want, view)
 		}
+	}
+}
+
+func TestModelUpdateShowsSelectedToolchainContractDetails(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		row   string
+		wants []string
+	}{
+		{
+			name: "summary",
+			row:  "toolchain contract: status=ready mode=metadata-only manifests=3 tools=14 domain_packs=3 patterns=3 semantic_actions=7 errors=0",
+			wants: []string{
+				"runtime action: toolchain-contract",
+				"state: ready",
+				"execution mode: metadata-only",
+				"output: contract check is read-only metadata",
+				"ready: manifests=3 tools=14 domain_packs=3 patterns=3 semantic_actions=7",
+				"failed: errors=0",
+				"mode: read-only",
+			},
+		},
+		{
+			name: "error",
+			row:  "toolchain contract error: domain capability web.auth_state_tracking is not provided by workspace manifests or built-in tools",
+			wants: []string{
+				"runtime action: toolchain-contract-error",
+				"state: blocked",
+				"execution mode: metadata-only",
+				"reason: domain capability web.auth_state_tracking is not provided by workspace manifests or built-in tools",
+				"output: contract validation error is read-only metadata",
+				"mode: read-only",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tabs := DefaultRuntimeTabs().
+				Select(RuntimeTabToolchainHealth).
+				WithRows(RuntimeTabToolchainHealth, []string{tc.row}).
+				SelectRow(0)
+			model := NewModel().WithGraphStack(GraphStack{RuntimeTabs: tabs})
+
+			updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+			if cmd != nil {
+				t.Fatalf("expected toolchain contract details update to be synchronous")
+			}
+			next, ok := updated.(Model)
+			if !ok {
+				t.Fatalf("expected Model, got %T", updated)
+			}
+			if next.graphStack.Focus != GraphFocusRuntimeAction {
+				t.Fatalf("expected runtime action focus, got %s", next.graphStack.Focus)
+			}
+			view := next.graphStack.Render(180, 36)
+			for _, want := range tc.wants {
+				if !strings.Contains(view, want) {
+					t.Fatalf("toolchain contract details missing %q:\n%s", want, view)
+				}
+			}
+		})
 	}
 }
 

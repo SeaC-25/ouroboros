@@ -117,7 +117,7 @@ func CreateReplayWorkbenchSession(ctx context.Context, root string, options Repl
 }
 
 func ListReplayWorkbenchSessions(root string) ([]ReplayWorkbenchSessionArtifact, error) {
-	doctor, err := DoctorWorkspace(root)
+	doctor, err := doctorWorkspaceMetadataOnly(root)
 	if err != nil {
 		return nil, err
 	}
@@ -145,7 +145,7 @@ func ListReplayWorkbenchSessions(root string) ([]ReplayWorkbenchSessionArtifact,
 }
 
 func ReadReplayWorkbenchSession(root, sessionPath string) (ReplayWorkbenchSessionArtifact, error) {
-	doctor, err := DoctorWorkspace(root)
+	doctor, err := doctorWorkspaceMetadataOnly(root)
 	if err != nil {
 		return ReplayWorkbenchSessionArtifact{}, err
 	}
@@ -271,7 +271,7 @@ func ClearReplayWorkbenchSessionSelection(root string, options ReplayWorkbenchSe
 }
 
 func ReadReplayWorkbenchSessionSelection(root string) (ReplayWorkbenchSessionSelection, bool, error) {
-	doctor, err := DoctorWorkspace(root)
+	doctor, err := doctorWorkspaceMetadataOnly(root)
 	if err != nil {
 		return ReplayWorkbenchSessionSelection{}, false, err
 	}

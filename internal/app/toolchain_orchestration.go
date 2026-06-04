@@ -137,7 +137,7 @@ func attachInstallOrchestrationRetryDispatch(root string, orchestration *Toolcha
 }
 
 func ListToolchainInstallOrchestrations(root string) ([]ToolchainInstallOrchestration, error) {
-	doctor, err := DoctorWorkspace(root)
+	doctor, err := doctorWorkspaceMetadataOnly(root)
 	if err != nil {
 		return nil, err
 	}
@@ -161,7 +161,7 @@ func ListToolchainInstallOrchestrations(root string) ([]ToolchainInstallOrchestr
 }
 
 func ReadToolchainInstallOrchestration(root, orchestrationPath string) (ToolchainInstallOrchestration, error) {
-	doctor, err := DoctorWorkspace(root)
+	doctor, err := doctorWorkspaceMetadataOnly(root)
 	if err != nil {
 		return ToolchainInstallOrchestration{}, err
 	}

@@ -1077,6 +1077,7 @@ func baseTUIModelForWorkspace(root string) tui.Model {
 func tuiModelWithWorkspaceRuntimeRows(root string, model tui.Model) tui.Model {
 	model = tuiModelWithProviderUsageSummaryRows(root, model)
 	model = tuiModelWithInstallRequestRows(root, model)
+	model = tuiModelWithToolchainContractRows(root, model)
 	model = tuiModelWithCompilePreviewSignalRows(root, model)
 	model = tuiModelWithCompilePreviewReviewRows(root, model)
 	model = tuiModelWithCompilePreviewRows(root, model)
@@ -1155,6 +1156,46 @@ func providerUsageSummaryRowList(values []string) string {
 		return "none"
 	}
 	return strings.Join(values, "|")
+}
+
+func tuiModelWithToolchainContractRows(root string, model tui.Model) tui.Model {
+	check, err := CheckToolchainContracts(root)
+	if err != nil {
+		return model.AppendRuntimeRows(tui.RuntimeTabToolchainHealth, []string{
+			"toolchain contract: status=blocked mode=metadata-only manifests=0 tools=0 domain_packs=0 patterns=0 semantic_actions=0 errors=1",
+			"toolchain contract error: " + compactRuntimeRowValue(err.Error()),
+		})
+	}
+	return model.AppendRuntimeRows(tui.RuntimeTabToolchainHealth, toolchainContractRuntimeRows(check))
+}
+
+func toolchainContractRuntimeRows(check ToolchainContractCheck) []string {
+	const maxToolchainContractErrorRows = 3
+	status := strings.TrimSpace(check.Status)
+	if status == "" {
+		status = "blocked"
+	}
+	rows := []string{fmt.Sprintf(
+		"toolchain contract: status=%s mode=metadata-only manifests=%d tools=%d domain_packs=%d patterns=%d semantic_actions=%d errors=%d",
+		status,
+		check.ManifestCount,
+		check.ToolCount,
+		check.DomainPackCount,
+		check.PatternCount,
+		check.SemanticActionCount,
+		len(check.Errors),
+	)}
+	for index, validationError := range check.Errors {
+		if index >= maxToolchainContractErrorRows {
+			remaining := len(check.Errors) - maxToolchainContractErrorRows
+			rows = append(rows, fmt.Sprintf("toolchain contract error: additional_errors_omitted=%d run=ouro_toolchain_contract_check", remaining))
+			break
+		}
+		if trimmed := compactRuntimeRowValue(validationError); trimmed != "" {
+			rows = append(rows, "toolchain contract error: "+trimmed)
+		}
+	}
+	return rows
 }
 
 func tuiModelWithReplayWorkbenchSessionRows(root string, model tui.Model) tui.Model {

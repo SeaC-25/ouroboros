@@ -135,6 +135,17 @@ func DoctorWorkspace(root string) (DoctorReport, error) {
 	return DoctorWorkspaceWithOptions(root, DoctorOptions{})
 }
 
+func doctorWorkspaceMetadataOnly(root string) (DoctorReport, error) {
+	return DoctorWorkspaceWithOptions(root, DoctorOptions{SkipContainerRuntimeCheck: true})
+}
+
+func doctorWorkspaceStrictMetadataOnly(root string) (DoctorReport, error) {
+	return DoctorWorkspaceWithOptions(root, DoctorOptions{
+		RequireSafetyAuthorization: true,
+		SkipContainerRuntimeCheck:  true,
+	})
+}
+
 func DoctorWorkspaceWithOptions(root string, options DoctorOptions) (DoctorReport, error) {
 	if root == "" {
 		return DoctorReport{Ready: false, Errors: []string{"workspace path is required"}}, nil
