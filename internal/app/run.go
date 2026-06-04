@@ -310,6 +310,9 @@ func RunWorkspaceWithOptions(ctx context.Context, root string, options RunOption
 	if err := runToolExecutionStage(ctx, root, runID, manifests, scopeConfig.Scope.Targets, scopeConfig.Scope.Exclusions, scopeConfig.Scope.TargetPolicy, scopeConfig.Execution.Isolation, scopeConfig.Execution.Container, scopeConfig.Execution.ResourceLimits, scopeConfig.Execution.PackPolicies, scopeConfig.Execution.WorkerPools, toolExecutionConcurrency(scopeConfig, options), toolRunnerFromOptions(options), store, options, &persistedEvents); err != nil {
 		return RunResult{}, err
 	}
+	if err := runClosedLoopPlannerPreviewStage(ctx, runID, store, options, &persistedEvents); err != nil {
+		return RunResult{}, err
+	}
 
 	if options.DeferReportProjection {
 		if err := appendRunEvent(ctx, store, stageEventWithReason(runID, "report-projection", "Project evidence graph into Markdown report", "skipped", "deferred"), options, &persistedEvents); err != nil {
