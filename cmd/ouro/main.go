@@ -5635,6 +5635,8 @@ func newToolchainCommand(out io.Writer) *cobra.Command {
 	cmd.AddCommand(newToolchainCompilePreviewReviewSelectionCommand(out))
 	cmd.AddCommand(newToolchainCompilePreviewReviewSelectionClearCommand(out))
 	cmd.AddCommand(newToolchainCompilePreviewReviewsCommand(out))
+	cmd.AddCommand(newToolchainExecuteCompilePreviewReviewCommand(out))
+	cmd.AddCommand(newToolchainCompilePreviewReviewExecutionsCommand(out))
 	cmd.AddCommand(newToolchainCompilePreviewSignalsCommand(out))
 	cmd.AddCommand(newToolchainCompilePreviewSignalsFromReplayCommand(out))
 	cmd.AddCommand(newToolchainInstallPlanCommand(out))
@@ -11382,6 +11384,134 @@ func newToolchainCompilePreviewReviewsCommand(out io.Writer) *cobra.Command {
 			return nil
 		},
 	}
+}
+
+func newToolchainExecuteCompilePreviewReviewCommand(out io.Writer) *cobra.Command {
+	var execute bool
+	var actor string
+	var reason string
+	cmd := &cobra.Command{
+		Use:   "execute-compile-preview-review <workspace> <review-artifact>",
+		Short: "Execute frozen tool plan nodes from a persisted compile preview review",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			execution, err := app.ExecuteToolCompilePreviewReview(context.Background(), args[0], args[1], app.ToolCompilePreviewReviewExecutionOptions{
+				Execute: execute,
+				Actor:   actor,
+				Reason:  reason,
+			})
+			if err != nil && strings.TrimSpace(execution.Path) == "" && strings.TrimSpace(execution.Status) == "" {
+				return err
+			}
+			if printErr := printToolCompilePreviewReviewExecutionCreateResult(out, execution); printErr != nil {
+				return printErr
+			}
+			return err
+		},
+	}
+	cmd.Flags().BoolVar(&execute, "execute", false, "execute frozen nodes from the persisted compile preview review")
+	cmd.Flags().StringVar(&actor, "actor", "", "operator recorded on the execution artifact")
+	cmd.Flags().StringVar(&reason, "reason", "", "reason recorded on the execution artifact")
+	return cmd
+}
+
+func newToolchainCompilePreviewReviewExecutionsCommand(out io.Writer) *cobra.Command {
+	return &cobra.Command{
+		Use:   "compile-preview-review-executions <workspace> [artifact]",
+		Short: "List or inspect compile preview review execution audit artifacts",
+		Args:  cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 2 {
+				execution, err := app.ReadToolCompilePreviewReviewExecution(args[0], args[1])
+				if err != nil {
+					return err
+				}
+				return printToolCompilePreviewReviewExecutionArtifact(out, execution)
+			}
+			executions, err := app.ListToolCompilePreviewReviewExecutions(args[0])
+			if err != nil {
+				return err
+			}
+			if _, err := fmt.Fprintf(out, "compile-preview-review-executions: total=%d\n", len(executions)); err != nil {
+				return err
+			}
+			for _, execution := range executions {
+				if err := printToolCompilePreviewReviewExecutionArtifact(out, execution); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	}
+}
+
+func printToolCompilePreviewReviewExecutionCreateResult(out io.Writer, execution app.ToolCompilePreviewReviewExecution) error {
+	if _, err := fmt.Fprintf(
+		out,
+		"compile-preview-review-execution: %s status=%s mode=%s review=%s action=%s nodes=%d warnings=%d events=%d actor=%s reason=%s\n",
+		execution.RunID,
+		execution.Status,
+		execution.Mode,
+		execution.ReviewPath,
+		execution.Action,
+		execution.ReviewNodes,
+		execution.ReviewWarnings,
+		execution.EventCount,
+		toolCompilePreviewReviewExecutionDisplayValue(execution.Actor, "operator"),
+		strings.TrimSpace(execution.Reason),
+	); err != nil {
+		return err
+	}
+	if strings.TrimSpace(execution.Path) != "" {
+		if _, err := fmt.Fprintf(out, "artifact: %s\n", execution.Path); err != nil {
+			return err
+		}
+	}
+	return printToolCompilePreviewReviewExecutionDetails(out, execution)
+}
+
+func printToolCompilePreviewReviewExecutionArtifact(out io.Writer, execution app.ToolCompilePreviewReviewExecution) error {
+	if _, err := fmt.Fprintf(
+		out,
+		"compile-preview-review-execution-artifact: %s status=%s mode=%s run=%s review=%s selection=%s action=%s nodes=%d warnings=%d events=%d actor=%s reason=%s\n",
+		execution.Path,
+		execution.Status,
+		execution.Mode,
+		execution.RunID,
+		execution.ReviewPath,
+		toolCompilePreviewReviewExecutionDisplayValue(execution.SelectionPath, "-"),
+		execution.Action,
+		execution.ReviewNodes,
+		execution.ReviewWarnings,
+		execution.EventCount,
+		toolCompilePreviewReviewExecutionDisplayValue(execution.Actor, "operator"),
+		strings.TrimSpace(execution.Reason),
+	); err != nil {
+		return err
+	}
+	return printToolCompilePreviewReviewExecutionDetails(out, execution)
+}
+
+func printToolCompilePreviewReviewExecutionDetails(out io.Writer, execution app.ToolCompilePreviewReviewExecution) error {
+	for _, warning := range execution.Warnings {
+		if _, err := fmt.Fprintf(out, "warning: %s\n", warning); err != nil {
+			return err
+		}
+	}
+	if strings.TrimSpace(execution.Error) != "" {
+		if _, err := fmt.Fprintf(out, "error: %s\n", strings.Join(strings.Fields(execution.Error), " ")); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func toolCompilePreviewReviewExecutionDisplayValue(value string, fallback string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fallback
+	}
+	return value
 }
 
 func printToolCompilePreviewReview(out io.Writer, review app.ToolCompilePreviewReview) error {

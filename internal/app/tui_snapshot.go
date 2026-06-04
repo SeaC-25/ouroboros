@@ -1080,6 +1080,7 @@ func tuiModelWithWorkspaceRuntimeRows(root string, model tui.Model) tui.Model {
 	model = tuiModelWithToolchainContractRows(root, model)
 	model = tuiModelWithCompilePreviewSignalRows(root, model)
 	model = tuiModelWithCompilePreviewReviewRows(root, model)
+	model = tuiModelWithCompilePreviewReviewExecutionRows(root, model)
 	model = tuiModelWithCompilePreviewRows(root, model)
 	model = tuiModelWithReplayWorkbenchCollaborationNoteRows(root, model)
 	model = tuiModelWithReplayWorkbenchCollaborationRows(root, model)
@@ -1950,6 +1951,14 @@ func tuiModelWithCompilePreviewReviewRows(root string, model tui.Model) tui.Mode
 	return model.AppendRuntimeRows(tui.RuntimeTabToolchainHealth, rows)
 }
 
+func tuiModelWithCompilePreviewReviewExecutionRows(root string, model tui.Model) tui.Model {
+	executions, err := ListToolCompilePreviewReviewExecutions(root)
+	if err != nil || len(executions) == 0 {
+		return model
+	}
+	return model.AppendRuntimeRows(tui.RuntimeTabToolchainHealth, compilePreviewReviewExecutionRuntimeRows(executions))
+}
+
 func tuiModelWithCompilePreviewRows(root string, model tui.Model) tui.Model {
 	if hasToolchainReviewRows(root) {
 		return model
@@ -1981,6 +1990,9 @@ func hasToolchainReviewRows(root string) bool {
 		return true
 	}
 	if reviews, err := ListToolCompilePreviewReviews(root); err == nil && len(reviews) > 0 {
+		return true
+	}
+	if executions, err := ListToolCompilePreviewReviewExecutions(root); err == nil && len(executions) > 0 {
 		return true
 	}
 	return false
@@ -2040,6 +2052,34 @@ func compilePreviewSignalRuntimeRows(root string, signals ToolCompilePreviewSign
 
 func compilePreviewReviewRuntimeRows(reviews []ToolCompilePreviewReview) []string {
 	return compilePreviewReviewRuntimeRowsWithSelection(reviews, ToolCompilePreviewReviewSelection{}, false)
+}
+
+func compilePreviewReviewExecutionRuntimeRows(executions []ToolCompilePreviewReviewExecution) []string {
+	rows := []string{fmt.Sprintf("compile-preview review executions: total=%d", len(executions))}
+	for _, execution := range executions {
+		fields := []string{
+			fmt.Sprintf("status=%s", installRequestDisplayValue(execution.Status, "unknown")),
+			fmt.Sprintf("mode=%s", installRequestDisplayValue(execution.Mode, "execute")),
+			fmt.Sprintf("action=%s", installRequestDisplayValue(string(execution.Action), "unknown")),
+			fmt.Sprintf("nodes=%d", execution.ReviewNodes),
+			fmt.Sprintf("warnings=%d", execution.ReviewWarnings),
+			fmt.Sprintf("events=%d", execution.EventCount),
+			fmt.Sprintf("actor=%s", installRequestDisplayValue(execution.Actor, "operator")),
+			fmt.Sprintf("executed_at=%s", installRequestDisplayValue(execution.ExecutedAt, "unknown")),
+			fmt.Sprintf("run=%s", installRequestDisplayValue(execution.RunID, "unknown")),
+			fmt.Sprintf("review=%s", installRequestDisplayValue(execution.ReviewPath, "unknown")),
+			fmt.Sprintf("selection=%s", installRequestDisplayValue(execution.SelectionPath, "none")),
+			fmt.Sprintf("path=%s", installRequestDisplayValue(execution.Path, "unknown")),
+		}
+		if reason := strings.TrimSpace(execution.Reason); reason != "" {
+			fields = append(fields, "reason="+reason)
+		}
+		if executionError := strings.TrimSpace(execution.Error); executionError != "" {
+			fields = append(fields, "error="+executionError)
+		}
+		rows = append(rows, "compile-preview review execution artifact: "+strings.Join(fields, " "))
+	}
+	return rows
 }
 
 func compilePreviewReviewRuntimeRowsWithSelection(reviews []ToolCompilePreviewReview, selection ToolCompilePreviewReviewSelection, selectionFound bool) []string {

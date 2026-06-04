@@ -263,6 +263,33 @@ type ToolCompilePreviewReviewSelectionClearOptions struct {
 	Reason    string
 }
 
+type ToolCompilePreviewReviewExecution struct {
+	Path           string                  `json:"path,omitempty"`
+	Status         string                  `json:"status"`
+	Mode           string                  `json:"mode"`
+	RunID          string                  `json:"run_id"`
+	ReviewPath     string                  `json:"review_path"`
+	SelectionPath  string                  `json:"selection_path,omitempty"`
+	Action         compiler.SemanticAction `json:"action"`
+	ReviewNodes    int                     `json:"review_nodes"`
+	ReviewWarnings int                     `json:"review_warnings"`
+	EventCount     int                     `json:"event_count"`
+	ExecutedAt     string                  `json:"executed_at,omitempty"`
+	Actor          string                  `json:"actor,omitempty"`
+	Reason         string                  `json:"reason,omitempty"`
+	Error          string                  `json:"error,omitempty"`
+	Warnings       []string                `json:"warnings,omitempty"`
+}
+
+type ToolCompilePreviewReviewExecutionOptions struct {
+	Execute         bool
+	Actor           string
+	Reason          string
+	ExecutedAt      time.Time
+	ToolRunner      ToolExecutionRunner
+	ToolConcurrency int
+}
+
 type ToolCompilePreviewSignalArtifact struct {
 	Path    string                    `json:"path"`
 	Status  string                    `json:"status"`
@@ -883,6 +910,236 @@ func ReadToolCompilePreviewReviewSelection(root string) (ToolCompilePreviewRevie
 	}
 	selection.Path = path
 	return selection, true, nil
+}
+
+func ExecuteToolCompilePreviewReview(ctx context.Context, root, reviewPath string, options ToolCompilePreviewReviewExecutionOptions) (ToolCompilePreviewReviewExecution, error) {
+	if !options.Execute {
+		return ToolCompilePreviewReviewExecution{}, fmt.Errorf("compile preview review execution requires explicit execute")
+	}
+	doctor, err := DoctorWorkspaceWithOptions(root, DoctorOptions{RequireSafetyAuthorization: true})
+	if err != nil {
+		return ToolCompilePreviewReviewExecution{}, err
+	}
+	if !doctor.Ready {
+		return ToolCompilePreviewReviewExecution{}, fmt.Errorf("workspace is not ready: %v", doctor.Errors)
+	}
+	scopeConfig, err := LoadScopeConfig(filepath.Join(root, "scope.yaml"))
+	if err != nil {
+		return ToolCompilePreviewReviewExecution{}, fmt.Errorf("load scope config: %w", err)
+	}
+	if err := ValidateScopeConfig(scopeConfig); err != nil {
+		return ToolCompilePreviewReviewExecution{}, fmt.Errorf("invalid scope config: %w", err)
+	}
+	manifests, err := toolchain.LoadManifests(filepath.Join(root, "toolchain"))
+	if err != nil {
+		return ToolCompilePreviewReviewExecution{}, fmt.Errorf("load toolchain manifests: %w", err)
+	}
+	if err := validatePackExecutionPoliciesAgainstManifests(scopeConfig.Execution.PackPolicies, manifests); err != nil {
+		return ToolCompilePreviewReviewExecution{}, fmt.Errorf("invalid scope config: %w", err)
+	}
+	resolvedReviewPath, err := resolveToolCompilePreviewReviewPath(root, reviewPath)
+	if err != nil {
+		return ToolCompilePreviewReviewExecution{}, err
+	}
+	review, err := readToolCompilePreviewReviewFile(resolvedReviewPath)
+	if err != nil {
+		return ToolCompilePreviewReviewExecution{}, err
+	}
+	if strings.TrimSpace(review.Status) != "dry-run" || strings.TrimSpace(review.Mode) != "metadata-only" {
+		return ToolCompilePreviewReviewExecution{}, fmt.Errorf("compile preview review must be dry-run metadata-only before execution")
+	}
+	if len(review.Preview.Nodes) == 0 {
+		return ToolCompilePreviewReviewExecution{}, fmt.Errorf("compile preview review has no nodes to execute")
+	}
+	selection, selectionFound, selectionErr := readToolCompilePreviewReviewSelectionForExecution(root)
+	if selectionErr != nil {
+		return ToolCompilePreviewReviewExecution{}, selectionErr
+	}
+	if !selectionFound || !toolCompilePreviewReviewSelectionIsCurrent(selection) {
+		return ToolCompilePreviewReviewExecution{}, fmt.Errorf("compile preview review execution requires a current review selection")
+	}
+	if strings.TrimSpace(selection.ReviewPath) != strings.TrimSpace(review.Path) {
+		return ToolCompilePreviewReviewExecution{}, fmt.Errorf("compile preview review is not the current selection: selected=%s review=%s", selection.ReviewPath, review.Path)
+	}
+
+	executedAt := options.ExecutedAt
+	if executedAt.IsZero() {
+		executedAt = time.Now().UTC()
+	}
+	actor := strings.TrimSpace(options.Actor)
+	if actor == "" {
+		actor = "operator"
+	}
+	runID := fmt.Sprintf("compile-preview-review-execution-%d", executedAt.UTC().UnixNano())
+	execution := ToolCompilePreviewReviewExecution{
+		Status:         "completed",
+		Mode:           "execute",
+		RunID:          runID,
+		ReviewPath:     review.Path,
+		Action:         review.Preview.Action,
+		ReviewNodes:    len(review.Preview.Nodes),
+		ReviewWarnings: len(review.Preview.Warnings),
+		ExecutedAt:     executedAt.UTC().Format(time.RFC3339),
+		Actor:          actor,
+		Reason:         strings.TrimSpace(options.Reason),
+		Warnings:       append([]string(nil), doctor.Warnings...),
+	}
+	execution.SelectionPath = selection.Path
+	if _, err := ensureToolCompilePreviewReviewExecutionDirectory(root); err != nil {
+		return execution, err
+	}
+	if err := os.MkdirAll(filepath.Join(root, "replay"), 0o755); err != nil {
+		return execution, fmt.Errorf("create replay directory: %w", err)
+	}
+	store, err := eventlog.OpenSQLite(filepath.Join(root, "replay", "events.db"))
+	if err != nil {
+		return execution, err
+	}
+	defer store.Close()
+	persistedEvents := []eventlog.Event{}
+	runOptions := RunOptions{
+		ToolRunner:                 options.ToolRunner,
+		ToolConcurrency:            options.ToolConcurrency,
+		RequireSafetyAuthorization: true,
+	}
+	if err := appendRunEvent(ctx, store, workspaceSafetyEvent(runID, doctor, scopeConfig, true), runOptions, &persistedEvents); err != nil {
+		return execution, err
+	}
+	if err := appendRunEvent(ctx, store, stageEvent(runID, "tool-execution", "Execute selected compile preview review nodes", "started"), runOptions, &persistedEvents); err != nil {
+		return execution, err
+	}
+	err = runToolPlanNodesExecutionStage(ctx, root, runID, "tool-execution", "Execute selected compile preview review nodes", review.Preview.Nodes, scopeConfig.Scope.Targets, scopeConfig.Scope.Exclusions, scopeConfig.Scope.TargetPolicy, scopeConfig.Execution.Isolation, scopeConfig.Execution.Container, scopeConfig.Execution.ResourceLimits, scopeConfig.Execution.PackPolicies, scopeConfig.Execution.WorkerPools, toolExecutionConcurrency(scopeConfig, runOptions), toolRunnerFromOptions(runOptions), store, runOptions, &persistedEvents)
+	execution.EventCount = len(persistedEvents)
+	if err != nil {
+		execution.Status = "failed"
+		execution.Error = err.Error()
+		if writeErr := writeToolCompilePreviewReviewExecution(root, &execution); writeErr != nil {
+			return execution, writeErr
+		}
+		return execution, err
+	}
+	if err := writeToolCompilePreviewReviewExecution(root, &execution); err != nil {
+		return execution, err
+	}
+	return execution, nil
+}
+
+func readToolCompilePreviewReviewSelectionForExecution(root string) (ToolCompilePreviewReviewSelection, bool, error) {
+	path := toolCompilePreviewReviewSelectionPath(root)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return ToolCompilePreviewReviewSelection{}, false, nil
+		}
+		return ToolCompilePreviewReviewSelection{}, false, fmt.Errorf("read compile preview review selection %s: %w", path, err)
+	}
+	var selection ToolCompilePreviewReviewSelection
+	if err := json.Unmarshal(data, &selection); err != nil {
+		return ToolCompilePreviewReviewSelection{}, false, fmt.Errorf("decode compile preview review selection %s: %w", path, err)
+	}
+	selection.Path = path
+	return selection, true, nil
+}
+
+func ListToolCompilePreviewReviewExecutions(root string) ([]ToolCompilePreviewReviewExecution, error) {
+	doctor, err := doctorWorkspaceMetadataOnly(root)
+	if err != nil {
+		return nil, err
+	}
+	if !doctor.Ready {
+		return nil, fmt.Errorf("workspace is not ready: %v", doctor.Errors)
+	}
+	if err := rejectUnsafeAuthoredToolDirectory(toolCompilePreviewReviewExecutionDir(root), "compile preview review execution directory"); err != nil {
+		return nil, err
+	}
+	paths, err := filepath.Glob(filepath.Join(toolCompilePreviewReviewExecutionDir(root), "*.json"))
+	if err != nil {
+		return nil, fmt.Errorf("glob compile preview review executions: %w", err)
+	}
+	sort.Strings(paths)
+	executions := make([]ToolCompilePreviewReviewExecution, 0, len(paths))
+	for _, path := range paths {
+		execution, err := readToolCompilePreviewReviewExecutionFile(path)
+		if err != nil {
+			return nil, err
+		}
+		executions = append(executions, execution)
+	}
+	return executions, nil
+}
+
+func ReadToolCompilePreviewReviewExecution(root, executionPath string) (ToolCompilePreviewReviewExecution, error) {
+	doctor, err := doctorWorkspaceMetadataOnly(root)
+	if err != nil {
+		return ToolCompilePreviewReviewExecution{}, err
+	}
+	if !doctor.Ready {
+		return ToolCompilePreviewReviewExecution{}, fmt.Errorf("workspace is not ready: %v", doctor.Errors)
+	}
+	path, err := resolveToolCompilePreviewReviewExecutionPath(root, executionPath)
+	if err != nil {
+		return ToolCompilePreviewReviewExecution{}, err
+	}
+	return readToolCompilePreviewReviewExecutionFile(path)
+}
+
+func writeToolCompilePreviewReviewExecution(root string, execution *ToolCompilePreviewReviewExecution) error {
+	dir, err := ensureToolCompilePreviewReviewExecutionDirectory(root)
+	if err != nil {
+		return err
+	}
+	name := safeInstallRequestName(strings.Join([]string{
+		"compile-preview-review-execution",
+		execution.ReviewPath,
+		execution.RunID,
+		time.Now().UTC().Format(time.RFC3339Nano),
+	}, "|"))
+	execution.Path = filepath.Join(dir, name+".json")
+	data, err := json.MarshalIndent(execution, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode compile preview review execution: %w", err)
+	}
+	data = append(data, '\n')
+	if err := rejectUnsafeAuthoredToolFile(execution.Path, "compile preview review execution file"); err != nil {
+		return err
+	}
+	if err := os.WriteFile(execution.Path, data, 0o644); err != nil {
+		return fmt.Errorf("write compile preview review execution: %w", err)
+	}
+	return nil
+}
+
+func readToolCompilePreviewReviewExecutionFile(path string) (ToolCompilePreviewReviewExecution, error) {
+	if err := rejectUnsafeAuthoredToolFile(path, "compile preview review execution file"); err != nil {
+		return ToolCompilePreviewReviewExecution{}, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ToolCompilePreviewReviewExecution{}, fmt.Errorf("read compile preview review execution %s: %w", path, err)
+	}
+	var execution ToolCompilePreviewReviewExecution
+	if err := json.Unmarshal(data, &execution); err != nil {
+		return ToolCompilePreviewReviewExecution{}, fmt.Errorf("decode compile preview review execution %s: %w", path, err)
+	}
+	execution.Path = path
+	return execution, nil
+}
+
+func ensureToolCompilePreviewReviewExecutionDirectory(root string) (string, error) {
+	if err := requireAuthoredToolDirectory(filepath.Join(root, "toolchain"), "toolchain directory"); err != nil {
+		return "", err
+	}
+	dir := toolCompilePreviewReviewExecutionDir(root)
+	if err := rejectUnsafeAuthoredToolDirectory(dir, "compile preview review execution directory"); err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("create compile preview review execution directory: %w", err)
+	}
+	if err := requireAuthoredToolDirectory(dir, "compile preview review execution directory"); err != nil {
+		return "", err
+	}
+	return dir, nil
 }
 
 func readToolCompilePreviewReviewFile(path string) (ToolCompilePreviewReview, error) {
@@ -3478,6 +3735,36 @@ func resolveToolchainInstallExecutionPath(root, executionPath string) (string, e
 	return candidate, nil
 }
 
+func resolveToolCompilePreviewReviewExecutionPath(root, executionPath string) (string, error) {
+	trimmed := strings.TrimSpace(executionPath)
+	if trimmed == "" {
+		return "", fmt.Errorf("compile preview review execution path is required")
+	}
+	dir, err := filepath.Abs(toolCompilePreviewReviewExecutionDir(root))
+	if err != nil {
+		return "", fmt.Errorf("resolve compile preview review execution directory: %w", err)
+	}
+	candidate := trimmed
+	if !filepath.IsAbs(candidate) {
+		candidate = filepath.Join(dir, candidate)
+	}
+	candidate, err = filepath.Abs(candidate)
+	if err != nil {
+		return "", fmt.Errorf("resolve compile preview review execution path: %w", err)
+	}
+	rel, err := filepath.Rel(dir, candidate)
+	if err != nil {
+		return "", fmt.Errorf("resolve compile preview review execution relative path: %w", err)
+	}
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("compile preview review execution path must stay under %s", dir)
+	}
+	if filepath.Ext(candidate) != ".json" {
+		return "", fmt.Errorf("compile preview review execution path must be a json file")
+	}
+	return candidate, nil
+}
+
 func resolveToolchainInstallRetryDispatchPath(root, dispatchPath string) (string, error) {
 	trimmed := strings.TrimSpace(dispatchPath)
 	if trimmed == "" {
@@ -3544,6 +3831,10 @@ func toolchainInstallRequestDir(root string) string {
 
 func toolCompilePreviewReviewDir(root string) string {
 	return filepath.Join(root, "toolchain", "compile-preview-reviews")
+}
+
+func toolCompilePreviewReviewExecutionDir(root string) string {
+	return filepath.Join(root, "toolchain", "compile-preview-review-executions")
 }
 
 func toolCompilePreviewReviewSelectionPath(root string) string {
