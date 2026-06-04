@@ -161,6 +161,10 @@ func TestRunWorkspaceRecordsDurableEventsReplayAndReport(t *testing.T) {
 			t.Fatalf("expected report to contain %q, got:\n%s", want, string(reportData))
 		}
 	}
+	plannerSuggestion := "closed-loop planner preview selected next task"
+	if !strings.Contains(string(reportData), plannerSuggestion) {
+		t.Fatalf("expected report to contain planner suggestion %q, got:\n%s", plannerSuggestion, string(reportData))
+	}
 
 	store, err := eventlog.OpenSQLite(filepath.Join(root, "replay", "events.db"))
 	if err != nil {
@@ -181,6 +185,19 @@ func TestRunWorkspaceRecordsDurableEventsReplayAndReport(t *testing.T) {
 	}
 	if snapshot.Status.Model != "offline-model" || snapshot.Status.ToolHealth != "ready" || len(snapshot.Timeline) == 0 {
 		t.Fatalf("unexpected replay snapshot: %#v", snapshot)
+	}
+	if !snapshotHasFact(snapshot, "a-closed-loop-preview", "suggestion", "closed-loop-planner", plannerSuggestion) {
+		t.Fatalf("expected closed-loop planner suggestion fact in replay snapshot, facts=%#v", snapshot.Blackboard.Facts)
+	}
+	if !snapshotHasHint(snapshot, "hint-closed-loop-planner-preview", "planning", "closed-loop-planner", plannerSuggestion) {
+		t.Fatalf("expected closed-loop planner hint in replay snapshot, hints=%#v", snapshot.Blackboard.Hints)
+	}
+	if !snapshotHasAgent(snapshot, "closed-loop-planner", "planner", "Complete") {
+		t.Fatalf("expected closed-loop planner agent in replay snapshot, agents=%#v", snapshot.Agents)
+	}
+	assertPlannerPreviewBeforeReportProjection(t, events)
+	if !strings.Contains(result.TUIView, "a-closed-loop-preview") {
+		t.Fatalf("expected TUI view to expose planner preview, got:\n%s", result.TUIView)
 	}
 }
 
@@ -749,6 +766,66 @@ func lastStageAttempt(t *testing.T, events []eventlog.Event) stageAttemptPayload
 	return last
 }
 
+func snapshotHasFact(snapshot eventlog.ReplaySnapshot, id string, kind string, source string, statementSubstring string) bool {
+	for _, fact := range snapshot.Blackboard.Facts {
+		if fact.ID == id && fact.Kind == kind && fact.Source == source && strings.Contains(fact.Statement, statementSubstring) {
+			return true
+		}
+	}
+	return false
+}
+
+func snapshotHasHint(snapshot eventlog.ReplaySnapshot, id string, kind string, source string, messageSubstring string) bool {
+	for _, hint := range snapshot.Blackboard.Hints {
+		if hint.ID == id && hint.Kind == kind && hint.Source == source && strings.Contains(hint.Message, messageSubstring) {
+			return true
+		}
+	}
+	return false
+}
+
+func snapshotHasAgent(snapshot eventlog.ReplaySnapshot, id string, role string, state string) bool {
+	for _, agent := range snapshot.Agents {
+		if agent.ID == id && agent.Role == role && agent.State == state {
+			return true
+		}
+	}
+	return false
+}
+
+func assertPlannerPreviewBeforeReportProjection(t *testing.T, events []eventlog.Event) {
+	t.Helper()
+	plannerCompletedIndex := -1
+	reportStartedIndex := -1
+	for i, event := range events {
+		if event.Type != eventlog.EventAttempt {
+			continue
+		}
+		var payload stageAttemptPayload
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatalf("decode attempt payload: %v", err)
+		}
+		if payload.Kind != "stage" {
+			continue
+		}
+		if payload.StageID == "closed-loop-planner-preview" && payload.Status == "completed" {
+			plannerCompletedIndex = i
+		}
+		if payload.StageID == "report-projection" && payload.Status == "started" {
+			reportStartedIndex = i
+		}
+	}
+	if plannerCompletedIndex < 0 {
+		t.Fatalf("expected completed closed-loop planner preview stage in events")
+	}
+	if reportStartedIndex < 0 {
+		t.Fatalf("expected started report projection stage in events")
+	}
+	if plannerCompletedIndex > reportStartedIndex {
+		t.Fatalf("planner preview must complete before report projection starts, planner=%d report=%d", plannerCompletedIndex, reportStartedIndex)
+	}
+}
+
 func TestRunWorkspaceRecordsObservableStageAttemptEvents(t *testing.T) {
 	ctx := context.Background()
 	root := filepath.Join(t.TempDir(), "workspace")
@@ -798,6 +875,8 @@ func TestRunWorkspaceRecordsObservableStageAttemptEvents(t *testing.T) {
 		"hypothesis-seeding:completed",
 		"tool-execution:started",
 		"tool-execution:completed",
+		"closed-loop-planner-preview:started",
+		"closed-loop-planner-preview:completed",
 		"report-projection:started",
 		"report-projection:completed",
 	}
