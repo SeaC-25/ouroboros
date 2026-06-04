@@ -296,7 +296,7 @@ func RunWorkspaceWithOptions(ctx context.Context, root string, options RunOption
 	defer store.Close()
 
 	runID := fmt.Sprintf("run-%d", time.Now().UTC().UnixNano())
-	events, err := runEvents(root, runID, providerRuntime, manifests, scopeConfig)
+	events, err := runEvents(root, runID, providerRuntime, manifests, scopeConfig, runActionFromOptions(options))
 	if err != nil {
 		return RunResult{}, err
 	}
@@ -310,7 +310,7 @@ func RunWorkspaceWithOptions(ctx context.Context, root string, options RunOption
 	if err := runToolExecutionStage(ctx, root, runID, manifests, scopeConfig.Scope.Targets, scopeConfig.Scope.Exclusions, scopeConfig.Scope.TargetPolicy, scopeConfig.Execution.Isolation, scopeConfig.Execution.Container, scopeConfig.Execution.ResourceLimits, scopeConfig.Execution.PackPolicies, scopeConfig.Execution.WorkerPools, toolExecutionConcurrency(scopeConfig, options), toolRunnerFromOptions(options), store, options, &persistedEvents); err != nil {
 		return RunResult{}, err
 	}
-	if err := runClosedLoopPlannerPreviewStage(ctx, runID, store, options, &persistedEvents); err != nil {
+	if err := runClosedLoopPlannerPreviewStage(ctx, root, runID, store, options, &persistedEvents); err != nil {
 		return RunResult{}, err
 	}
 
@@ -1308,7 +1308,7 @@ func validateContainerConfig(config ContainerExecutionConfig) error {
 	return nil
 }
 
-func runEvents(root string, runID string, provider ProviderRuntime, manifests []toolchain.Manifest, scopeConfig ScopeConfig) ([]eventlog.Event, error) {
+func runEvents(root string, runID string, provider ProviderRuntime, manifests []toolchain.Manifest, scopeConfig ScopeConfig, action compiler.SemanticAction) ([]eventlog.Event, error) {
 	goal := readMissionGoal(root)
 	events := []eventlog.Event{
 		stageEvent(runID, "workspace-bootstrap", "Load workspace mission, provider, and scope", "started"),
@@ -1379,6 +1379,7 @@ func runEvents(root string, runID string, provider ProviderRuntime, manifests []
 				"goal":         "start production workspace execution path",
 				"source_facts": []string{"fact-workspace"},
 				"state":        "Open",
+				"action":       string(action),
 			}),
 		},
 		{

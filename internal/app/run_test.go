@@ -14,10 +14,13 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/ouroboros/ouroboros/internal/compiler"
 	"github.com/ouroboros/ouroboros/internal/eventlog"
 	"github.com/ouroboros/ouroboros/internal/evidence"
+	"github.com/ouroboros/ouroboros/internal/sisyphus"
 	"github.com/ouroboros/ouroboros/internal/toolchain"
+	"github.com/ouroboros/ouroboros/internal/tui"
 )
 
 func TestInitWorkspaceCreatesProviderConfigAndToolchainManifests(t *testing.T) {
@@ -199,6 +202,101 @@ func TestRunWorkspaceRecordsDurableEventsReplayAndReport(t *testing.T) {
 	if !strings.Contains(result.TUIView, "a-closed-loop-preview") {
 		t.Fatalf("expected TUI view to expose planner preview, got:\n%s", result.TUIView)
 	}
+}
+
+func TestRunWorkspaceRecordsPlannerSelectedCompilePreviewReview(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+
+	result, err := RunWorkspaceWithOptions(ctx, root, RunOptions{Action: compiler.ActionEnumeratePaths})
+	if err != nil {
+		t.Fatalf("run workspace: %v", err)
+	}
+
+	reviews, err := ListToolCompilePreviewReviews(root)
+	if err != nil {
+		t.Fatalf("list compile preview reviews: %v", err)
+	}
+	if len(reviews) != 1 {
+		t.Fatalf("expected one planner-selected compile preview review, got %#v", reviews)
+	}
+	review := reviews[0]
+	if review.Status != "dry-run" || review.Mode != "metadata-only" {
+		t.Fatalf("unexpected review state: %#v", review)
+	}
+	if review.Preview.Action != compiler.ActionEnumeratePaths {
+		t.Fatalf("expected planner-selected action %s, got %s", compiler.ActionEnumeratePaths, review.Preview.Action)
+	}
+	if len(review.Preview.Nodes) == 0 {
+		t.Fatalf("expected planner-selected compile preview nodes, got %#v", review.Preview)
+	}
+
+	selection, found, err := ReadToolCompilePreviewReviewSelection(root)
+	if err != nil {
+		t.Fatalf("read compile preview selection: %v", err)
+	}
+	if !found {
+		t.Fatalf("expected planner-selected compile preview selection")
+	}
+	if selection.Status != "current" || selection.Mode != "metadata-only" || selection.SelectedBy != closedLoopPlannerSource {
+		t.Fatalf("unexpected compile preview selection: %#v", selection)
+	}
+	if selection.Action != compiler.ActionEnumeratePaths || selection.ReviewPath != review.Path || selection.ReviewNodes != len(review.Preview.Nodes) {
+		t.Fatalf("selection does not reference planner review: selection=%#v review=%#v", selection, review)
+	}
+
+	reportData, err := os.ReadFile(result.ReportPath)
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	for _, want := range []string{
+		"planner-selected compile preview action enumerate_paths",
+		"metadata-only compile preview review",
+	} {
+		if !strings.Contains(string(reportData), want) {
+			t.Fatalf("expected report to contain %q, got:\n%s", want, string(reportData))
+		}
+	}
+	model := NewTUIModelForWorkspace(root).SelectRuntimeTab(tui.RuntimeTabToolchainHealth)
+	resized, cmd := model.Update(tea.WindowSizeMsg{Width: 720, Height: 44})
+	if cmd != nil {
+		t.Fatalf("expected TUI resize update to be synchronous")
+	}
+	workspaceTUIView := resized.View()
+	for _, want := range []string{
+		"compile-preview review selection:",
+		"selected_by=closed-loop-planner",
+		"action=enumerate_paths",
+		"compile-preview review node:",
+	} {
+		if !strings.Contains(workspaceTUIView, want) {
+			t.Fatalf("expected TUI view to contain %q, got:\n%s", want, workspaceTUIView)
+		}
+	}
+
+	store, err := eventlog.OpenSQLite(filepath.Join(root, "replay", "events.db"))
+	if err != nil {
+		t.Fatalf("open event log: %v", err)
+	}
+	defer store.Close()
+	events, err := store.Replay(ctx, result.RunID)
+	if err != nil {
+		t.Fatalf("replay events: %v", err)
+	}
+	attempt := plannerReviewAttemptPayload(t, events)
+	if attempt["selected_action"] != string(compiler.ActionEnumeratePaths) {
+		t.Fatalf("expected planner review selected_action=%s, got %#v", compiler.ActionEnumeratePaths, attempt)
+	}
+	if attempt["compile_preview_mode"] != "metadata-only" || attempt["compile_preview_review_path"] != review.Path || attempt["compile_preview_selection_path"] != selection.Path {
+		t.Fatalf("expected planner review compile preview metadata, got %#v", attempt)
+	}
+	if nodes, ok := attempt["compile_preview_nodes"].(float64); !ok || int(nodes) != len(review.Preview.Nodes) {
+		t.Fatalf("expected planner review node count %d, got %#v", len(review.Preview.Nodes), attempt)
+	}
+	assertPlannerPreviewBeforeReportProjection(t, events)
 }
 
 func TestRunWorkspaceCanDeferReportProjection(t *testing.T) {
@@ -791,6 +889,58 @@ func snapshotHasAgent(snapshot eventlog.ReplaySnapshot, id string, role string, 
 		}
 	}
 	return false
+}
+
+func plannerReviewAttemptPayload(t *testing.T, events []eventlog.Event) map[string]any {
+	t.Helper()
+	for _, event := range events {
+		if event.Type != eventlog.EventAttempt {
+			continue
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatalf("decode attempt payload: %v", err)
+		}
+		if payload["kind"] == "planner_review" {
+			return payload
+		}
+	}
+	t.Fatalf("expected planner_review attempt in %#v", events)
+	return nil
+}
+
+func TestClosedLoopPlannerSelectedActionUsesLatestMatchingIntentPayload(t *testing.T) {
+	action, found, err := closedLoopPlannerSelectedAction(sisyphusTask("intent-repeat"), []eventlog.Event{
+		{
+			Type: eventlog.EventIntent,
+			Payload: mustJSON(map[string]any{
+				"intent_id": "intent-repeat",
+				"kind":      "run",
+				"goal":      "older payload without action",
+				"state":     "Pending",
+			}),
+		},
+		{
+			Type: eventlog.EventIntent,
+			Payload: mustJSON(map[string]any{
+				"intent_id": "intent-repeat",
+				"kind":      "run",
+				"goal":      "newer payload with action",
+				"state":     "Open",
+				"action":    string(compiler.ActionEnumeratePaths),
+			}),
+		},
+	})
+	if err != nil {
+		t.Fatalf("selected action: %v", err)
+	}
+	if !found || action != compiler.ActionEnumeratePaths {
+		t.Fatalf("expected latest matching action %s, found=%v action=%s", compiler.ActionEnumeratePaths, found, action)
+	}
+}
+
+func sisyphusTask(intentID string) sisyphus.Task {
+	return sisyphus.Task{Kind: sisyphus.TaskExplore, IntentID: intentID}
 }
 
 func assertPlannerPreviewBeforeReportProjection(t *testing.T, events []eventlog.Event) {
