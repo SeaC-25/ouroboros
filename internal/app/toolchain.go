@@ -679,7 +679,7 @@ func CreateToolCompilePreviewReview(root string, options ToolCompilePreviewOptio
 }
 
 func ListToolCompilePreviewReviews(root string) ([]ToolCompilePreviewReview, error) {
-	doctor, err := DoctorWorkspaceWithOptions(root, DoctorOptions{RequireSafetyAuthorization: true})
+	doctor, err := doctorWorkspaceStrictMetadataOnly(root)
 	if err != nil {
 		return nil, err
 	}
@@ -703,7 +703,7 @@ func ListToolCompilePreviewReviews(root string) ([]ToolCompilePreviewReview, err
 }
 
 func ReadToolCompilePreviewReview(root, reviewPath string) (ToolCompilePreviewReview, error) {
-	doctor, err := DoctorWorkspaceWithOptions(root, DoctorOptions{RequireSafetyAuthorization: true})
+	doctor, err := doctorWorkspaceStrictMetadataOnly(root)
 	if err != nil {
 		return ToolCompilePreviewReview{}, err
 	}
@@ -862,7 +862,7 @@ func toolCompilePreviewReviewSelectionIsCleared(selection ToolCompilePreviewRevi
 }
 
 func ReadToolCompilePreviewReviewSelection(root string) (ToolCompilePreviewReviewSelection, bool, error) {
-	doctor, err := DoctorWorkspaceWithOptions(root, DoctorOptions{RequireSafetyAuthorization: true})
+	doctor, err := doctorWorkspaceStrictMetadataOnly(root)
 	if err != nil {
 		return ToolCompilePreviewReviewSelection{}, false, err
 	}
@@ -1637,7 +1637,7 @@ func CreateToolchainInstallRetryDispatch(root string) (ToolchainInstallRetryDisp
 }
 
 func ListToolchainInstallRetryDispatches(root string) ([]ToolchainInstallRetryDispatch, error) {
-	doctor, err := DoctorWorkspace(root)
+	doctor, err := doctorWorkspaceMetadataOnly(root)
 	if err != nil {
 		return nil, err
 	}
@@ -1662,7 +1662,7 @@ func ListToolchainInstallRetryDispatches(root string) ([]ToolchainInstallRetryDi
 }
 
 func ReadToolchainInstallRetryDispatch(root, dispatchPath string) (ToolchainInstallRetryDispatch, error) {
-	doctor, err := DoctorWorkspace(root)
+	doctor, err := doctorWorkspaceMetadataOnly(root)
 	if err != nil {
 		return ToolchainInstallRetryDispatch{}, err
 	}
@@ -1831,7 +1831,7 @@ func writeToolchainInstallRetryDispatchExecution(root string, execution *Toolcha
 }
 
 func ListToolchainInstallRetryDispatchExecutions(root string) ([]ToolchainInstallRetryDispatchExecution, error) {
-	doctor, err := DoctorWorkspace(root)
+	doctor, err := doctorWorkspaceMetadataOnly(root)
 	if err != nil {
 		return nil, err
 	}
@@ -1856,7 +1856,7 @@ func ListToolchainInstallRetryDispatchExecutions(root string) ([]ToolchainInstal
 }
 
 func ReadToolchainInstallRetryDispatchExecution(root, executionPath string) (ToolchainInstallRetryDispatchExecution, error) {
-	doctor, err := DoctorWorkspace(root)
+	doctor, err := doctorWorkspaceMetadataOnly(root)
 	if err != nil {
 		return ToolchainInstallRetryDispatchExecution{}, err
 	}
@@ -1912,7 +1912,7 @@ func CreateToolchainInstallDispatch(root string) (ToolchainInstallDispatch, erro
 }
 
 func ListToolchainInstallDispatches(root string) ([]ToolchainInstallDispatch, error) {
-	doctor, err := DoctorWorkspace(root)
+	doctor, err := doctorWorkspaceMetadataOnly(root)
 	if err != nil {
 		return nil, err
 	}
@@ -1937,7 +1937,7 @@ func ListToolchainInstallDispatches(root string) ([]ToolchainInstallDispatch, er
 }
 
 func ReadToolchainInstallDispatch(root, dispatchPath string) (ToolchainInstallDispatch, error) {
-	doctor, err := DoctorWorkspace(root)
+	doctor, err := doctorWorkspaceMetadataOnly(root)
 	if err != nil {
 		return ToolchainInstallDispatch{}, err
 	}
@@ -2065,7 +2065,7 @@ func writeToolchainInstallDispatchExecution(root string, execution *ToolchainIns
 }
 
 func ListToolchainInstallDispatchExecutions(root string) ([]ToolchainInstallDispatchExecution, error) {
-	doctor, err := DoctorWorkspace(root)
+	doctor, err := doctorWorkspaceMetadataOnly(root)
 	if err != nil {
 		return nil, err
 	}
@@ -2090,7 +2090,7 @@ func ListToolchainInstallDispatchExecutions(root string) ([]ToolchainInstallDisp
 }
 
 func ReadToolchainInstallDispatchExecution(root, executionPath string) (ToolchainInstallDispatchExecution, error) {
-	doctor, err := DoctorWorkspace(root)
+	doctor, err := doctorWorkspaceMetadataOnly(root)
 	if err != nil {
 		return ToolchainInstallDispatchExecution{}, err
 	}
@@ -3273,7 +3273,7 @@ func CreateToolchainInstallRequest(root, pack, dependency string) (ToolchainInst
 }
 
 func ListToolchainInstallRequests(root string) ([]ToolchainInstallRequest, error) {
-	doctor, err := DoctorWorkspace(root)
+	doctor, err := doctorWorkspaceMetadataOnly(root)
 	if err != nil {
 		return nil, err
 	}

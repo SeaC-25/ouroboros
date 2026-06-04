@@ -368,6 +368,164 @@ healthcheck: built_in
 	}
 }
 
+func TestNewTUIModelForWorkspaceShowsToolchainContractRowsMetadataOnly(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	engineDir := t.TempDir()
+	engine := filepath.Join(engineDir, "fake-container-engine")
+	marker := filepath.Join(engineDir, "container-runtime-was-called")
+	engineScript := `#!/bin/sh
+touch "` + marker + `"
+printf 'container runtime should not be inspected during TUI contract projection\n' >&2
+exit 1
+`
+	if err := os.WriteFile(engine, []byte(engineScript), 0o755); err != nil {
+		t.Fatalf("write fake engine: %v", err)
+	}
+	scope := `version: 1
+scope:
+  target_policy: enforce
+  targets: []
+  exclusions: []
+execution:
+  isolation: container
+  container:
+    engine: ` + engine + `
+    image: ouro-worker:test
+`
+	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
+		t.Fatalf("write container scope: %v", err)
+	}
+
+	model := NewTUIModelForWorkspace(root).SelectRuntimeTab(tui.RuntimeTabToolchainHealth)
+	resized, cmd := model.Update(tea.WindowSizeMsg{Width: 720, Height: 42})
+	if cmd != nil {
+		t.Fatalf("expected resize update to be synchronous")
+	}
+	view := resized.View()
+	for _, want := range []string{
+		"toolchain contract: status=ready mode=metadata-only",
+		"manifests=3",
+		"domain_packs=3",
+		"patterns=3",
+		"semantic_actions=7",
+		"errors=0",
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("expected TUI contract view to contain %q:\n%s", want, view)
+		}
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("TUI contract projection must not inspect container runtime, marker stat err=%v", err)
+	}
+
+	model = resized.(tui.Model).SelectRuntimeRowMatching(tui.RuntimeTabToolchainHealth, "toolchain contract:", "")
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	if cmd != nil {
+		t.Fatalf("expected contract detail update to be synchronous")
+	}
+	detailView := updated.(tui.Model).View()
+	for _, want := range []string{
+		"runtime action: toolchain-contract",
+		"state: ready",
+		"execution mode: metadata-only",
+		"output: contract check is read-only metadata",
+		"mode: read-only",
+	} {
+		if !strings.Contains(detailView, want) {
+			t.Fatalf("expected TUI contract details to contain %q:\n%s", want, detailView)
+		}
+	}
+}
+
+func TestNewTUIModelForWorkspaceShowsBlockedToolchainContractRows(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	manifestPath := filepath.Join(root, "toolchain", "web-api-pack", "manifest.yaml")
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	withoutAuthState := strings.ReplaceAll(string(data), "  - web.auth_state_tracking\n", "")
+	if err := os.WriteFile(manifestPath, []byte(withoutAuthState), 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	model := NewTUIModelForWorkspace(root).SelectRuntimeTab(tui.RuntimeTabToolchainHealth)
+	resized, cmd := model.Update(tea.WindowSizeMsg{Width: 820, Height: 48})
+	if cmd != nil {
+		t.Fatalf("expected resize update to be synchronous")
+	}
+	view := resized.View()
+	for _, want := range []string{
+		"toolchain contract: status=blocked mode=metadata-only",
+		"errors=1",
+		"toolchain contract error: domain capability web.auth_state_tracking is not provided by workspace manifests or built-in tools",
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("expected blocked contract view to contain %q:\n%s", want, view)
+		}
+	}
+
+	model = resized.(tui.Model).SelectRuntimeRowMatching(tui.RuntimeTabToolchainHealth, "toolchain contract error:", "web.auth_state_tracking")
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	if cmd != nil {
+		t.Fatalf("expected contract error detail update to be synchronous")
+	}
+	detailView := updated.(tui.Model).View()
+	for _, want := range []string{
+		"runtime action: toolchain-contract-error",
+		"state: blocked",
+		"reason: domain capability web.auth_state_tracking is not provided by workspace manifests or built-in tools",
+		"mode: read-only",
+	} {
+		if !strings.Contains(detailView, want) {
+			t.Fatalf("expected blocked contract details to contain %q:\n%s", want, detailView)
+		}
+	}
+}
+
+func TestToolchainContractRuntimeRowsCompactManyErrors(t *testing.T) {
+	check := ToolchainContractCheck{
+		Status:              "blocked",
+		ManifestCount:       3,
+		ToolCount:           26,
+		DomainPackCount:     3,
+		PatternCount:        3,
+		SemanticActionCount: 7,
+		Errors: []string{
+			"error 1",
+			"error 2",
+			"error 3",
+			"error 4",
+			"error 5",
+			"error 6",
+			"error 7",
+			"error 8",
+		},
+	}
+
+	rows := toolchainContractRuntimeRows(check)
+	joined := strings.Join(rows, "\n")
+	for _, want := range []string{
+		"toolchain contract: status=blocked mode=metadata-only manifests=3 tools=26 domain_packs=3 patterns=3 semantic_actions=7 errors=8",
+		"toolchain contract error: error 1",
+		"toolchain contract error: error 3",
+		"toolchain contract error: additional_errors_omitted=5 run=ouro_toolchain_contract_check",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("expected compact contract rows to contain %q:\n%s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "error 4") || strings.Contains(joined, "error 8") {
+		t.Fatalf("expected contract rows to omit overflow validation errors:\n%s", joined)
+	}
+}
+
 func TestNewTUIModelForWorkspaceShowsCompilePreviewSignalsDetails(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
 	if err := InitWorkspace(root); err != nil {

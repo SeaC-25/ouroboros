@@ -211,7 +211,7 @@ func CreateReplayWorkbenchCollaboration(ctx context.Context, root string, option
 }
 
 func ListReplayWorkbenchCollaborations(root string) ([]ReplayWorkbenchCollaborationArtifact, error) {
-	doctor, err := DoctorWorkspace(root)
+	doctor, err := doctorWorkspaceMetadataOnly(root)
 	if err != nil {
 		return nil, err
 	}
@@ -239,7 +239,7 @@ func ListReplayWorkbenchCollaborations(root string) ([]ReplayWorkbenchCollaborat
 }
 
 func ReadReplayWorkbenchCollaboration(root, collaborationPath string) (ReplayWorkbenchCollaborationArtifact, error) {
-	doctor, err := DoctorWorkspace(root)
+	doctor, err := doctorWorkspaceMetadataOnly(root)
 	if err != nil {
 		return ReplayWorkbenchCollaborationArtifact{}, err
 	}
@@ -362,7 +362,7 @@ func ClearReplayWorkbenchCollaborationSelection(root string, options ReplayWorkb
 }
 
 func ReadReplayWorkbenchCollaborationSelection(root string) (ReplayWorkbenchCollaborationSelection, bool, error) {
-	doctor, err := DoctorWorkspace(root)
+	doctor, err := doctorWorkspaceMetadataOnly(root)
 	if err != nil {
 		return ReplayWorkbenchCollaborationSelection{}, false, err
 	}
@@ -411,7 +411,7 @@ func UpdateReplayWorkbenchCollaborationPresence(ctx context.Context, root string
 }
 
 func ListReplayWorkbenchCollaborationPresence(root string) ([]ReplayWorkbenchCollaborationPresence, error) {
-	doctor, err := DoctorWorkspace(root)
+	doctor, err := doctorWorkspaceMetadataOnly(root)
 	if err != nil {
 		return nil, err
 	}
@@ -439,7 +439,7 @@ func ListReplayWorkbenchCollaborationPresence(root string) ([]ReplayWorkbenchCol
 }
 
 func ReadReplayWorkbenchCollaborationPresence(root, presencePath string) (ReplayWorkbenchCollaborationPresence, error) {
-	doctor, err := DoctorWorkspace(root)
+	doctor, err := doctorWorkspaceMetadataOnly(root)
 	if err != nil {
 		return ReplayWorkbenchCollaborationPresence{}, err
 	}
@@ -477,7 +477,7 @@ func CreateReplayWorkbenchCollaborationNote(ctx context.Context, root string, op
 }
 
 func ListReplayWorkbenchCollaborationNotes(root string) ([]ReplayWorkbenchCollaborationNote, error) {
-	doctor, err := DoctorWorkspace(root)
+	doctor, err := doctorWorkspaceMetadataOnly(root)
 	if err != nil {
 		return nil, err
 	}
@@ -505,7 +505,7 @@ func ListReplayWorkbenchCollaborationNotes(root string) ([]ReplayWorkbenchCollab
 }
 
 func ReadReplayWorkbenchCollaborationNote(root, notePath string) (ReplayWorkbenchCollaborationNote, error) {
-	doctor, err := DoctorWorkspace(root)
+	doctor, err := doctorWorkspaceMetadataOnly(root)
 	if err != nil {
 		return ReplayWorkbenchCollaborationNote{}, err
 	}
@@ -628,7 +628,7 @@ func ClearReplayWorkbenchCollaborationNoteSelection(root string, options ReplayW
 }
 
 func ReadReplayWorkbenchCollaborationNoteSelection(root string) (ReplayWorkbenchCollaborationNoteSelection, bool, error) {
-	doctor, err := DoctorWorkspace(root)
+	doctor, err := doctorWorkspaceMetadataOnly(root)
 	if err != nil {
 		return ReplayWorkbenchCollaborationNoteSelection{}, false, err
 	}

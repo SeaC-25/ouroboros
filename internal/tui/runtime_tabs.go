@@ -166,6 +166,10 @@ func (a RuntimeAction) FeedbackRow() string {
 		return "action: install retry execution result selected " + name
 	case "provider-usage-summary":
 		return "action: provider usage summary selected read-only"
+	case "toolchain-contract":
+		return "action: toolchain contract selected " + valueOrDefault(strings.TrimSpace(a.State), "unknown")
+	case "toolchain-contract-error":
+		return "action: toolchain contract error selected"
 	case "install-orchestration-artifact":
 		return "action: install orchestration artifact selected " + strings.TrimSpace(a.ArtifactPath)
 	case "worker-orchestration-supervisor-artifact":
@@ -817,7 +821,7 @@ func (t RuntimeTabs) Render(width int, height int) string {
 	if action, ok := t.ActiveRuntimeAction(); ok {
 		rows = append(rows, action.RenderRows()...)
 	}
-	rows = append(rows, t.activeRenderedRows()...)
+	rows = append(rows, t.activeRenderedRows(height-1-len(rows))...)
 	return renderPanel("Runtime Tabs", rows, width, height)
 }
 
@@ -1085,6 +1089,12 @@ func runtimeActionForRow(row string) (RuntimeAction, bool) {
 	if strings.HasPrefix(trimmed, "worker transport daemon control artifact:") {
 		return runtimeWorkerTransportDaemonControlArtifactActionForRow(trimmed), true
 	}
+	if strings.HasPrefix(trimmed, "toolchain contract:") {
+		return runtimeToolchainContractActionForRow(trimmed), true
+	}
+	if strings.HasPrefix(trimmed, "toolchain contract error:") {
+		return runtimeToolchainContractErrorActionForRow(trimmed), true
+	}
 	if strings.HasPrefix(trimmed, "workspace safety strict gate:") {
 		return runtimeWorkspaceSafetyStrictGateActionForRow(trimmed), true
 	}
@@ -1190,6 +1200,36 @@ func runtimeCompilePreviewActionForRow(row string) RuntimeAction {
 		ActionType:    runtimeRowField(details, "action"),
 		Nodes:         runtimeRowField(details, "nodes"),
 		Warnings:      runtimeRowField(details, "warnings"),
+		Row:           row,
+	}
+}
+
+func runtimeToolchainContractActionForRow(row string) RuntimeAction {
+	fields := runtimeSimpleKeyValueFields(strings.TrimSpace(strings.TrimPrefix(row, "toolchain contract:")))
+	return RuntimeAction{
+		Kind:          "toolchain-contract",
+		State:         valueOrDefault(fields["status"], "blocked"),
+		ExecutionMode: valueOrDefault(fields["mode"], "metadata-only"),
+		Ready: strings.Join(nonEmptyRuntimeParts([]string{
+			"manifests=" + fields["manifests"],
+			"tools=" + fields["tools"],
+			"domain_packs=" + fields["domain_packs"],
+			"patterns=" + fields["patterns"],
+			"semantic_actions=" + fields["semantic_actions"],
+		}), " "),
+		Failed: "errors=" + valueOrDefault(fields["errors"], "0"),
+		Output: "contract check is read-only metadata",
+		Row:    row,
+	}
+}
+
+func runtimeToolchainContractErrorActionForRow(row string) RuntimeAction {
+	return RuntimeAction{
+		Kind:          "toolchain-contract-error",
+		State:         "blocked",
+		ExecutionMode: "metadata-only",
+		Reason:        strings.TrimSpace(strings.TrimPrefix(row, "toolchain contract error:")),
+		Output:        "contract validation error is read-only metadata",
 		Row:           row,
 	}
 }
@@ -2678,7 +2718,7 @@ func runtimeActionIsReadOnly(action RuntimeAction) bool {
 	if kind == "report-projection-dispatch-execution-artifact" {
 		return strings.TrimSpace(action.Current) != "false" || strings.TrimSpace(action.State) != "completed" || !strings.Contains(action.Results, "written=true")
 	}
-	return kind == "provider-usage-summary" || strings.HasPrefix(kind, "compile-preview-signal") || kind == "compile-preview-review-comparison" || kind == "replay-workbench-collaboration-presence" || strings.HasPrefix(kind, "workspace-safety") || strings.HasPrefix(kind, "install-execution") || strings.HasPrefix(kind, "install-retry-execution") || kind == "install-orchestration-artifact" || kind == "report-projection-execution-review" || kind == "worker-orchestration-artifact" || kind == "worker-orchestration-supervisor-artifact" || kind == "worker-lifecycle-audit-artifact" || kind == "worker-lifecycle-audit-item" || kind == "worker-lifecycle-review-artifact" || kind == "worker-lifecycle-action-plan-artifact" || kind == "worker-lifecycle-maintenance-artifact" || kind == "worker-lifecycle-maintenance-supervisor-artifact" || kind == "worker-lifecycle-policy-run-artifact" || kind == "worker-lifecycle-policy-scheduler-run-artifact" || kind == "worker-lifecycle-action" || strings.HasPrefix(kind, "worker-lease-result-reconciliation-execution") || strings.HasPrefix(kind, "worker-lease-reclaim-execution") || strings.HasPrefix(kind, "worker-queue-dispatch-execution") || strings.HasPrefix(kind, "worker-queue-dispatch-result") || kind == "worker-dispatch-retry-plan-artifact" || kind == "worker-dispatch-retry-dispatch-artifact" || strings.HasPrefix(kind, "worker-dispatch-retry-dispatch-execution") || kind == "worker-dispatch-retry-scheduler-run-artifact" || kind == "worker-transport-daemon-supervisor-artifact" || kind == "worker-transport-daemon-control-artifact"
+	return kind == "provider-usage-summary" || strings.HasPrefix(kind, "toolchain-contract") || strings.HasPrefix(kind, "compile-preview-signal") || kind == "compile-preview-review-comparison" || kind == "replay-workbench-collaboration-presence" || strings.HasPrefix(kind, "workspace-safety") || strings.HasPrefix(kind, "install-execution") || strings.HasPrefix(kind, "install-retry-execution") || kind == "install-orchestration-artifact" || kind == "report-projection-execution-review" || kind == "worker-orchestration-artifact" || kind == "worker-orchestration-supervisor-artifact" || kind == "worker-lifecycle-audit-artifact" || kind == "worker-lifecycle-audit-item" || kind == "worker-lifecycle-review-artifact" || kind == "worker-lifecycle-action-plan-artifact" || kind == "worker-lifecycle-maintenance-artifact" || kind == "worker-lifecycle-maintenance-supervisor-artifact" || kind == "worker-lifecycle-policy-run-artifact" || kind == "worker-lifecycle-policy-scheduler-run-artifact" || kind == "worker-lifecycle-action" || strings.HasPrefix(kind, "worker-lease-result-reconciliation-execution") || strings.HasPrefix(kind, "worker-lease-reclaim-execution") || strings.HasPrefix(kind, "worker-queue-dispatch-execution") || strings.HasPrefix(kind, "worker-queue-dispatch-result") || kind == "worker-dispatch-retry-plan-artifact" || kind == "worker-dispatch-retry-dispatch-artifact" || strings.HasPrefix(kind, "worker-dispatch-retry-dispatch-execution") || kind == "worker-dispatch-retry-scheduler-run-artifact" || kind == "worker-transport-daemon-supervisor-artifact" || kind == "worker-transport-daemon-control-artifact"
 }
 
 func runtimeProviderUsageSummaryActionForRow(row string) RuntimeAction {
@@ -2794,7 +2834,7 @@ func runtimeOptionalRowFieldWithFallback(row string, key string, fallback string
 	return runtimeOptionalRowField(row, fallback)
 }
 
-func (t RuntimeTabs) activeRenderedRows() []string {
+func (t RuntimeTabs) activeRenderedRows(maxRows int) []string {
 	rows := t.ActiveRows()
 	if len(rows) == 0 {
 		return rows
@@ -2806,8 +2846,22 @@ func (t RuntimeTabs) activeRenderedRows() []string {
 	if index >= len(rows) {
 		index = len(rows) - 1
 	}
-	rendered := make([]string, 0, len(rows))
-	for i, row := range rows {
+	start := 0
+	end := len(rows)
+	if maxRows > 0 && len(rows) > maxRows {
+		start = index - maxRows/2
+		if start < 0 {
+			start = 0
+		}
+		end = start + maxRows
+		if end > len(rows) {
+			end = len(rows)
+			start = end - maxRows
+		}
+	}
+	rendered := make([]string, 0, end-start)
+	for i := start; i < end; i++ {
+		row := rows[i]
 		if i == index {
 			rendered = append(rendered, "> "+row)
 			continue
