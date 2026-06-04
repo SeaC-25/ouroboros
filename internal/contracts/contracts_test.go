@@ -69,6 +69,86 @@ func TestValidateRejectsCatalogDependencyOutsideDeclaredPack(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsManifestParserOutsideRegistry(t *testing.T) {
+	manifests, err := toolchain.LoadManifests(filepath.Join("..", "..", "toolchains"))
+	if err != nil {
+		t.Fatalf("load manifests: %v", err)
+	}
+	for i := range manifests {
+		if manifests[i].Name == "web-api-pack" {
+			manifests[i].Parser = "drifted_parser"
+			break
+		}
+	}
+
+	err = Validate(Inputs{
+		Manifests:   manifests,
+		ToolCatalog: toolchain.BuiltInAppSecTools(),
+		DomainPacks: BuiltInDomainPacks(),
+		Patterns:    BuiltInPatternContracts(),
+	})
+	if err == nil {
+		t.Fatalf("expected manifest parser outside registry to fail")
+	}
+	if !strings.Contains(err.Error(), "manifest web-api-pack parser drifted_parser is not registered") {
+		t.Fatalf("expected manifest parser registry error, got %v", err)
+	}
+}
+
+func TestValidateRejectsCatalogParserOutsideRegistry(t *testing.T) {
+	manifests, err := toolchain.LoadManifests(filepath.Join("..", "..", "toolchains"))
+	if err != nil {
+		t.Fatalf("load manifests: %v", err)
+	}
+	catalog := toolchain.BuiltInAppSecTools()
+	for i := range catalog {
+		if catalog[i].Name == "httpx" {
+			catalog[i].Parser = "drifted_parser"
+			break
+		}
+	}
+
+	err = Validate(Inputs{
+		Manifests:   manifests,
+		ToolCatalog: catalog,
+		DomainPacks: BuiltInDomainPacks(),
+		Patterns:    BuiltInPatternContracts(),
+	})
+	if err == nil {
+		t.Fatalf("expected catalog parser outside registry to fail")
+	}
+	if !strings.Contains(err.Error(), "tool catalog entry httpx parser drifted_parser is not registered") {
+		t.Fatalf("expected catalog parser registry error, got %v", err)
+	}
+}
+
+func TestValidateRejectsCatalogParserUnsupportedByOperation(t *testing.T) {
+	manifests, err := toolchain.LoadManifests(filepath.Join("..", "..", "toolchains"))
+	if err != nil {
+		t.Fatalf("load manifests: %v", err)
+	}
+	catalog := toolchain.BuiltInAppSecTools()
+	for i := range catalog {
+		if catalog[i].Name == "nuclei" {
+			catalog[i].Parser = "httpx_jsonl"
+			break
+		}
+	}
+
+	err = Validate(Inputs{
+		Manifests:   manifests,
+		ToolCatalog: catalog,
+		DomainPacks: BuiltInDomainPacks(),
+		Patterns:    BuiltInPatternContracts(),
+	})
+	if err == nil {
+		t.Fatalf("expected catalog parser unsupported by operation to fail")
+	}
+	if !strings.Contains(err.Error(), "tool catalog entry nuclei parser httpx_jsonl is not supported by operation managed_binary/template_scan") {
+		t.Fatalf("expected operation parser support error, got %v", err)
+	}
+}
+
 func TestValidateRejectsNilDomainPackWithoutPanic(t *testing.T) {
 	manifests, err := toolchain.LoadManifests(filepath.Join("..", "..", "toolchains"))
 	if err != nil {

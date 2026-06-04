@@ -160,6 +160,43 @@ execution:
 	}
 }
 
+func TestCheckToolchainContractsBlocksUnknownWorkspaceManifestParser(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	manifestPath := filepath.Join(root, "toolchain", "web-api-pack", "manifest.yaml")
+	manifest, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	drifted := strings.Replace(string(manifest), "parser: web_api_parser", "parser: drifted_parser", 1)
+	if drifted == string(manifest) {
+		t.Fatalf("test fixture did not replace manifest parser")
+	}
+	if err := os.WriteFile(manifestPath, []byte(drifted), 0o644); err != nil {
+		t.Fatalf("write drifted manifest: %v", err)
+	}
+
+	check, err := CheckToolchainContracts(root)
+	if err != nil {
+		t.Fatalf("contract check should report blocked status instead of failing readiness: %v", err)
+	}
+	if check.Status != "blocked" {
+		t.Fatalf("expected blocked contract check, got %#v", check)
+	}
+	found := false
+	for _, contractErr := range check.Errors {
+		if contractErr == "manifest web-api-pack parser drifted_parser is not registered" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected parser registry error, got %#v", check.Errors)
+	}
+}
+
 func TestAuthoredToolMetadataPathsDoNotRunContainerRuntimeDoctor(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
 	if err := InitWorkspace(root); err != nil {
