@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
@@ -719,6 +720,301 @@ healthcheck: built_in
 	}
 }
 
+func TestExecuteToolCompilePreviewReviewRequiresExplicitExecute(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	review, err := CreateToolCompilePreviewReview(root, ToolCompilePreviewOptions{Action: compiler.ActionEnumeratePaths})
+	if err != nil {
+		t.Fatalf("create compile preview review: %v", err)
+	}
+	runner := &recordingToolExecutionRunner{}
+	_, err = ExecuteToolCompilePreviewReview(context.Background(), root, filepath.Base(review.Path), ToolCompilePreviewReviewExecutionOptions{
+		ToolRunner: runner,
+	})
+	if err == nil || !strings.Contains(err.Error(), "requires explicit execute") {
+		t.Fatalf("expected explicit execute error, got %v", err)
+	}
+	executions, listErr := ListToolCompilePreviewReviewExecutions(root)
+	if listErr != nil {
+		t.Fatalf("list compile preview review executions: %v", listErr)
+	}
+	if len(executions) != 0 {
+		t.Fatalf("missing execute gate must not write execution artifacts, got %#v", executions)
+	}
+	if len(runner.requests) != 0 {
+		t.Fatalf("missing execute gate must not run tools, got %#v", runner.requests)
+	}
+}
+
+func TestExecuteToolCompilePreviewReviewRunsFrozenNodesWithExplicitGate(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	review, err := CreateToolCompilePreviewReview(root, ToolCompilePreviewOptions{Action: compiler.ActionEnumeratePaths})
+	if err != nil {
+		t.Fatalf("create compile preview review: %v", err)
+	}
+	if len(review.Preview.Nodes) == 0 {
+		t.Fatalf("expected compile preview nodes")
+	}
+	selection, err := SelectToolCompilePreviewReview(root, filepath.Base(review.Path), ToolCompilePreviewReviewSelectionOptions{
+		SelectedBy: "closed-loop-planner",
+		Reason:     "planner-selected review",
+	})
+	if err != nil {
+		t.Fatalf("select compile preview review: %v", err)
+	}
+	runner := &recordingToolExecutionRunner{}
+	executedAt := time.Date(2026, 6, 4, 10, 15, 0, 0, time.UTC)
+	execution, err := ExecuteToolCompilePreviewReview(ctx, root, filepath.Base(review.Path), ToolCompilePreviewReviewExecutionOptions{
+		Execute:    true,
+		Actor:      "operator",
+		Reason:     "run reviewed planner-selected plan",
+		ExecutedAt: executedAt,
+		ToolRunner: runner,
+	})
+	if err != nil {
+		t.Fatalf("execute compile preview review: %v", err)
+	}
+	if execution.Status != "completed" || execution.Mode != "execute" || execution.ReviewPath != review.Path || execution.Action != review.Preview.Action {
+		t.Fatalf("unexpected execution: %#v", execution)
+	}
+	if execution.SelectionPath != selection.Path {
+		t.Fatalf("expected execution to link current selection %s, got %#v", selection.Path, execution)
+	}
+	if execution.Actor != "operator" || execution.Reason != "run reviewed planner-selected plan" || execution.ExecutedAt != executedAt.Format(time.RFC3339) {
+		t.Fatalf("unexpected execution actor metadata: %#v", execution)
+	}
+	if execution.RunID == "" || execution.EventCount == 0 || execution.ReviewNodes != len(review.Preview.Nodes) {
+		t.Fatalf("expected run id, events, and node count in execution: %#v", execution)
+	}
+	if len(runner.requests) != len(review.Preview.Nodes) {
+		t.Fatalf("expected runner to execute frozen review nodes, got %d requests for %d nodes", len(runner.requests), len(review.Preview.Nodes))
+	}
+	for i, request := range runner.requests {
+		if request.Node.ID != review.Preview.Nodes[i].ID || request.Node.Action != review.Preview.Nodes[i].Action {
+			t.Fatalf("runner request %d did not use frozen review node: request=%#v review=%#v", i, request.Node, review.Preview.Nodes[i])
+		}
+	}
+	executions, err := ListToolCompilePreviewReviewExecutions(root)
+	if err != nil {
+		t.Fatalf("list compile preview review executions: %v", err)
+	}
+	if len(executions) != 1 || executions[0].Path != execution.Path {
+		t.Fatalf("expected one persisted execution artifact, got %#v", executions)
+	}
+	store, err := eventlog.OpenSQLite(filepath.Join(root, "replay", "events.db"))
+	if err != nil {
+		t.Fatalf("open event log: %v", err)
+	}
+	defer store.Close()
+	events, err := store.Replay(ctx, execution.RunID)
+	if err != nil {
+		t.Fatalf("replay execution events: %v", err)
+	}
+	if len(events) != execution.EventCount {
+		t.Fatalf("expected execution event count %d, got %d", execution.EventCount, len(events))
+	}
+	assertStageAttemptSequence(t, events, []string{"tool-execution:started", "tool-execution:completed"})
+}
+
+func TestExecuteToolCompilePreviewReviewRequiresCurrentSelection(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	review, err := CreateToolCompilePreviewReview(root, ToolCompilePreviewOptions{Action: compiler.ActionEnumeratePaths})
+	if err != nil {
+		t.Fatalf("create compile preview review: %v", err)
+	}
+	runner := &recordingToolExecutionRunner{}
+	_, err = ExecuteToolCompilePreviewReview(context.Background(), root, filepath.Base(review.Path), ToolCompilePreviewReviewExecutionOptions{
+		Execute:    true,
+		ToolRunner: runner,
+	})
+	if err == nil || !strings.Contains(err.Error(), "requires a current review selection") {
+		t.Fatalf("expected current selection error, got %v", err)
+	}
+	if len(runner.requests) != 0 {
+		t.Fatalf("current selection gate must run before tools, got %#v", runner.requests)
+	}
+	executions, listErr := ListToolCompilePreviewReviewExecutions(root)
+	if listErr != nil {
+		t.Fatalf("list compile preview review executions: %v", listErr)
+	}
+	if len(executions) != 0 {
+		t.Fatalf("current selection failure must not write execution artifacts, got %#v", executions)
+	}
+}
+
+func TestExecuteToolCompilePreviewReviewWritesFailedExecutionArtifact(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	review, err := CreateToolCompilePreviewReview(root, ToolCompilePreviewOptions{Action: compiler.ActionEnumeratePaths})
+	if err != nil {
+		t.Fatalf("create compile preview review: %v", err)
+	}
+	if _, err := SelectToolCompilePreviewReview(root, filepath.Base(review.Path), ToolCompilePreviewReviewSelectionOptions{SelectedBy: "closed-loop-planner"}); err != nil {
+		t.Fatalf("select compile preview review: %v", err)
+	}
+	runner := failingToolExecutionRunner{err: "simulated runner failure"}
+	execution, err := ExecuteToolCompilePreviewReview(ctx, root, filepath.Base(review.Path), ToolCompilePreviewReviewExecutionOptions{
+		Execute:    true,
+		ToolRunner: runner,
+	})
+	if err == nil || !strings.Contains(err.Error(), "simulated runner failure") {
+		t.Fatalf("expected runner failure, got %v", err)
+	}
+	if execution.Status != "failed" || !strings.Contains(execution.Error, "simulated runner failure") || execution.Path == "" || execution.EventCount == 0 {
+		t.Fatalf("expected failed execution artifact metadata, got %#v", execution)
+	}
+	executions, err := ListToolCompilePreviewReviewExecutions(root)
+	if err != nil {
+		t.Fatalf("list compile preview review executions: %v", err)
+	}
+	if len(executions) != 1 || executions[0].Path != execution.Path || executions[0].Status != "failed" || !strings.Contains(executions[0].Error, "simulated runner failure") {
+		t.Fatalf("expected one failed execution artifact, got %#v", executions)
+	}
+	store, err := eventlog.OpenSQLite(filepath.Join(root, "replay", "events.db"))
+	if err != nil {
+		t.Fatalf("open event log: %v", err)
+	}
+	defer store.Close()
+	events, err := store.Replay(ctx, execution.RunID)
+	if err != nil {
+		t.Fatalf("replay failed execution events: %v", err)
+	}
+	if len(events) != execution.EventCount {
+		t.Fatalf("expected failed execution event count %d, got %d", execution.EventCount, len(events))
+	}
+	assertStageAttemptSequence(t, events, []string{"tool-execution:started"})
+}
+
+func TestExecuteToolCompilePreviewReviewRequiresCurrentSafetyAuthorization(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	review, err := CreateToolCompilePreviewReview(root, ToolCompilePreviewOptions{Action: compiler.ActionEnumeratePaths})
+	if err != nil {
+		t.Fatalf("create compile preview review: %v", err)
+	}
+	if _, err := SelectToolCompilePreviewReview(root, filepath.Base(review.Path), ToolCompilePreviewReviewSelectionOptions{SelectedBy: "closed-loop-planner"}); err != nil {
+		t.Fatalf("select compile preview review: %v", err)
+	}
+	scope := `version: 1
+scope:
+  target_policy: disabled
+  targets:
+    - kind: url
+      value: https://example.test
+  exclusions: []
+execution:
+  isolation: process
+`
+	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
+		t.Fatalf("write disabled scope: %v", err)
+	}
+	runner := &recordingToolExecutionRunner{}
+	_, err = ExecuteToolCompilePreviewReview(context.Background(), root, filepath.Base(review.Path), ToolCompilePreviewReviewExecutionOptions{
+		Execute:    true,
+		ToolRunner: runner,
+	})
+	if err == nil || !strings.Contains(err.Error(), "missing required safety bypass authorization for scope.target_policy disabled") {
+		t.Fatalf("expected safety authorization error, got %v", err)
+	}
+	if len(runner.requests) != 0 {
+		t.Fatalf("safety gate must run before tools, got %#v", runner.requests)
+	}
+	executions, listErr := ListToolCompilePreviewReviewExecutions(root)
+	if listErr != nil {
+		t.Fatalf("list compile preview review executions: %v", listErr)
+	}
+	if len(executions) != 0 {
+		t.Fatalf("safety failure must not write execution artifacts, got %#v", executions)
+	}
+}
+
+func TestExecuteToolCompilePreviewReviewRejectsSymlinkedExecutionDirectoryBeforeSideEffects(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	review, err := CreateToolCompilePreviewReview(root, ToolCompilePreviewOptions{Action: compiler.ActionEnumeratePaths})
+	if err != nil {
+		t.Fatalf("create compile preview review: %v", err)
+	}
+	if _, err := SelectToolCompilePreviewReview(root, filepath.Base(review.Path), ToolCompilePreviewReviewSelectionOptions{SelectedBy: "closed-loop-planner"}); err != nil {
+		t.Fatalf("select compile preview review: %v", err)
+	}
+	outsideDir := filepath.Join(t.TempDir(), "outside-executions")
+	if err := os.MkdirAll(outsideDir, 0o755); err != nil {
+		t.Fatalf("create outside execution directory: %v", err)
+	}
+	executionDir := filepath.Join(root, "toolchain", "compile-preview-review-executions")
+	if err := os.RemoveAll(executionDir); err != nil {
+		t.Fatalf("remove execution directory: %v", err)
+	}
+	if err := os.Symlink(outsideDir, executionDir); err != nil {
+		t.Fatalf("symlink execution directory: %v", err)
+	}
+	runner := &recordingToolExecutionRunner{}
+	_, err = ExecuteToolCompilePreviewReview(context.Background(), root, filepath.Base(review.Path), ToolCompilePreviewReviewExecutionOptions{
+		Execute:    true,
+		ToolRunner: runner,
+	})
+	if err == nil || !strings.Contains(err.Error(), "compile preview review execution directory must not be a symlink") {
+		t.Fatalf("expected symlinked execution directory rejection, got %v", err)
+	}
+	if len(runner.requests) != 0 {
+		t.Fatalf("symlinked execution directory must fail before running tools, got %#v", runner.requests)
+	}
+	if got := countJSON(t, outsideDir); got != 0 {
+		t.Fatalf("symlinked execution directory must not write outside execution artifacts, got %d", got)
+	}
+	if _, statErr := os.Stat(filepath.Join(root, "replay", "events.db")); !os.IsNotExist(statErr) {
+		t.Fatalf("symlinked execution directory must fail before replay event writes, stat err=%v", statErr)
+	}
+}
+
+func TestReadAndListToolCompilePreviewReviewExecutionsRejectSymlinkedExecutionFile(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	executionDir := filepath.Join(root, "toolchain", "compile-preview-review-executions")
+	if err := os.MkdirAll(executionDir, 0o755); err != nil {
+		t.Fatalf("create execution directory: %v", err)
+	}
+	outsideFile := filepath.Join(t.TempDir(), "outside-execution.json")
+	if err := os.WriteFile(outsideFile, []byte(`{"status":"completed"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write outside execution file: %v", err)
+	}
+	if err := os.Symlink(outsideFile, filepath.Join(executionDir, "linked-execution.json")); err != nil {
+		t.Fatalf("symlink execution file: %v", err)
+	}
+	if _, err := ReadToolCompilePreviewReviewExecution(root, "linked-execution.json"); err == nil || !strings.Contains(err.Error(), "compile preview review execution file must not be a symlink") {
+		t.Fatalf("expected symlinked execution file read rejection, got %v", err)
+	}
+	if _, err := ListToolCompilePreviewReviewExecutions(root); err == nil || !strings.Contains(err.Error(), "compile preview review execution file must not be a symlink") {
+		t.Fatalf("expected symlinked execution file list rejection, got %v", err)
+	}
+	outsideData, err := os.ReadFile(outsideFile)
+	if err != nil {
+		t.Fatalf("read outside execution file: %v", err)
+	}
+	if string(outsideData) != "{\"status\":\"completed\"}\n" {
+		t.Fatalf("read/list must not rewrite outside execution file, got %q", string(outsideData))
+	}
+}
+
 func TestClearToolCompilePreviewReviewSelectionWritesClearedMetadataOnlyMarker(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
 	if err := InitWorkspace(root); err != nil {
@@ -865,6 +1161,31 @@ func writeCompilePreviewReviewFixture(t *testing.T, root, name string, review To
 		t.Fatalf("write compile preview review fixture: %v", err)
 	}
 	return path
+}
+
+func assertStageAttemptSequence(t *testing.T, events []eventlog.Event, want []string) {
+	t.Helper()
+	got := []string{}
+	for _, event := range events {
+		if event.Type != eventlog.EventAttempt {
+			continue
+		}
+		var payload struct {
+			Kind    string `json:"kind"`
+			StageID string `json:"stage_id"`
+			Status  string `json:"status"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatalf("decode attempt payload: %v", err)
+		}
+		if payload.Kind != "stage" {
+			continue
+		}
+		got = append(got, payload.StageID+":"+payload.Status)
+	}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("expected stage sequence %#v, got %#v", want, got)
+	}
 }
 
 func TestWriteToolCompilePreviewSignalsPersistsMetadataOnlyInputs(t *testing.T) {
@@ -3558,4 +3879,19 @@ func (r *statusToolCompilePreviewRunner) Execute(ctx context.Context, request To
 		Status:      status,
 		Transcript:  "derived signal fixture for " + request.Node.ManifestName,
 	}, nil
+}
+
+type failingToolExecutionRunner struct {
+	err string
+}
+
+func (r failingToolExecutionRunner) Execute(ctx context.Context, request ToolExecutionRequest) (ToolExecutionResult, error) {
+	if err := ctx.Err(); err != nil {
+		return ToolExecutionResult{}, err
+	}
+	return ToolExecutionResult{
+		ExecutionID: "failed-" + strings.ReplaceAll(request.Node.ID, ":", "-"),
+		Status:      "failed",
+		Transcript:  r.err,
+	}, errors.New(r.err)
 }

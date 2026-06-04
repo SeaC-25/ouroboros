@@ -9768,6 +9768,125 @@ func TestToolchainCompilePreviewReviewSelectCommandWritesAndReadsCurrentSelectio
 	}
 }
 
+func TestToolchainExecuteCompilePreviewReviewCommandRequiresExecuteFlag(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	marker := filepath.Join(t.TempDir(), "compile-preview-review-execution-ran")
+	reviewPath := writeExecutableCompilePreviewReviewCommandFixture(t, root, marker)
+
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{"toolchain", "execute-compile-preview-review", root, filepath.Base(reviewPath)})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "requires explicit execute") {
+		t.Fatalf("expected explicit execute error, got %v output=%q", err, out.String())
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("execute-compile-preview-review without --execute must not run command, marker stat err=%v", err)
+	}
+	if got := countCLIJSON(t, filepath.Join(root, "toolchain", "compile-preview-review-executions")); got != 0 {
+		t.Fatalf("missing --execute must not write execution artifacts, got %d", got)
+	}
+}
+
+func TestToolchainExecuteCompilePreviewReviewCommandRunsWithExecuteFlag(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	marker := filepath.Join(t.TempDir(), "compile-preview-review-execution-ran")
+	reviewPath := writeExecutableCompilePreviewReviewCommandFixture(t, root, marker)
+
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{
+		"toolchain", "execute-compile-preview-review", root, filepath.Base(reviewPath),
+		"--execute",
+		"--actor", "bob",
+		"--reason", "approved cli execution",
+	})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute compile preview review: %v output=%q", err, out.String())
+	}
+	output := out.String()
+	for _, want := range []string{
+		"compile-preview-review-execution:",
+		"status=completed",
+		"mode=execute",
+		"review=" + reviewPath,
+		"action=discover_assets",
+		"nodes=1",
+		"events=",
+		"actor=bob",
+		"reason=approved cli execution",
+		"artifact:",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("expected execute output to contain %q, got %q", want, output)
+		}
+	}
+	executionPath := parseOutputValue(t, output, "artifact:")
+	if _, err := os.Stat(executionPath); err != nil {
+		t.Fatalf("expected compile preview review execution artifact: %v", err)
+	}
+	if data, err := os.ReadFile(marker); err != nil || strings.TrimSpace(string(data)) != "cli-executed" {
+		t.Fatalf("expected compile preview review command to run, data=%q err=%v", data, err)
+	}
+}
+
+func TestToolchainCompilePreviewReviewExecutionsCommandListsAndReadsArtifacts(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	marker := filepath.Join(t.TempDir(), "compile-preview-review-execution-ran")
+	reviewPath := writeExecutableCompilePreviewReviewCommandFixture(t, root, marker)
+	execution, err := app.ExecuteToolCompilePreviewReview(context.Background(), root, filepath.Base(reviewPath), app.ToolCompilePreviewReviewExecutionOptions{
+		Execute: true,
+		Actor:   "alice",
+		Reason:  "list cli execution",
+	})
+	if err != nil {
+		t.Fatalf("execute compile preview review fixture: %v", err)
+	}
+
+	var listOut bytes.Buffer
+	listCmd := newRootCommand(&listOut, new(bytes.Buffer))
+	listCmd.SetArgs([]string{"toolchain", "compile-preview-review-executions", root})
+	if err := listCmd.Execute(); err != nil {
+		t.Fatalf("execute compile-preview-review-executions list: %v", err)
+	}
+	for _, want := range []string{
+		"compile-preview-review-executions: total=1",
+		"compile-preview-review-execution-artifact: " + execution.Path,
+		"status=completed",
+		"mode=execute",
+		"run=" + execution.RunID,
+		"review=" + reviewPath,
+		"events=",
+		"actor=alice",
+		"reason=list cli execution",
+	} {
+		if !strings.Contains(listOut.String(), want) {
+			t.Fatalf("expected execution list output to contain %q, got %q", want, listOut.String())
+		}
+	}
+
+	var readOut bytes.Buffer
+	readCmd := newRootCommand(&readOut, new(bytes.Buffer))
+	readCmd.SetArgs([]string{"toolchain", "compile-preview-review-executions", root, filepath.Base(execution.Path)})
+	if err := readCmd.Execute(); err != nil {
+		t.Fatalf("execute compile-preview-review-executions read: %v", err)
+	}
+	if !strings.Contains(readOut.String(), "compile-preview-review-execution-artifact: "+execution.Path) ||
+		!strings.Contains(readOut.String(), "run="+execution.RunID) ||
+		!strings.Contains(readOut.String(), "events=") {
+		t.Fatalf("expected inspected compile preview review execution, got %q", readOut.String())
+	}
+}
+
 func writeCompilePreviewReviewCommandFixture(t *testing.T, root, name string, review app.ToolCompilePreviewReview) string {
 	t.Helper()
 	dir := filepath.Join(root, "toolchain", "compile-preview-reviews")
@@ -9784,6 +9903,69 @@ func writeCompilePreviewReviewCommandFixture(t *testing.T, root, name string, re
 		t.Fatalf("write compile preview review fixture: %v", err)
 	}
 	return path
+}
+
+func writeExecutableCompilePreviewReviewCommandFixture(t *testing.T, root, marker string) string {
+	t.Helper()
+	scope := `version: 1
+scope:
+  target_policy: enforce
+  targets:
+    - kind: url
+      value: https://example.test
+  exclusions: []
+execution:
+  isolation: process
+`
+	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
+		t.Fatalf("write scope: %v", err)
+	}
+	manifest := `name: web-api-pack
+version: "0.1.0"
+capabilities:
+  - web.discovery
+runner: command
+run_command:
+  - sh
+  - -c
+  - true
+parser: web_api_parser
+healthcheck: built_in
+`
+	if err := os.WriteFile(filepath.Join(root, "toolchain", "web-api-pack", "manifest.yaml"), []byte(manifest), 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	reviewPath := writeCompilePreviewReviewCommandFixture(t, root, "cli-executable-review.json", app.ToolCompilePreviewReview{
+		Status: "dry-run",
+		Mode:   "metadata-only",
+		Preview: app.ToolCompilePreview{
+			Workspace: root,
+			Action:    compiler.ActionDiscoverAssets,
+			Mode:      "metadata-only",
+			Nodes: []compiler.PlanNode{
+				{
+					ID:           "discover_assets:01",
+					Action:       compiler.ActionDiscoverAssets,
+					ManifestName: "web-api-pack",
+					ToolID:       "cli-safe-touch",
+					AdapterID:    "command",
+					Operation:    "touch_marker",
+					Capability:   "web.discovery",
+					TargetKind:   "url",
+					Runner:       "command",
+					RunCommand:   []string{"sh", "-c", "printf cli-executed > " + marker + "; echo cli-executed"},
+					Parser:       "web_api_parser",
+				},
+			},
+		},
+	})
+	if _, err := app.SelectToolCompilePreviewReview(root, filepath.Base(reviewPath), app.ToolCompilePreviewReviewSelectionOptions{
+		SelectedBy: "cli-test",
+		Reason:     "execute cli fixture",
+	}); err != nil {
+		t.Fatalf("select compile preview review fixture: %v", err)
+	}
+	return reviewPath
 }
 
 func TestToolchainCompilePreviewSignalsCommandWritesMetadataOnlySignals(t *testing.T) {

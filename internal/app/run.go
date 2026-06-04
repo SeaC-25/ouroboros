@@ -537,7 +537,17 @@ func runToolExecutionStage(ctx context.Context, root string, runID string, manif
 		return fmt.Errorf("compile tool execution plan: %w", err)
 	}
 
-	requests := toolExecutionRequests(root, runID, plan.Nodes, targets, exclusions, targetPolicy, isolationMode, container, resourceLimits, packPolicies, workerPools)
+	return runToolPlanNodesExecutionStage(ctx, root, runID, "tool-execution", "Execute compiled tool plan nodes", plan.Nodes, targets, exclusions, targetPolicy, isolationMode, container, resourceLimits, packPolicies, workerPools, concurrency, runner, store, options, persistedEvents)
+}
+
+func runToolPlanNodesExecutionStage(ctx context.Context, root string, runID string, stageID string, stageDescription string, nodes []compiler.PlanNode, targets []ScopeTarget, exclusions []string, targetPolicy string, isolationMode string, container ContainerExecutionConfig, resourceLimits ExecutionResourceLimits, packPolicies []PackExecutionPolicy, workerPools []WorkerPoolPolicy, concurrency int, runner ToolExecutionRunner, store *eventlog.SQLiteStore, options RunOptions, persistedEvents *[]eventlog.Event) error {
+	if strings.TrimSpace(stageID) == "" {
+		stageID = "tool-execution"
+	}
+	if strings.TrimSpace(stageDescription) == "" {
+		stageDescription = "Execute compiled tool plan nodes"
+	}
+	requests := toolExecutionRequests(root, runID, nodes, targets, exclusions, targetPolicy, isolationMode, container, resourceLimits, packPolicies, workerPools)
 	var lifecycleMu sync.Mutex
 	appendLifecycleEvent := func(event eventlog.Event) error {
 		lifecycleMu.Lock()
@@ -602,7 +612,7 @@ func runToolExecutionStage(ctx context.Context, root string, runID string, manif
 		return firstToolErr
 	}
 
-	if err := appendRunEvent(ctx, store, stageEvent(runID, "tool-execution", "Execute compiled tool plan nodes", "completed"), options, persistedEvents); err != nil {
+	if err := appendRunEvent(ctx, store, stageEvent(runID, stageID, stageDescription, "completed"), options, persistedEvents); err != nil {
 		return err
 	}
 	return nil

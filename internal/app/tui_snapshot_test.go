@@ -1851,6 +1851,82 @@ healthcheck: built_in
 	}
 }
 
+func TestNewTUIModelForWorkspaceShowsCompilePreviewReviewExecutionRowsReadOnly(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	review, err := CreateToolCompilePreviewReview(root, ToolCompilePreviewOptions{
+		Action: compiler.ActionDiscoverAssets,
+		Budget: compiler.CompileBudget{MaxPlanNodes: 1},
+	})
+	if err != nil {
+		t.Fatalf("create compile preview review: %v", err)
+	}
+	if _, err := SelectToolCompilePreviewReview(root, filepath.Base(review.Path), ToolCompilePreviewReviewSelectionOptions{SelectedBy: "closed-loop-planner"}); err != nil {
+		t.Fatalf("select compile preview review: %v", err)
+	}
+	executedAt := time.Date(2026, 6, 4, 11, 30, 0, 0, time.UTC)
+	execution, err := ExecuteToolCompilePreviewReview(context.Background(), root, filepath.Base(review.Path), ToolCompilePreviewReviewExecutionOptions{
+		Execute:    true,
+		Actor:      "operator",
+		Reason:     "reviewed execution gate",
+		ExecutedAt: executedAt,
+		ToolRunner: &recordingToolExecutionRunner{},
+	})
+	if err != nil {
+		t.Fatalf("execute compile preview review: %v", err)
+	}
+
+	model := NewTUIModelForWorkspace(root).SelectRuntimeTab(tui.RuntimeTabToolchainHealth)
+	resized, cmd := model.Update(tea.WindowSizeMsg{Width: 720, Height: 44})
+	if cmd != nil {
+		t.Fatalf("expected resize update to be synchronous")
+	}
+	view := resized.View()
+	for _, want := range []string{
+		"compile-preview review executions: total=1",
+		"compile-preview review execution artifact: status=completed mode=execute action=discover_assets",
+		"nodes=1",
+		"warnings=1",
+		"actor=operator",
+		"executed_at=2026-06-04T11:30:00Z",
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("expected TUI compile-preview review execution row %q:\n%s", want, view)
+		}
+	}
+
+	model = selectRuntimeRowContaining(t, model, "> compile-preview review execution artifact:")
+	model = model.ShowRuntimeActionDetails()
+	resized, cmd = model.Update(tea.WindowSizeMsg{Width: 720, Height: 44})
+	if cmd != nil {
+		t.Fatalf("expected runtime action details resize to be synchronous")
+	}
+	view = resized.View()
+	for _, want := range []string{
+		"[Node Inspector]",
+		"runtime action: compile-preview-review-execution-artifact",
+		"artifact path: ",
+		"compile-preview-review-executions",
+		"review path: ",
+		"compile-preview-reviews",
+		"run: " + execution.RunID,
+		"action type: discover_assets",
+		"nodes: 1",
+		"warnings: 1",
+		"results: events=",
+		"created by: operator",
+		"created at: 2026-06-04T11:30:00Z",
+		"reason: reviewed execution gate",
+		"mode: read-only",
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("expected compile-preview review execution details %q:\n%s", want, view)
+		}
+	}
+}
+
 func TestNewTUIModelForWorkspaceShowsCompilePreviewReviewComparison(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
 	if err := InitWorkspace(root); err != nil {

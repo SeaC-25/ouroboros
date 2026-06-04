@@ -1103,6 +1103,11 @@ func TestModelUpdateDoesNotRequestReadOnlyRuntimeActions(t *testing.T) {
 			kind: "compile-preview-review-comparison",
 		},
 		{
+			name: "compile preview review execution artifact",
+			row:  "compile-preview review execution artifact: status=completed mode=execute action=discover_assets nodes=1 warnings=0 events=12 actor=operator executed_at=2026-06-04T11:30:00Z run=compile-preview-review-execution-1 review=/tmp/ouro/review.json selection=/tmp/ouro/selection.json path=/tmp/ouro/execution.json reason=reviewed execution gate",
+			kind: "compile-preview-review-execution-artifact",
+		},
+		{
 			name:  "cleared compile preview review selection",
 			row:   "compile-preview review selection: status=cleared mode=metadata-only review=/tmp/ouro/candidate.json action=discover_assets superseded=1 cleared_by=alice cleared_at=2026-06-01T00:35:00Z reason=authorization changed",
 			kind:  "compile-preview-review-selection",
@@ -3532,6 +3537,47 @@ func TestModelUpdateShowsSelectedCompilePreviewReviewComparisonDetails(t *testin
 	} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("compile-preview review comparison details missing %q:\n%s", want, view)
+		}
+	}
+}
+
+func TestModelUpdateShowsSelectedCompilePreviewReviewExecutionDetails(t *testing.T) {
+	tabs := DefaultRuntimeTabs().
+		Select(RuntimeTabToolchainHealth).
+		WithRows(RuntimeTabToolchainHealth, []string{
+			"toolchain: ready",
+			"compile-preview review execution artifact: status=completed mode=execute action=discover_assets nodes=1 warnings=0 events=12 actor=operator executed_at=2026-06-04T11:30:00Z run=compile-preview-review-execution-1 review=/tmp/ouro/review.json selection=/tmp/ouro/selection.json path=/tmp/ouro/execution.json reason=reviewed execution gate",
+		}).
+		SelectRow(1)
+	model := NewModel().WithGraphStack(GraphStack{RuntimeTabs: tabs})
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	if cmd != nil {
+		t.Fatalf("expected compile-preview review execution details update to be synchronous")
+	}
+	next, ok := updated.(Model)
+	if !ok {
+		t.Fatalf("expected Model, got %T", updated)
+	}
+	view := next.graphStack.Render(140, 44)
+	for _, want := range []string{
+		"[Node Inspector]",
+		"runtime action: compile-preview-review-execution-artifact",
+		"artifact path: /tmp/ouro/execution.json",
+		"review path: /tmp/ouro/review.json",
+		"request path: /tmp/ouro/selection.json",
+		"run: compile-preview-review-execution-1",
+		"action type: discover_assets",
+		"nodes: 1",
+		"warnings: 0",
+		"results: events=12",
+		"created by: operator",
+		"created at: 2026-06-04T11:30:00Z",
+		"reason: reviewed execution gate",
+		"mode: read-only",
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("compile-preview review execution details missing %q:\n%s", want, view)
 		}
 	}
 }
