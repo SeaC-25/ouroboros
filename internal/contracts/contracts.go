@@ -69,14 +69,15 @@ func minimalPattern(name string) patterns.Pattern {
 
 func Validate(inputs Inputs) error {
 	var errs []error
-	manifestsByName, manifestCapabilities, manifestErrs := validateManifests(inputs.Manifests)
+	parserRegistry := toolchain.DefaultAuthoredToolRegistry()
+	manifestsByName, manifestCapabilities, manifestErrs := validateManifests(inputs.Manifests, parserRegistry)
 	errs = append(errs, manifestErrs...)
 
 	catalog := inputs.ToolCatalog
 	if catalog == nil {
 		catalog = toolchain.BuiltInAppSecTools()
 	}
-	catalogCapabilities, catalogErrs := validateToolCatalog(catalog, manifestsByName)
+	catalogCapabilities, catalogErrs := validateToolCatalog(catalog, manifestsByName, parserRegistry)
 	errs = append(errs, catalogErrs...)
 
 	patternNames, patternErrs := validatePatterns(inputs.Patterns)
@@ -92,7 +93,7 @@ func Validate(inputs Inputs) error {
 	return errors.Join(errs...)
 }
 
-func validateManifests(manifests []toolchain.Manifest) (map[string]toolchain.Manifest, map[string]bool, []error) {
+func validateManifests(manifests []toolchain.Manifest, parserRegistry toolchain.AuthoredToolRegistry) (map[string]toolchain.Manifest, map[string]bool, []error) {
 	byName := map[string]toolchain.Manifest{}
 	capabilities := map[string]bool{}
 	var errs []error
@@ -110,6 +111,10 @@ func validateManifests(manifests []toolchain.Manifest) (map[string]toolchain.Man
 			errs = append(errs, fmt.Errorf("duplicate manifest name: %s", name))
 		}
 		byName[name] = manifest
+		parser := strings.TrimSpace(manifest.Parser)
+		if parser != "" && !parserRegistry.ParserExists(parser) {
+			errs = append(errs, fmt.Errorf("manifest %s parser %s is not registered", name, parser))
+		}
 		for _, capability := range manifest.Capabilities {
 			if normalized := strings.TrimSpace(capability); normalized != "" {
 				capabilities[normalized] = true
@@ -119,7 +124,7 @@ func validateManifests(manifests []toolchain.Manifest) (map[string]toolchain.Man
 	return byName, capabilities, errs
 }
 
-func validateToolCatalog(catalog []toolchain.BuiltInTool, manifestsByName map[string]toolchain.Manifest) (map[string]bool, []error) {
+func validateToolCatalog(catalog []toolchain.BuiltInTool, manifestsByName map[string]toolchain.Manifest, parserRegistry toolchain.AuthoredToolRegistry) (map[string]bool, []error) {
 	capabilities := map[string]bool{}
 	var errs []error
 	for i, tool := range catalog {
@@ -162,8 +167,39 @@ func validateToolCatalog(catalog []toolchain.BuiltInTool, manifestsByName map[st
 		if ok && dependency != "" && !manifestDependencies[dependency] {
 			errs = append(errs, fmt.Errorf("tool catalog entry %s dependency %s is not declared by manifest %s", name, dependency, pack))
 		}
+		parser := strings.TrimSpace(tool.Parser)
+		adapterID := strings.TrimSpace(tool.AdapterID)
+		operationID := strings.TrimSpace(tool.Operation)
+		if parser == "" {
+			continue
+		}
+		if !parserRegistry.ParserExists(parser) {
+			errs = append(errs, fmt.Errorf("tool catalog entry %s parser %s is not registered", name, parser))
+			continue
+		}
+		if adapterID == "" && operationID == "" {
+			continue
+		}
+		operation, operationOK := parserRegistry.AdapterOperation(adapterID, operationID)
+		if !operationOK {
+			errs = append(errs, fmt.Errorf("tool catalog entry %s operation %s/%s is not registered", name, adapterID, operationID))
+			continue
+		}
+		if !containsTrimmed(operation.SupportedParsers, parser) {
+			errs = append(errs, fmt.Errorf("tool catalog entry %s parser %s is not supported by operation %s/%s", name, parser, adapterID, operationID))
+		}
 	}
 	return capabilities, errs
+}
+
+func containsTrimmed(values []string, needle string) bool {
+	needle = strings.TrimSpace(needle)
+	for _, value := range values {
+		if strings.TrimSpace(value) == needle {
+			return true
+		}
+	}
+	return false
 }
 
 func manifestCapabilitySet(manifest toolchain.Manifest) map[string]bool {
