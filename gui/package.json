@@ -1,0 +1,49 @@
+{
+  "name": "ouroboros-gui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/main/main.js",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 & VITE_PID=$!; sleep 2; VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron src/main/main.js; kill $VITE_PID",
+    "build": "vite build && mkdir -p dist/main && cp src/main/*.js dist/main/",
+    "preview": "vite preview --host 127.0.0.1",
+    "test:contract": "node scripts/check-gui-contract.mjs",
+    "test:product-contract": "node scripts/check-product-contract.mjs",
+    "test:desktop-contract": "node scripts/check-desktop-contract.mjs",
+    "package:desktop:prepare": "node scripts/package-desktop.mjs",
+    "package:desktop:dry-run": "node scripts/package-desktop.mjs --dry-run",
+    "package:desktop:dir": "node scripts/package-desktop.mjs --dir",
+    "package:desktop:dir:dry-run": "node scripts/package-desktop.mjs --dir --dry-run",
+    "smoke:desktop-package:runtime": "sh ../scripts/smoke_desktop_package_runtime.sh",
+    "electron": "npm run build && electron .",
+    "start": "npm run dev"
+  },
+  "dependencies": {
+    "@phosphor-icons/react": "^2.1.10",
+    "@tailwindcss/postcss": "^4.3.2",
+    "@tanstack/react-query": "^5.101.2",
+    "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.5.2",
+    "clsx": "^2.1.1",
+    "concurrently": "^9.2.3",
+    "cytoscape": "^3.34.0",
+    "cytoscape-fcose": "^2.2.0",
+    "electron": "^33.4.11",
+    "lucide-react": "^0.468.0",
+    "postcss": "^8.5.16",
+    "react": "^18.3.1",
+    "react-cytoscapejs": "^2.0.0",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^7.18.1",
+    "tailwindcss": "^4.3.2",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.3",
+    "wait-on": "^9.0.10",
+    "zustand": "^5.0.14"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1"
+  }
+}
