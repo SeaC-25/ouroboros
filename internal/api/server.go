@@ -80,6 +80,7 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/toolchain/health", s.handleToolchainHealth)
 	mux.HandleFunc("/api/ai/actions", s.handleAIActions)
 	mux.HandleFunc("/api/ai/actions/run", s.handleAIActionRun)
+	mux.HandleFunc("/api/ai/chat", s.handleAIChat)
 	mux.HandleFunc("/api/events/stream", s.handleWebSocket)
 
 	// CORS中间件

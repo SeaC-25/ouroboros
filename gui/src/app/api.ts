@@ -1,4 +1,13 @@
 import type {
+  AgentTask,
+  ChatMessage,
+  ChatPostResponse,
+  ChatResponse,
+  AIAction,
+  AIActionResult,
+  AIActionRunRequest,
+  AIActionRunResponse,
+  BlackboardItem,
   DesktopStatus,
   ExecutionArtifact,
   ExecutionLog,
@@ -6,9 +15,11 @@ import type {
   GraphEdge,
   GraphExportResult,
   GraphNode,
+  HarnessCase,
   IDEData,
   IDEEvent,
   MissionState,
+  OrchestratorRun,
   ProviderSettings,
   ReportFinding,
   ReportDocument,
@@ -210,6 +221,116 @@ interface MissionStartResponse {
 interface ToolActionRunResponse {
   action?: ToolActionResponse;
   execution?: ExecutionResponse;
+}
+
+interface AIActionResponse {
+  id?: string;
+  kind?: string;
+  label?: string;
+  status?: string;
+  description?: string;
+  packId?: string;
+  packName?: string;
+  command?: string[];
+  commandText?: string;
+  runTimeoutMs?: number;
+  manifestPath?: string;
+  capabilities?: string[];
+  runner?: string;
+  parser?: string;
+  argumentHint?: string;
+}
+
+interface AIActionsResponsePayload {
+  actions?: AIActionResponse[];
+}
+
+interface BlackboardItemResponse extends Record<string, unknown> {
+  id?: string;
+  kind?: string;
+  title?: string;
+  content?: string;
+  status?: string;
+  priority?: string;
+  source?: string;
+  filePath?: string;
+  executionId?: string;
+  graphNodeId?: string;
+  replayEventId?: string;
+  reportId?: string;
+  createdAt?: number;
+  updatedAt?: number;
+}
+
+interface AgentTaskResponse extends Record<string, unknown> {
+  id?: string;
+  title?: string;
+  goal?: string;
+  role?: string;
+  agentId?: string;
+  status?: string;
+  priority?: string;
+  source?: string;
+  createdAt?: number;
+  updatedAt?: number;
+  blackboardItemId?: string;
+  filePath?: string;
+  executionId?: string;
+  replayEventId?: string;
+  reportFindingId?: string;
+}
+
+interface HarnessCaseResponse extends Record<string, unknown> {
+  id?: string;
+  title?: string;
+  goal?: string;
+  kind?: string;
+  command?: string;
+  expectedResult?: string;
+  promptId?: string;
+  agentRole?: string;
+  source?: string;
+  filePath?: string;
+  agentTaskId?: string;
+  blackboardItemId?: string;
+  createdAt?: number;
+  updatedAt?: number;
+}
+
+interface OrchestratorRunResponse extends Record<string, unknown> {
+  id?: string;
+  title?: string;
+  goal?: string;
+  kind?: string;
+  command?: string;
+  expectedResult?: string;
+  priority?: string;
+  source?: string;
+  filePath?: string;
+  status?: string;
+  blackboardItemId?: string;
+  agentTaskId?: string;
+  harnessCaseId?: string;
+  executionId?: string;
+  createdAt?: number;
+  updatedAt?: number;
+}
+
+interface AIActionResultResponse {
+  kind?: string;
+  operation?: string;
+  summary?: string;
+  orchestratorRun?: OrchestratorRunResponse;
+  blackboardItem?: BlackboardItemResponse;
+  agentTask?: AgentTaskResponse;
+  harnessCase?: HarnessCaseResponse;
+  execution?: ExecutionResponse;
+}
+
+interface AIActionRunResponsePayload {
+  action?: AIActionResponse;
+  execution?: ExecutionResponse;
+  result?: AIActionResultResponse;
 }
 
 interface ExecutionArtifactResponse {
@@ -531,6 +652,61 @@ export async function runToolchainAction(actionID: string, argumentsText: string
   };
 }
 
+export async function fetchAIActions(): Promise<AIAction[]> {
+  const baseURL = await apiBaseURL();
+  if (!baseURL) {
+    throw new Error(zhCN.shell.statusOffline);
+  }
+  const payload = await requestJSON<AIActionsResponsePayload>(baseURL, '/api/ai/actions');
+  return mapAIActionsResponse(payload);
+}
+
+export async function runAIAction(request: AIActionRunRequest): Promise<AIActionRunResponse> {
+  if (request.actionId.trim() === '') {
+    throw new Error(zhCN.aiActions.actionMissing);
+  }
+  const baseURL = await apiBaseURL();
+  if (!baseURL) {
+    throw new Error(zhCN.shell.statusOffline);
+  }
+  const response = await fetch(`${baseURL}/api/ai/actions/run`, {
+    method: 'POST',
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  });
+  if (!response.ok) {
+    throw new Error(`${zhCN.aiActions.runFailed}: ${response.status}`);
+  }
+  return mapAIActionRunResponse(await response.json() as AIActionRunResponsePayload);
+}
+
+export async function fetchAIChat(): Promise<ChatResponse> {
+  const baseURL = await apiBaseURL();
+  if (!baseURL) {
+    throw new Error(zhCN.shell.statusOffline);
+  }
+  return requestJSON<ChatResponse>(baseURL, '/api/ai/chat');
+}
+
+export async function sendAIChatMessage(message: string): Promise<ChatPostResponse> {
+  const baseURL = await apiBaseURL();
+  if (!baseURL) {
+    throw new Error(zhCN.shell.statusOffline);
+  }
+  if (message.trim() === '') {
+    throw new Error(zhCN.aiChat.messageRequired);
+  }
+  const response = await fetch(`${baseURL}/api/ai/chat`, {
+    method: 'POST',
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message }),
+  });
+  if (!response.ok) {
+    throw new Error(`${zhCN.aiChat.sendFailed}: ${response.status}`);
+  }
+  return await response.json() as ChatPostResponse;
+}
+
 export async function saveWorkspaceSettings(settings: WorkspaceSettings): Promise<WorkspaceSettings> {
   const baseURL = await apiBaseURL();
   if (!baseURL) {
@@ -771,6 +947,128 @@ function mapRequiredToolActionResponse(action: ToolActionResponse | undefined, c
     throw new Error(`${context}: ${zhCN.toolLaunch.failed}`);
   }
   return mapToolAction(action);
+}
+
+function mapAIActionsResponse(payload: AIActionsResponsePayload): AIAction[] {
+  if (!Array.isArray(payload.actions)) {
+    throw new Error(zhCN.aiActions.actionsMissing);
+  }
+  return payload.actions.map(action => mapRequiredAIActionResponse(action, zhCN.aiActions.actionsMissing));
+}
+
+function mapAIActionRunResponse(payload: AIActionRunResponsePayload): AIActionRunResponse {
+  return {
+    action: mapRequiredAIActionResponse(payload.action, zhCN.aiActions.actionMissing),
+    execution: payload.execution?.id ? mapRequiredExecutionResponse(payload.execution, zhCN.aiActions.executionMissing) : undefined,
+    result: mapAIActionResultResponse(payload.result),
+  };
+}
+
+function mapAIActionResultResponse(result: AIActionResultResponse | undefined): AIActionResult & { orchestratorRun?: OrchestratorRun } {
+  if (!result?.kind) {
+    throw new Error(zhCN.aiActions.resultMissing);
+  }
+  return {
+    kind: normalizeAIActionResultKind(result.kind),
+    operation: result.operation,
+    summary: result.summary,
+    orchestratorRun: mapAIActionOrchestratorRun(result.orchestratorRun),
+    blackboardItem: mapAIActionBlackboardItem(result.blackboardItem),
+    agentTask: mapAIActionAgentTask(result.agentTask),
+    harnessCase: mapAIActionHarnessCase(result.harnessCase),
+    execution: result.execution?.id ? mapRequiredExecutionResponse(result.execution, zhCN.aiActions.executionMissing) : undefined,
+  };
+}
+
+function normalizeAIActionResultKind(kind: string): string {
+  switch (kind) {
+    case 'orchestrator_run':
+      return 'orchestrator_run';
+    default:
+      return kind;
+  }
+}
+
+function mapAIActionOrchestratorRun(run: OrchestratorRunResponse | undefined): OrchestratorRun | undefined {
+  if (!run) {
+    return undefined;
+  }
+  return { ...run };
+}
+
+function mapAIActionBlackboardItem(item: BlackboardItemResponse | undefined): BlackboardItem | undefined {
+  if (!item) {
+    return undefined;
+  }
+  return { ...item };
+}
+
+function mapAIActionAgentTask(task: AgentTaskResponse | undefined): AgentTask | undefined {
+  if (!task) {
+    return undefined;
+  }
+  return { ...task };
+}
+
+function mapAIActionHarnessCase(testCase: HarnessCaseResponse | undefined): HarnessCase | undefined {
+  if (!testCase) {
+    return undefined;
+  }
+  return { ...testCase };
+}
+
+function mapRequiredAIActionResponse(action: AIActionResponse | undefined, context: string): AIAction {
+  if (!action?.id || !action.kind || !action.label || !action.status) {
+    throw new Error(context);
+  }
+  const kind = normalizeAIActionKind(action.kind);
+  if (!kind) {
+    throw new Error(context);
+  }
+  if (kind === 'tool' && (!action.packId || !action.packName || !Array.isArray(action.command) || action.command.length === 0 || !action.commandText || !action.manifestPath)) {
+    throw new Error(context);
+  }
+  return {
+    id: action.id,
+    kind,
+    label: action.label,
+    status: action.status,
+    description: action.description,
+    packId: action.packId,
+    packName: action.packName,
+    command: action.command,
+    commandText: action.commandText,
+    runTimeoutMs: action.runTimeoutMs,
+    manifestPath: action.manifestPath,
+    capabilities: action.capabilities ?? [],
+    runner: action.runner,
+    parser: action.parser,
+    argumentHint: action.argumentHint,
+  };
+}
+
+function normalizeAIActionKind(kind: string): AIAction['kind'] | null {
+  switch (kind.toLowerCase()) {
+    case 'command':
+      return 'command';
+    case 'tool':
+    case 'toolchain':
+      return 'tool';
+    case 'workspace_file':
+      return 'file';
+    case 'report':
+      return 'report';
+    case 'blackboard':
+      return 'blackboard';
+    case 'agent':
+      return 'agent';
+    case 'harness':
+      return 'harness';
+    case 'orchestrator':
+      return 'orchestrator';
+    default:
+      return null;
+  }
 }
 
 function isCompleteToolActionResponse(action: ToolActionResponse): boolean {
