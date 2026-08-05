@@ -50,8 +50,9 @@ if (!existsSync(appPath)) {
 }
 
 const shellPath = join(root, 'src/app/OuroborosIDE.tsx');
+const shellSource = existsSync(shellPath) ? readFileSync(shellPath, 'utf8') : '';
 if (existsSync(shellPath)) {
-  const shell = readFileSync(shellPath, 'utf8');
+  const shell = shellSource;
   const requiredImports = ['loadIDEData', 'loadDesktopStatus', 'restartDesktopBackend', 'zhCN'];
   for (const imported of requiredImports) {
     if (!shell.includes(imported)) {
@@ -382,6 +383,18 @@ if (existsSync(apiPath)) {
       failed = true;
     }
   }
+  for (const snippet of ['AIAction', 'AIActionRunRequest', 'AIActionRunResponse', 'fetchAIActions', 'runAIAction', '/api/ai/actions', '/api/ai/actions/run']) {
+    if (!api.includes(snippet)) {
+      console.error(`api.ts must expose real AI action API: ${snippet}`);
+      failed = true;
+    }
+  }
+  for (const snippet of ['OrchestratorRun', 'orchestratorRun?: OrchestratorRun', 'orchestratorRun?: OrchestratorRunResponse', "case 'orchestrator'", "return 'orchestrator'", "case 'orchestrator_run'", "return 'orchestrator_run'", 'mapAIActionOrchestratorRun', 'orchestratorRun: mapAIActionOrchestratorRun(result.orchestratorRun)']) {
+    if (!api.includes(snippet)) {
+      console.error(`api.ts must map real orchestrator.run AI action responses: ${snippet}`);
+      failed = true;
+    }
+  }
   for (const snippet of ['export async function exportEvidenceGraph', '/api/evidence/graph/export', "method: 'POST'"]) {
     if (!api.includes(snippet)) {
       console.error(`api.ts must expose real graph export API calls: ${snippet}`);
@@ -682,6 +695,12 @@ if (existsSync(apiPath)) {
     console.error('api.ts must validate execution DTOs before returning action results');
     failed = true;
   }
+  for (const snippet of ["result.kind === 'orchestrator_run'", 'result.result.orchestratorRun', 'result.result.blackboardItem', 'result.result.agentTask', 'result.result.harnessCase', 'result.result.execution']) {
+    if (!api.includes(snippet) && !shellSource.includes(snippet)) {
+      console.error(`frontend must preserve real orchestrator.run result objects: ${snippet}`);
+      failed = true;
+    }
+  }
   for (const snippet of ["id: 'evidence'", "id: 'runtime'", "id: 'reports'", "id: 'toolchain'"]) {
     if (api.includes(snippet)) {
       console.error(`api.ts must not synthesize workspace explorer nodes: ${snippet}`);
@@ -696,6 +715,12 @@ if (existsSync(typesPath)) {
   for (const snippet of ['interface MissionMessage', "author: 'operator' | 'agent' | 'system'", 'messages: MissionMessage[]']) {
     if (types.includes(snippet)) {
       console.error(`types.ts must not expose dormant mission message types without backend DTO support: ${snippet}`);
+      failed = true;
+    }
+  }
+  for (const snippet of ['export type AIActionKind', "export type AIActionKind = 'command' | 'tool' | 'file' | 'report' | 'blackboard' | 'agent' | 'harness' | 'orchestrator'", 'export interface AIActionRunRequest', 'export interface AIActionRunResponse', 'export interface AIActionResult', 'export interface OrchestratorRun', 'orchestratorRun?: OrchestratorRun', 'blackboardItem?: BlackboardItem', 'agentTask?: AgentTask', 'harnessCase?: HarnessCase', 'execution?: ExecutionStep']) {
+    if (!types.includes(snippet)) {
+      console.error(`types.ts must expose orchestrator.run AI action contract: ${snippet}`);
       failed = true;
     }
   }
@@ -723,8 +748,12 @@ if (existsSync(copyPath)) {
     console.error('zh-cn.ts must not keep unused execution command fallback copy after backend-authored execution labels');
     failed = true;
   }
-  if (copy.includes('AI 对话')) {
-    console.error('zh-cn.ts must not label the mission panel as AI chat without backend-projected chat messages');
+  if (!copy.includes('aiChat')) {
+    console.error('zh-cn.ts must define real AI chat copy for backend-projected chat messages');
+    failed = true;
+  }
+  if (copy.includes('AI 对话') && !copy.includes('aiChat')) {
+    console.error('zh-cn.ts must not label the mission panel as AI chat without real aiChat copy key');
     failed = true;
   }
   for (const snippet of ['智能体图', '下一步', "agent: '智能体'"]) {
@@ -806,6 +835,12 @@ if (existsSync(copyPath)) {
   for (const snippet of ['工具启动', '来自 toolchain manifest 的真实可执行动作', '运行工具', '工具参数', '暂无可直接运行的工具动作']) {
     if (!copy.includes(snippet)) {
       console.error(`zh-cn.ts missing manifest-backed tool launch copy: ${snippet}`);
+      failed = true;
+    }
+  }
+  for (const snippet of ['AI 动作', '编排动作', '运行编排', '编排运行结果', '后端返回的编排运行为空', '编排标题', '编排目标', '期望结果', '来源', '关联文件']) {
+    if (!copy.includes(snippet)) {
+      console.error(`zh-cn.ts missing orchestrator.run AI action copy: ${snippet}`);
       failed = true;
     }
   }
