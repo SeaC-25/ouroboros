@@ -370,12 +370,21 @@ export interface IDEData {
   loadedAt: string;
 }
 
+
+export interface ChatActionResult {
+  kind: string;
+  summary: string;
+  path?: string;
+  output?: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
   content: string;
   timestamp: number;
   refs?: string[];
+  actions?: ChatActionResult[];
 }
 
 export interface ChatResponse {

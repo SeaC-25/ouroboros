@@ -26,7 +26,7 @@ import type { LucideIcon } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import type { KeyboardEvent } from 'react';
 import { closeDesktopWindow, connectIDEEventStream, createDesktopWorkspace, exportEvidenceGraph, exportReport, fetchAIActions, fetchAIChat, loadDesktopStatus, loadExecutionArtifacts, loadExecutionLogs, loadIDEData, loadWorkspaceFile, minimizeDesktopWindow, onDesktopBackendStatus, onDesktopMenuAction, openRecentDesktopWorkspace, restartDesktopBackend, retryExecution, runAIAction, runToolchainAction, saveMission, saveProviderConfig, saveToolchainPack, saveWorkspaceFile, saveWorkspaceSettings, searchWorkspace, selectDesktopWorkspace, sendAIChatMessage, startExecution, startMission, stopExecution, toggleMaximizeDesktopWindow } from './api';
-import type { AgentTask, AIAction, AIActionRunRequest, AIActionRunResponse, BlackboardItem, ChatMessage, DesktopStatus, ExecutionArtifact, ExecutionLog, ExecutionStep, GraphEdge, GraphNode, HarnessCase, IDEData, IDEEvent, IDEMode, MissionState, OrchestratorRun, ProviderSettings, ReplayEvent, ReportDocument, ReportFinding, Severity, ToolAction, ToolchainPackSettings, WorkspaceFileContent, WorkspaceItem, WorkspaceSearchResult, WorkspaceSettings } from './types';
+import type { AgentTask, AIAction, AIActionRunRequest, AIActionRunResponse, BlackboardItem, ChatActionResult, ChatMessage, DesktopStatus, ExecutionArtifact, ExecutionLog, ExecutionStep, GraphEdge, GraphNode, HarnessCase, IDEData, IDEEvent, IDEMode, MissionState, OrchestratorRun, ProviderSettings, ReplayEvent, ReportDocument, ReportFinding, Severity, ToolAction, ToolchainPackSettings, WorkspaceFileContent, WorkspaceItem, WorkspaceSearchResult, WorkspaceSettings } from './types';
 import { zhCN } from './zh-cn';
 
 const modes: Array<{ id: IDEMode; icon: LucideIcon }> = [
@@ -3117,6 +3117,17 @@ function AIChatPanel({
               <time>{formatChatTime(message.timestamp)}</time>
             </header>
             <p>{message.content}</p>
+            {(message.actions ?? []).length > 0 && (
+              <div className="chat-action-results">
+                {(message.actions ?? []).map((action, index) => (
+                  <div className="chat-action-result" key={`${action.kind}-${index}`}>
+                    <div><strong>{action.kind}</strong> <span>{action.summary}</span></div>
+                    {action.path && <small>{action.path}</small>}
+                    {action.output && <pre>{action.output}</pre>}
+                  </div>
+                ))}
+              </div>
+            )}
             {(message.refs ?? []).map(ref => <small className="chat-ref" key={ref}>{zhCN.aiChat.contextLabel}: {ref}</small>)}
           </article>
         ))}

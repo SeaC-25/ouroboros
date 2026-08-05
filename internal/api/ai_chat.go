@@ -17,11 +17,12 @@ import (
 
 // ChatMessage 持久化的对话消息
 type ChatMessage struct {
-	ID        string `json:"id"`
-	Role      string `json:"role"` // user / assistant
-	Content   string `json:"content"`
-	Timestamp int64  `json:"timestamp"`
-	Refs      []string `json:"refs,omitempty"`
+	ID        string             `json:"id"`
+	Role      string             `json:"role"` // user / assistant
+	Content   string             `json:"content"`
+	Timestamp int64              `json:"timestamp"`
+	Refs      []string           `json:"refs,omitempty"`
+	Actions   []ChatActionResult `json:"actions,omitempty"`
 }
 
 // ChatResponse 前端期望的返回结构
@@ -40,6 +41,14 @@ type ChatPostRequest struct {
 type ChatPostResponse struct {
 	Message   ChatMessage `json:"message"`
 	Context   []string    `json:"context,omitempty"`
+}
+
+// ChatActionResult 动作执行后的结构化结果
+type ChatActionResult struct {
+	Kind    string `json:"kind"`
+	Summary string `json:"summary"`
+	Path    string `json:"path,omitempty"`
+	Output  string `json:"output,omitempty"`
 }
 
 func (s *Server) handleAIChat(w http.ResponseWriter, r *http.Request) {
@@ -134,7 +143,7 @@ func (s *Server) handleAIChatPost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 检查 AI 回复中是否有动作标记并执行
-	actions := s.parseAndExecuteAIActions(result.Text)
+	refs, actionResults := s.parseAndExecuteAIActions(result.Text)
 
 	// 持久化 AI 回复
 	assistantMsg := ChatMessage{
@@ -142,13 +151,14 @@ func (s *Server) handleAIChatPost(w http.ResponseWriter, r *http.Request) {
 		Role:      "assistant",
 		Content:   result.Text,
 		Timestamp: time.Now().Unix(),
-		Refs:      actions,
+		Refs:      refs,
+		Actions:   actionResults,
 	}
 	s.appendAIConversation(assistantMsg)
 
 	respondJSON(w, http.StatusOK, ChatPostResponse{
 		Message: assistantMsg,
-		Context: actions,
+		Context: refs,
 	})
 }
 
@@ -249,8 +259,9 @@ func (s *Server) appendAIConversation(msg ChatMessage) {
 }
 
 // parseAndExecuteAIActions 解析并执行 AI 回复中的动作标记
-func (s *Server) parseAndExecuteAIActions(text string) []string {
+func (s *Server) parseAndExecuteAIActions(text string) ([]string, []ChatActionResult) {
 	var refs []string
+	var results []ChatActionResult
 	lines := strings.Split(text, "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
@@ -262,9 +273,23 @@ func (s *Server) parseAndExecuteAIActions(text string) []string {
 					Command: "bash",
 					Args:    []string{"-c", cmd},
 				})
-				if err == nil {
-					refs = append(refs, fmt.Sprintf("executed:%s", execution.ID))
+				if err != nil {
+					results = append(results, ChatActionResult{Kind: "execute", Summary: "启动失败: " + err.Error()})
+					continue
 				}
+				refs = append(refs, fmt.Sprintf("executed:%s", execution.ID))
+				// 给后台命令一点时间写出日志，然后回填已捕获输出
+				time.Sleep(800 * time.Millisecond)
+				output := ""
+				if logs, logErr := ReadExecutionLogs(s.workspace, execution.ID); logErr == nil {
+					output = truncateForAI(logs.Content, 4000)
+				}
+				results = append(results, ChatActionResult{
+					Kind:    "execute",
+					Summary: fmt.Sprintf("已执行命令，执行记录 %s", execution.ID),
+					Path:    execution.LogPath,
+					Output:  output,
+				})
 			}
 		} else if strings.HasPrefix(line, "ACTION:LIST ") {
 			dir := strings.TrimPrefix(line, "ACTION:LIST ")
@@ -282,6 +307,12 @@ func (s *Server) parseAndExecuteAIActions(text string) []string {
 				}
 				if len(listed) > 0 {
 					refs = append(refs, fmt.Sprintf("listed:%d", len(listed)))
+					results = append(results, ChatActionResult{
+						Kind:    "list",
+						Summary: fmt.Sprintf("列出 %d 个工作区文件", len(listed)),
+						Path:    dir,
+						Output:  strings.Join(listed, "\n"),
+					})
 				}
 			}
 		} else if strings.HasPrefix(line, "ACTION:READ ") {
@@ -289,9 +320,18 @@ func (s *Server) parseAndExecuteAIActions(text string) []string {
 			filePath = strings.TrimSpace(filePath)
 			filePath = strings.TrimPrefix(filePath, "./")
 			if filePath != "" {
-				if _, err := ReadWorkspaceFile(s.workspace, filePath); err == nil {
-					refs = append(refs, fmt.Sprintf("read:%s", filePath))
+				file, err := ReadWorkspaceFile(s.workspace, filePath)
+				if err != nil {
+					results = append(results, ChatActionResult{Kind: "read", Summary: "读取失败: " + err.Error(), Path: filePath})
+					continue
 				}
+				refs = append(refs, fmt.Sprintf("read:%s", filePath))
+				results = append(results, ChatActionResult{
+					Kind:    "read",
+					Summary: fmt.Sprintf("已读取 %s（%d 字节）", filePath, file.Size),
+					Path:    filePath,
+					Output:  truncateForAI(file.Content, 4000),
+				})
 			}
 		} else if strings.HasPrefix(line, "ACTION:WRITE ") {
 			parts := strings.SplitN(strings.TrimPrefix(line, "ACTION:WRITE "), " ", 2)
@@ -299,16 +339,31 @@ func (s *Server) parseAndExecuteAIActions(text string) []string {
 				filePath := strings.TrimSpace(parts[0])
 				content := parts[1]
 				if filePath != "" {
-					if _, err := WriteWorkspaceFile(s.workspace, filePath, content); err == nil {
-						refs = append(refs, fmt.Sprintf("written:%s", filePath))
+					if _, err := WriteWorkspaceFile(s.workspace, filePath, content); err != nil {
+						results = append(results, ChatActionResult{Kind: "write", Summary: "写入失败: " + err.Error(), Path: filePath})
+						continue
 					}
+					refs = append(refs, fmt.Sprintf("written:%s", filePath))
+					results = append(results, ChatActionResult{
+						Kind:    "write",
+						Summary: "已写入文件",
+						Path:    filePath,
+						Output:  truncateForAI(content, 2000),
+					})
 				}
 			}
 		}
 	}
-	return refs
+	return refs, results
 }
 
+func truncateForAI(value string, max int) string {
+	value = strings.TrimSpace(value)
+	if len(value) <= max {
+		return value
+	}
+	return value[:max] + "\n...[已截断]"
+}
 func min(a, b int) int {
 	if a < b {
 		return a
