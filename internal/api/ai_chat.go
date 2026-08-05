@@ -35,7 +35,13 @@ type ChatResponse struct {
 
 // ChatPostRequest 前端发送的消息
 type ChatPostRequest struct {
-	Message string `json:"message"`
+	Message string       `json:"message"`
+	Context *ChatContext `json:"context,omitempty"`
+}
+
+type ChatContext struct {
+	FilePath    string `json:"filePath,omitempty"`
+	FileContent string `json:"fileContent,omitempty"`
 }
 
 // ChatPostResponse AI 回复
@@ -88,6 +94,18 @@ func (s *Server) handleAIChatPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	contextPrompt := ""
+	if request.Context != nil {
+		filePath := strings.TrimSpace(request.Context.FilePath)
+		fileContent := strings.TrimSpace(request.Context.FileContent)
+		if filePath != "" {
+			if len(fileContent) > 6000 {
+				fileContent = fileContent[:6000] + "\n…（内容过长已截断）"
+			}
+			contextPrompt = fmt.Sprintf("\n当前打开文件: %s\n```\n%s\n```\n", filePath, fileContent)
+		}
+	}
+
 	// 持久化用户消息
 	now := time.Now().Unix()
 	userMsg := ChatMessage{
@@ -102,6 +120,7 @@ func (s *Server) handleAIChatPost(w http.ResponseWriter, r *http.Request) {
 	systemPrompt := fmt.Sprintf(`你是 Ouroboros IDE 的 AI 安全操作员。你帮助用户理解工作区、修改文件、运行任务、调用工具、调度多智能体、使用黑板算法、读取结果、保存证据、评测 prompt、运行 harness、回放过程、查看报告、管理配置，并持续推进真实安全工作。
 
 工作区摘要:
+%s
 %s
 
 你可以：
@@ -125,7 +144,7 @@ func (s *Server) handleAIChatPost(w http.ResponseWriter, r *http.Request) {
 - 每个动作占单独一行，动作本身必须放在回复末尾。
 - 动作执行结果会自动追加显示，不需要在文字里猜测文件内容或命令输出。
 
-重要：所有回复使用中文。`, s.buildWorkspaceSummary())
+重要：所有回复使用中文。`, s.buildWorkspaceSummary(), contextPrompt)
 
 	// 调用真实 provider
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)

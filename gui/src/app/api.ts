@@ -688,7 +688,7 @@ export async function fetchAIChat(): Promise<ChatResponse> {
   return requestJSON<ChatResponse>(baseURL, '/api/ai/chat');
 }
 
-export async function sendAIChatMessage(message: string): Promise<ChatPostResponse> {
+export async function sendAIChatMessage(message: string, context?: { filePath?: string; fileContent?: string }): Promise<ChatPostResponse> {
   const baseURL = await apiBaseURL();
   if (!baseURL) {
     throw new Error(zhCN.shell.statusOffline);
@@ -699,7 +699,7 @@ export async function sendAIChatMessage(message: string): Promise<ChatPostRespon
   const response = await fetch(`${baseURL}/api/ai/chat`, {
     method: 'POST',
     headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message }),
+    body: JSON.stringify({ message, context }),
   });
   if (!response.ok) {
     throw new Error(`${zhCN.aiChat.sendFailed}: ${response.status}`);

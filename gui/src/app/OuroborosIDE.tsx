@@ -571,7 +571,10 @@ export function OuroborosIDE() {
     setChatMessages(current => [...current, optimistic]);
     setChatDraft('');
     try {
-      const response = await sendAIChatMessage(message);
+      const response = await sendAIChatMessage(message, {
+        filePath: openFile?.path ?? '',
+        fileContent: fileDraft || (openFile?.content ?? ''),
+      });
       setChatMessages(current => [...current, response.message]);
       setChatRefs(response.context ?? []);
       setChatStatus('');
