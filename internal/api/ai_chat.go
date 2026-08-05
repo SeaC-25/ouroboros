@@ -112,6 +112,7 @@ func (s *Server) handleAIChatPost(w http.ResponseWriter, r *http.Request) {
 - 调用工具动作：使用 ACTION:TOOL <动作ID> <参数> 格式
 - 创建子目标：使用 ACTION:GOAL <标题> 格式
 - 标记子目标完成：使用 ACTION:GOAL-DONE <标题> 格式
+- 记录黑板发现：使用 ACTION:BLACKBOARD <发现内容> 格式
 - 每个动作占单独一行，动作本身必须放在回复末尾。
 - 动作执行结果会自动追加显示，不需要在文字里猜测文件内容或命令输出。
 
@@ -182,6 +183,16 @@ func (s *Server) buildWorkspaceSummary() string {
 	provider, err := ProjectProvider(s.workspace)
 	if err == nil {
 		summary = append(summary, fmt.Sprintf("模型: %s (Provider: %s, 状态: %s)", provider.Model, provider.Name, provider.Status))
+	}
+
+	// 黑板事实
+	blackboardFacts := s.loadBlackboardFacts()
+	if len(blackboardFacts) > 0 {
+		factList := make([]string, 0, min(len(blackboardFacts), 15))
+		for _, fact := range blackboardFacts {
+			factList = append(factList, fmt.Sprintf("  - [%s] %s (%s)", fact.Kind, fact.Statement, fact.Source))
+		}
+		summary = append(summary, fmt.Sprintf("黑板事实 (%d 个):\n%s", len(blackboardFacts), strings.Join(factList, "\n")))
 	}
 
 	// 子目标
@@ -378,6 +389,18 @@ func (s *Server) parseAndExecuteAIActions(text string) ([]string, []ChatActionRe
 					})
 				}
 			}
+		} else if strings.HasPrefix(line, "ACTION:BLACKBOARD ") {
+			statement := strings.TrimPrefix(line, "ACTION:BLACKBOARD ")
+			statement = strings.TrimSpace(statement)
+			if statement != "" {
+				fact, err := s.appendBlackboardFact("ai", statement)
+				if err != nil {
+					results = append(results, ChatActionResult{Kind: "blackboard", Summary: "记录黑板发现失败: " + err.Error()})
+				} else {
+					refs = append(refs, fmt.Sprintf("blackboard:%s", fact.ID))
+					results = append(results, ChatActionResult{Kind: "blackboard", Summary: "已记录黑板发现", Path: fact.ID, Output: truncateForAI(fact.Statement, 2000)})
+				}
+			}
 		} else if strings.HasPrefix(line, "ACTION:GOAL ") {
 			title := strings.TrimPrefix(line, "ACTION:GOAL ")
 			title = strings.TrimSpace(title)
@@ -435,6 +458,63 @@ func (s *Server) parseAndExecuteAIActions(text string) ([]string, []ChatActionRe
 		}
 	}
 	return refs, results
+}
+
+type BlackboardFact struct {
+	ID        string `json:"id"`
+	Kind      string `json:"kind"`
+	Statement string `json:"statement"`
+	Source    string `json:"source"`
+	CreatedAt int64  `json:"createdAt"`
+}
+
+func (s *Server) blackboardPath() string {
+	return filepath.Join(s.workspace, "runtime", "blackboard.jsonl")
+}
+
+func (s *Server) loadBlackboardFacts() []BlackboardFact {
+	path := s.blackboardPath()
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return []BlackboardFact{}
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return []BlackboardFact{}
+	}
+	defer file.Close()
+	var facts []BlackboardFact
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		var fact BlackboardFact
+		if json.Unmarshal(scanner.Bytes(), &fact) == nil {
+			facts = append(facts, fact)
+		}
+	}
+	return facts
+}
+
+func (s *Server) appendBlackboardFact(kind string, statement string) (BlackboardFact, error) {
+	runtimeDir := filepath.Join(s.workspace, "runtime")
+	os.MkdirAll(runtimeDir, 0o755)
+	path := s.blackboardPath()
+	fact := BlackboardFact{
+		ID:        fmt.Sprintf("fact-%d", time.Now().UnixNano()),
+		Kind:      kind,
+		Statement: statement,
+		Source:    "ai-agent",
+		CreatedAt: time.Now().Unix(),
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return BlackboardFact{}, err
+	}
+	defer file.Close()
+	data, err := json.Marshal(fact)
+	if err != nil {
+		return BlackboardFact{}, err
+	}
+	_, err = file.Write(append(data, '\n'))
+	return fact, err
 }
 
 type WorkspaceGoal struct {
