@@ -27,9 +27,9 @@ type ChatMessage struct {
 
 // ChatResponse 前端期望的返回结构
 type ChatResponse struct {
-	Messages   []ChatMessage `json:"messages"`
-	Workspace  string        `json:"workspace"`
-	Summary    string        `json:"summary"`
+	Messages  []ChatMessage `json:"messages"`
+	Workspace string        `json:"workspace"`
+	Summary   string        `json:"summary"`
 }
 
 // ChatPostRequest 前端发送的消息
@@ -39,8 +39,8 @@ type ChatPostRequest struct {
 
 // ChatPostResponse AI 回复
 type ChatPostResponse struct {
-	Message   ChatMessage `json:"message"`
-	Context   []string    `json:"context,omitempty"`
+	Message ChatMessage `json:"message"`
+	Context []string    `json:"context,omitempty"`
 }
 
 // ChatActionResult 动作执行后的结构化结果
@@ -109,6 +109,9 @@ func (s *Server) handleAIChatPost(w http.ResponseWriter, r *http.Request) {
 - 读取文件：使用 ACTION:READ <文件路径> 格式
 - 写入文件：使用 ACTION:WRITE <文件路径> 格式，后跟文件内容
 - 列出文件：使用 ACTION:LIST <目录> 格式
+- 搜索文件内容：使用 ACTION:SEARCH <关键字> 格式
+- 删除文件或目录：使用 ACTION:DELETE <文件路径> 格式
+- 重命名文件或目录：使用 ACTION:RENAME <原路径> <新路径> 格式
 - 调用工具动作：使用 ACTION:TOOL <动作ID> <参数> 格式
 - 创建子目标：使用 ACTION:GOAL <标题> 格式
 - 标记子目标完成：使用 ACTION:GOAL-DONE <标题> 格式
@@ -437,6 +440,76 @@ func (s *Server) parseAndExecuteAIActions(text string) ([]string, []ChatActionRe
 					})
 				}
 			}
+		} else if strings.HasPrefix(line, "ACTION:SEARCH ") {
+			query := strings.TrimSpace(strings.TrimPrefix(line, "ACTION:SEARCH "))
+			if query != "" {
+				matches, err := SearchWorkspace(s.workspace, query)
+				if err != nil {
+					results = append(results, ChatActionResult{Kind: "search", Summary: "搜索失败: " + err.Error(), Path: query})
+				} else if len(matches) == 0 {
+					results = append(results, ChatActionResult{Kind: "search", Summary: "未找到匹配内容", Path: query})
+				} else {
+					lines := make([]string, 0, len(matches))
+					for _, match := range matches {
+						lines = append(lines, fmt.Sprintf("%s:%d: %s", match.Path, match.Line, match.Text))
+					}
+					refs = append(refs, fmt.Sprintf("search:%d", len(matches)))
+					results = append(results, ChatActionResult{
+						Kind:    "search",
+						Summary: fmt.Sprintf("搜索到 %d 个匹配", len(matches)),
+						Path:    query,
+						Output:  truncateForAI(strings.Join(lines, "\n"), 4000),
+					})
+				}
+			}
+		} else if strings.HasPrefix(line, "ACTION:DELETE ") {
+			filePath := strings.TrimSpace(strings.TrimPrefix(line, "ACTION:DELETE "))
+			filePath = strings.TrimPrefix(filePath, "./")
+			if filePath != "" {
+				path, rel, err := resolveWorkspaceFile(s.workspace, filePath)
+				if err != nil {
+					results = append(results, ChatActionResult{Kind: "delete", Summary: "删除失败: " + err.Error(), Path: filePath})
+				} else if _, statErr := os.Stat(path); statErr != nil {
+					results = append(results, ChatActionResult{Kind: "delete", Summary: "删除失败: 文件不存在", Path: filePath})
+				} else if err := os.RemoveAll(path); err != nil {
+					results = append(results, ChatActionResult{Kind: "delete", Summary: "删除失败: " + err.Error(), Path: filePath})
+				} else {
+					rel = filepath.ToSlash(rel)
+					refs = append(refs, "deleted:"+rel)
+					results = append(results, ChatActionResult{Kind: "delete", Summary: "已删除", Path: rel})
+				}
+			}
+		} else if strings.HasPrefix(line, "ACTION:RENAME ") {
+			renameSpec := strings.TrimSpace(strings.TrimPrefix(line, "ACTION:RENAME "))
+			parts := strings.SplitN(renameSpec, " ", 2)
+			if len(parts) == 2 {
+				oldPath := strings.TrimSpace(parts[0])
+				newPath := strings.TrimSpace(parts[1])
+				if oldPath != "" && newPath != "" {
+					oldAbs, oldRel, err := resolveWorkspaceFile(s.workspace, oldPath)
+					if err != nil {
+						results = append(results, ChatActionResult{Kind: "rename", Summary: "重命名失败: " + err.Error(), Path: oldPath})
+					} else {
+						newAbs, newRel, newErr := resolveWorkspaceFile(s.workspace, newPath)
+						if newErr != nil {
+							results = append(results, ChatActionResult{Kind: "rename", Summary: "重命名失败: " + newErr.Error(), Path: newPath})
+						} else if _, statErr := os.Stat(oldAbs); statErr != nil {
+							results = append(results, ChatActionResult{Kind: "rename", Summary: "重命名失败: 原文件不存在", Path: oldPath})
+						} else if _, statErr := os.Stat(newAbs); statErr == nil {
+							results = append(results, ChatActionResult{Kind: "rename", Summary: "重命名失败: 目标路径已存在", Path: newPath})
+						} else if err := os.MkdirAll(filepath.Dir(newAbs), 0o755); err != nil {
+							results = append(results, ChatActionResult{Kind: "rename", Summary: "重命名失败: " + err.Error(), Path: newPath})
+						} else if err := os.Rename(oldAbs, newAbs); err != nil {
+							results = append(results, ChatActionResult{Kind: "rename", Summary: "重命名失败: " + err.Error(), Path: oldPath})
+						} else {
+							oldRel = filepath.ToSlash(oldRel)
+							newRel = filepath.ToSlash(newRel)
+							refs = append(refs, "renamed:"+oldRel+":"+newRel)
+							results = append(results, ChatActionResult{Kind: "rename", Summary: fmt.Sprintf("已重命名 %s 为 %s", oldRel, newRel), Path: newRel})
+						}
+					}
+				}
+			}
 		} else if strings.HasPrefix(line, "ACTION:REPORT ") {
 			reportSpec := strings.TrimPrefix(line, "ACTION:REPORT ")
 			parts := strings.SplitN(strings.TrimSpace(reportSpec), " ", 2)
@@ -490,8 +563,8 @@ func (s *Server) parseAndExecuteAIActions(text string) ([]string, []ChatActionRe
 				if err != nil {
 					results = append(results, ChatActionResult{Kind: "harness", Summary: "运行 harness 失败: " + err.Error(), Path: promptName})
 				} else {
-				refs = append(refs, fmt.Sprintf("harness:%s", result.ID))
-				results = append(results, ChatActionResult{Kind: "harness", Summary: "Harness 已运行", Path: result.ID, Output: truncateForAI(result.Output, 3000)})
+					refs = append(refs, fmt.Sprintf("harness:%s", result.ID))
+					results = append(results, ChatActionResult{Kind: "harness", Summary: "Harness 已运行", Path: result.ID, Output: truncateForAI(result.Output, 3000)})
 				}
 			}
 		} else if strings.HasPrefix(line, "ACTION:AGENT ") {
@@ -959,7 +1032,7 @@ func (s *Server) completeWorkspaceGoal(match string) (WorkspaceGoal, error) {
 func (s *Server) continueAfterAIActions(initialText string, systemPrompt string, refs []string, actionResults []ChatActionResult) (string, []string, []ChatActionResult) {
 	var feedback []string
 	for _, result := range actionResults {
-		if result.Kind == "execute" || result.Kind == "tool" || result.Kind == "read" {
+		if result.Kind == "execute" || result.Kind == "tool" || result.Kind == "read" || result.Kind == "search" || result.Kind == "delete" || result.Kind == "rename" {
 			if strings.TrimSpace(result.Output) != "" {
 				feedback = append(feedback, fmt.Sprintf("[%s] %s\n%s", result.Kind, result.Summary, result.Output))
 			}

@@ -3088,6 +3088,10 @@ function formatChatTime(unixSeconds: number): string {
   return `${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`;
 }
 
+function chatActionKindLabel(kind: string): string {
+  return zhCN.aiChat.actionKinds[kind as keyof typeof zhCN.aiChat.actionKinds] ?? kind;
+}
+
 function AIChatPanel({
   messages,
   draft,
@@ -3121,7 +3125,7 @@ function AIChatPanel({
               <div className="chat-action-results">
                 {(message.actions ?? []).map((action, index) => (
                   <div className="chat-action-result" key={`${action.kind}-${index}`}>
-                    <div><strong>{action.kind}</strong> <span>{action.summary}</span></div>
+                    <div><strong>{chatActionKindLabel(action.kind)}</strong> <span>{action.summary}</span></div>
                     {action.path && <small>{action.path}</small>}
                     {action.output && <pre>{action.output}</pre>}
                   </div>
