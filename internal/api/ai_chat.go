@@ -113,6 +113,7 @@ func (s *Server) handleAIChatPost(w http.ResponseWriter, r *http.Request) {
 - 创建子目标：使用 ACTION:GOAL <标题> 格式
 - 标记子目标完成：使用 ACTION:GOAL-DONE <标题> 格式
 - 记录黑板发现：使用 ACTION:BLACKBOARD <发现内容> 格式
+- 保存 prompt：使用 ACTION:PROMPT-SAVE <名称> <内容> 格式
 - 每个动作占单独一行，动作本身必须放在回复末尾。
 - 动作执行结果会自动追加显示，不需要在文字里猜测文件内容或命令输出。
 
@@ -183,6 +184,16 @@ func (s *Server) buildWorkspaceSummary() string {
 	provider, err := ProjectProvider(s.workspace)
 	if err == nil {
 		summary = append(summary, fmt.Sprintf("模型: %s (Provider: %s, 状态: %s)", provider.Model, provider.Name, provider.Status))
+	}
+
+	// Prompt 注册表
+	prompts := s.loadWorkspacePrompts()
+	if len(prompts) > 0 {
+		promptList := make([]string, 0, min(len(prompts), 10))
+		for _, prompt := range prompts {
+			promptList = append(promptList, fmt.Sprintf("  - %s: %s", prompt.Name, truncateForAI(prompt.Content, 80)))
+		}
+		summary = append(summary, fmt.Sprintf("Prompt 注册表 (%d 个):\n%s", len(prompts), strings.Join(promptList, "\n")))
 	}
 
 	// 黑板事实
@@ -401,6 +412,22 @@ func (s *Server) parseAndExecuteAIActions(text string) ([]string, []ChatActionRe
 					results = append(results, ChatActionResult{Kind: "blackboard", Summary: "已记录黑板发现", Path: fact.ID, Output: truncateForAI(fact.Statement, 2000)})
 				}
 			}
+		} else if strings.HasPrefix(line, "ACTION:PROMPT-SAVE ") {
+			promptSpec := strings.TrimPrefix(line, "ACTION:PROMPT-SAVE ")
+			parts := strings.SplitN(strings.TrimSpace(promptSpec), " ", 2)
+			if len(parts) == 2 {
+				name := strings.TrimSpace(parts[0])
+				content := strings.TrimSpace(parts[1])
+				if name != "" && content != "" {
+					prompt, err := s.saveWorkspacePrompt(name, content)
+					if err != nil {
+						results = append(results, ChatActionResult{Kind: "prompt", Summary: "保存 prompt 失败: " + err.Error(), Path: name})
+					} else {
+						refs = append(refs, fmt.Sprintf("prompt:%s:%s", prompt.Name, prompt.ID))
+						results = append(results, ChatActionResult{Kind: "prompt", Summary: "已保存 prompt", Path: prompt.ID, Output: truncateForAI(prompt.Content, 2000)})
+					}
+				}
+			}
 		} else if strings.HasPrefix(line, "ACTION:GOAL ") {
 			title := strings.TrimPrefix(line, "ACTION:GOAL ")
 			title = strings.TrimSpace(title)
@@ -515,6 +542,70 @@ func (s *Server) appendBlackboardFact(kind string, statement string) (Blackboard
 	}
 	_, err = file.Write(append(data, '\n'))
 	return fact, err
+}
+
+type WorkspacePrompt struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Content   string `json:"content"`
+	CreatedAt int64  `json:"createdAt"`
+}
+
+func (s *Server) promptsPath() string {
+	return filepath.Join(s.workspace, "runtime", "prompts.jsonl")
+}
+
+func (s *Server) loadWorkspacePrompts() []WorkspacePrompt {
+	path := s.promptsPath()
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return []WorkspacePrompt{}
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return []WorkspacePrompt{}
+	}
+	defer file.Close()
+	var prompts []WorkspacePrompt
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		var prompt WorkspacePrompt
+		if json.Unmarshal(scanner.Bytes(), &prompt) == nil {
+			prompts = append(prompts, prompt)
+		}
+	}
+	return prompts
+}
+
+func (s *Server) findWorkspacePrompt(name string) (WorkspacePrompt, bool) {
+	for _, prompt := range s.loadWorkspacePrompts() {
+		if prompt.Name == strings.TrimSpace(name) {
+			return prompt, true
+		}
+	}
+	return WorkspacePrompt{}, false
+}
+
+func (s *Server) saveWorkspacePrompt(name string, content string) (WorkspacePrompt, error) {
+	runtimeDir := filepath.Join(s.workspace, "runtime")
+	os.MkdirAll(runtimeDir, 0o755)
+	path := s.promptsPath()
+	prompt := WorkspacePrompt{
+		ID:        fmt.Sprintf("prompt-%d", time.Now().UnixNano()),
+		Name:      strings.TrimSpace(name),
+		Content:   content,
+		CreatedAt: time.Now().Unix(),
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return WorkspacePrompt{}, err
+	}
+	defer file.Close()
+	data, err := json.Marshal(prompt)
+	if err != nil {
+		return WorkspacePrompt{}, err
+	}
+	_, err = file.Write(append(data, '\n'))
+	return prompt, err
 }
 
 type WorkspaceGoal struct {
