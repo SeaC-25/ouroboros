@@ -114,6 +114,7 @@ func (s *Server) handleAIChatPost(w http.ResponseWriter, r *http.Request) {
 - 标记子目标完成：使用 ACTION:GOAL-DONE <标题> 格式
 - 记录黑板发现：使用 ACTION:BLACKBOARD <发现内容> 格式
 - 保存 prompt：使用 ACTION:PROMPT-SAVE <名称> <内容> 格式
+- 运行 harness：使用 ACTION:HARNESS <prompt名称> <输入> 格式
 - 每个动作占单独一行，动作本身必须放在回复末尾。
 - 动作执行结果会自动追加显示，不需要在文字里猜测文件内容或命令输出。
 
@@ -184,6 +185,16 @@ func (s *Server) buildWorkspaceSummary() string {
 	provider, err := ProjectProvider(s.workspace)
 	if err == nil {
 		summary = append(summary, fmt.Sprintf("模型: %s (Provider: %s, 状态: %s)", provider.Model, provider.Name, provider.Status))
+	}
+
+	// Harness 结果摘要
+	harnessResults := s.loadWorkspaceHarnessResults()
+	if len(harnessResults) > 0 {
+		resultList := make([]string, 0, min(len(harnessResults), 10))
+		for _, result := range harnessResults {
+			resultList = append(resultList, fmt.Sprintf("  - %s (prompt=%s, model=%s)", result.ID, result.PromptName, result.Model))
+		}
+		summary = append(summary, fmt.Sprintf("Harness 结果 (%d 个):\n%s", len(harnessResults), strings.Join(resultList, "\n")))
 	}
 
 	// Prompt 注册表
@@ -428,6 +439,20 @@ func (s *Server) parseAndExecuteAIActions(text string) ([]string, []ChatActionRe
 					}
 				}
 			}
+		} else if strings.HasPrefix(line, "ACTION:HARNESS ") {
+			harnessSpec := strings.TrimPrefix(line, "ACTION:HARNESS ")
+			parts := strings.SplitN(strings.TrimSpace(harnessSpec), " ", 2)
+			if len(parts) == 2 {
+				promptName := strings.TrimSpace(parts[0])
+				inputText := strings.TrimSpace(parts[1])
+				result, err := s.runWorkspaceHarness(promptName, inputText)
+				if err != nil {
+					results = append(results, ChatActionResult{Kind: "harness", Summary: "运行 harness 失败: " + err.Error(), Path: promptName})
+				} else {
+				refs = append(refs, fmt.Sprintf("harness:%s", result.ID))
+				results = append(results, ChatActionResult{Kind: "harness", Summary: "Harness 已运行", Path: result.ID, Output: truncateForAI(result.Output, 3000)})
+				}
+			}
 		} else if strings.HasPrefix(line, "ACTION:GOAL ") {
 			title := strings.TrimPrefix(line, "ACTION:GOAL ")
 			title = strings.TrimSpace(title)
@@ -542,6 +567,81 @@ func (s *Server) appendBlackboardFact(kind string, statement string) (Blackboard
 	}
 	_, err = file.Write(append(data, '\n'))
 	return fact, err
+}
+
+type HarnessResult struct {
+	ID         string `json:"id"`
+	PromptName string `json:"promptName"`
+	Input      string `json:"input"`
+	Output     string `json:"output"`
+	Model      string `json:"model"`
+	CreatedAt  int64  `json:"createdAt"`
+}
+
+func (s *Server) harnessPath() string {
+	return filepath.Join(s.workspace, "runtime", "harness-results.jsonl")
+}
+
+func (s *Server) loadWorkspaceHarnessResults() []HarnessResult {
+	path := s.harnessPath()
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return []HarnessResult{}
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return []HarnessResult{}
+	}
+	defer file.Close()
+	var results []HarnessResult
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		var result HarnessResult
+		if json.Unmarshal(scanner.Bytes(), &result) == nil {
+			results = append(results, result)
+		}
+	}
+	return results
+}
+
+func (s *Server) runWorkspaceHarness(promptName string, inputText string) (HarnessResult, error) {
+	prompt, ok := s.findWorkspacePrompt(promptName)
+	if !ok {
+		return HarnessResult{}, fmt.Errorf("prompt 未找到: %s", promptName)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	result, err := app.GenerateProviderMessage(ctx, s.workspace, app.ProviderGenerationRequest{
+		SystemPrompt:         prompt.Content,
+		UserPrompt:           inputText,
+		MaxTokens:            1024,
+		RequiredCapabilities: []string{"chat"},
+		Stream:               false,
+	})
+	if err != nil {
+		return HarnessResult{}, err
+	}
+	harness := HarnessResult{
+		ID:         fmt.Sprintf("harness-%d", time.Now().UnixNano()),
+		PromptName: prompt.Name,
+		Input:      inputText,
+		Output:     result.Text,
+		Model:      result.Model,
+		CreatedAt:  time.Now().Unix(),
+	}
+	runtimeDir := filepath.Join(s.workspace, "runtime")
+	os.MkdirAll(runtimeDir, 0o755)
+	path := s.harnessPath()
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return HarnessResult{}, err
+	}
+	defer file.Close()
+	data, err := json.Marshal(harness)
+	if err != nil {
+		return HarnessResult{}, err
+	}
+	_, err = file.Write(append(data, '\n'))
+	return harness, err
 }
 
 type WorkspacePrompt struct {
