@@ -99,7 +99,9 @@ func (s *Server) handleAIChatPost(w http.ResponseWriter, r *http.Request) {
 - 执行命令：使用 ACTION:EXECUTE <命令> 格式
 - 读取文件：使用 ACTION:READ <文件路径> 格式
 - 写入文件：使用 ACTION:WRITE <文件路径> 格式，后跟文件内容
-- 列出文件：使用 ACTION:LIST 目录
+- 列出文件：使用 ACTION:LIST <目录> 格式
+- 每个动作占单独一行，动作本身必须放在回复末尾。
+- 动作执行结果会自动追加显示，不需要在文字里猜测文件内容或命令输出。
 
 重要：所有回复使用中文。`, s.buildWorkspaceSummary())
 
@@ -264,9 +266,28 @@ func (s *Server) parseAndExecuteAIActions(text string) []string {
 					refs = append(refs, fmt.Sprintf("executed:%s", execution.ID))
 				}
 			}
+		} else if strings.HasPrefix(line, "ACTION:LIST ") {
+			dir := strings.TrimPrefix(line, "ACTION:LIST ")
+			dir = strings.TrimSpace(dir)
+			if dir == "." {
+				dir = ""
+			}
+			files, err := ProjectWorkspaceFiles(s.workspace)
+			if err == nil && len(files) > 0 {
+				listed := []string{}
+				for _, f := range files {
+					if dir == "" || f.Path == dir || strings.HasPrefix(f.Path, strings.TrimSuffix(dir, "/")+"/") {
+						listed = append(listed, f.Path)
+					}
+				}
+				if len(listed) > 0 {
+					refs = append(refs, fmt.Sprintf("listed:%d", len(listed)))
+				}
+			}
 		} else if strings.HasPrefix(line, "ACTION:READ ") {
 			filePath := strings.TrimPrefix(line, "ACTION:READ ")
 			filePath = strings.TrimSpace(filePath)
+			filePath = strings.TrimPrefix(filePath, "./")
 			if filePath != "" {
 				if _, err := ReadWorkspaceFile(s.workspace, filePath); err == nil {
 					refs = append(refs, fmt.Sprintf("read:%s", filePath))

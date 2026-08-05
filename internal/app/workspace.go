@@ -583,17 +583,9 @@ func validateYAMLFile(path string) error {
 
 const defaultProviderConfigYAML = `version: 1
 providers:
-  - name: web-ai-media-editor
-    type: openai_compatible
-    model: deepseek-v4-flash
-    base_url: https://web-ai-media-editor.cn/v1
-    api_key_env: OURO_WEB_AI_MEDIA_EDITOR_KEY
-    timeout_ms: 30000
-    context_window_tokens: 32768
-    capabilities:
-      - chat
-      - code
-      - reasoning
+  - name: offline
+    type: offline
+    model: offline-model
     enabled: true
 `
 
