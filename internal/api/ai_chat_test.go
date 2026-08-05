@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ouroboros/ouroboros/internal/eventlog"
 )
@@ -82,5 +83,29 @@ func TestAppendAIConversationWritesReplayEvents(t *testing.T) {
 	}
 	if events[1].Type != eventlog.EventFact || events[2].Type != eventlog.EventFact {
 		t.Fatalf("expected assistant and action to be facts, got %s and %s", events[1].Type, events[2].Type)
+	}
+}
+
+func TestRunAgentTaskStartsRealExecution(t *testing.T) {
+	workspace := t.TempDir()
+	task, err := (&Server{workspace: workspace}).createAgentTask("operator", "执行真实命令")
+	if err != nil {
+		t.Fatalf("create agent task: %v", err)
+	}
+	server := &Server{workspace: workspace}
+	updated, execution, err := server.runAgentTask(task.ID, "printf agent-ok")
+	if err != nil {
+		t.Fatalf("run agent task: %v", err)
+	}
+	if updated.Status != "running" || updated.ExecutionID != execution.ID {
+		t.Fatalf("unexpected task after run: %#v execution=%#v", updated, execution)
+	}
+	time.Sleep(800 * time.Millisecond)
+	logs, err := ReadExecutionLogs(workspace, execution.ID)
+	if err != nil {
+		t.Fatalf("read execution logs: %v", err)
+	}
+	if !strings.Contains(logs.Content, "agent-ok") {
+		t.Fatalf("expected real execution log, got %q", logs.Content)
 	}
 }

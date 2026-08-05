@@ -140,6 +140,7 @@ func (s *Server) handleAIChatPost(w http.ResponseWriter, r *http.Request) {
 - 运行 harness：使用 ACTION:HARNESS <prompt名称> <输入> 格式
 - 保存 markdown 报告：使用 ACTION:REPORT <文件相对路径> <Markdown正文> 格式（单行）
 - 创建 agent 任务：使用 ACTION:AGENT <角色> <目标> 格式
+- 启动 agent 任务执行：使用 ACTION:AGENT-RUN <任务ID> <命令> 格式
 - 完成 agent 任务：使用 ACTION:AGENT-DONE <任务ID> 格式
 - 每个动作占单独一行，动作本身必须放在回复末尾。
 - 动作执行结果会自动追加显示，不需要在文字里猜测文件内容或命令输出。
@@ -654,6 +655,25 @@ func (s *Server) parseAndExecuteAIActions(text string) ([]string, []ChatActionRe
 					results = append(results, ChatActionResult{Kind: "agent", Summary: "已创建 agent 任务", Path: task.ID, Output: fmt.Sprintf("角色: %s\n目标: %s", task.Role, task.Goal)})
 				}
 			}
+		} else if strings.HasPrefix(line, "ACTION:AGENT-RUN ") {
+			spec := strings.TrimPrefix(line, "ACTION:AGENT-RUN ")
+			parts := strings.SplitN(strings.TrimSpace(spec), " ", 2)
+			if len(parts) == 2 {
+				taskID := strings.TrimSpace(parts[0])
+				command := strings.TrimSpace(parts[1])
+				task, execution, err := s.runAgentTask(taskID, command)
+				if err != nil {
+					results = append(results, ChatActionResult{Kind: "agent", Summary: "启动 agent 执行失败: " + err.Error(), Path: taskID})
+				} else {
+					refs = append(refs, fmt.Sprintf("agent:%s:executed:%s", task.ID, execution.ID))
+					time.Sleep(800 * time.Millisecond)
+					output := ""
+					if logs, logErr := ReadExecutionLogs(s.workspace, execution.ID); logErr == nil {
+						output = truncateForAI(logs.Content, 4000)
+					}
+					results = append(results, ChatActionResult{Kind: "agent", Summary: fmt.Sprintf("已启动 agent 执行 %s", task.ID), Path: execution.LogPath, Output: output})
+				}
+			}
 		} else if strings.HasPrefix(line, "ACTION:AGENT-DONE ") {
 			taskID := strings.TrimPrefix(line, "ACTION:AGENT-DONE ")
 			taskID = strings.TrimSpace(taskID)
@@ -858,12 +878,14 @@ func (s *Server) runWorkspaceHarness(promptName string, inputText string) (Harne
 }
 
 type AgentTaskRecord struct {
-	ID        string `json:"id"`
-	Role      string `json:"role"`
-	Goal      string `json:"goal"`
-	Status    string `json:"status"`
-	CreatedAt int64  `json:"createdAt"`
-	UpdatedAt int64  `json:"updatedAt"`
+	ID          string `json:"id"`
+	Role        string `json:"role"`
+	Goal        string `json:"goal"`
+	Status      string `json:"status"`
+	Command     string `json:"command,omitempty"`
+	ExecutionID string `json:"executionId,omitempty"`
+	CreatedAt   int64  `json:"createdAt"`
+	UpdatedAt   int64  `json:"updatedAt"`
 }
 
 func (s *Server) agentTasksPath() string {
@@ -920,7 +942,6 @@ func (s *Server) completeAgentTask(match string) (AgentTaskRecord, error) {
 	if len(tasks) == 0 {
 		return AgentTaskRecord{}, fmt.Errorf("未找到 agent 任务")
 	}
-	path := s.agentTasksPath()
 	updated := false
 	for i, task := range tasks {
 		if task.ID == match && task.Status != "complete" {
@@ -932,14 +953,8 @@ func (s *Server) completeAgentTask(match string) (AgentTaskRecord, error) {
 	if !updated {
 		return AgentTaskRecord{}, fmt.Errorf("未找到待完成的 agent 任务: %s", match)
 	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
-	if err != nil {
+	if err := s.writeAgentTasks(tasks); err != nil {
 		return AgentTaskRecord{}, err
-	}
-	defer file.Close()
-	for _, task := range tasks {
-		data, _ := json.Marshal(task)
-		file.Write(append(data, '\n'))
 	}
 	for _, task := range tasks {
 		if task.ID == match {
@@ -947,6 +962,49 @@ func (s *Server) completeAgentTask(match string) (AgentTaskRecord, error) {
 		}
 	}
 	return AgentTaskRecord{}, fmt.Errorf("完成的 agent 任务未找到")
+}
+
+func (s *Server) writeAgentTasks(tasks []AgentTaskRecord) error {
+	path := s.agentTasksPath()
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	for _, task := range tasks {
+		data, _ := json.Marshal(task)
+		file.Write(append(data, '\n'))
+	}
+	return nil
+}
+
+func (s *Server) runAgentTask(taskID string, command string) (AgentTaskRecord, ExecutionDTO, error) {
+	taskID = strings.TrimSpace(taskID)
+	command = strings.TrimSpace(command)
+	if taskID == "" || command == "" {
+		return AgentTaskRecord{}, ExecutionDTO{}, fmt.Errorf("agent 任务ID和执行命令不能为空")
+	}
+	tasks := s.loadAgentTasks()
+	for i, task := range tasks {
+		if task.ID == taskID {
+			if task.Status == "complete" {
+				return AgentTaskRecord{}, ExecutionDTO{}, fmt.Errorf("agent 任务已完成")
+			}
+			execution, err := s.StartExecution(ExecutionCreateRequestDTO{Command: "bash", Args: []string{"-c", command}})
+			if err != nil {
+				return AgentTaskRecord{}, ExecutionDTO{}, fmt.Errorf("启动 agent 执行失败: %w", err)
+			}
+			tasks[i].Status = "running"
+			tasks[i].Command = command
+			tasks[i].ExecutionID = execution.ID
+			tasks[i].UpdatedAt = time.Now().Unix()
+			if writeErr := s.writeAgentTasks(tasks); writeErr != nil {
+				return AgentTaskRecord{}, ExecutionDTO{}, writeErr
+			}
+			return tasks[i], execution, nil
+		}
+	}
+	return AgentTaskRecord{}, ExecutionDTO{}, fmt.Errorf("未找到 agent 任务: %s", taskID)
 }
 
 type WorkspacePrompt struct {
