@@ -109,6 +109,7 @@ func (s *Server) handleAIChatPost(w http.ResponseWriter, r *http.Request) {
 - 读取文件：使用 ACTION:READ <文件路径> 格式
 - 写入文件：使用 ACTION:WRITE <文件路径> 格式，后跟文件内容
 - 列出文件：使用 ACTION:LIST <目录> 格式
+- 调用工具动作：使用 ACTION:TOOL <动作ID> <参数> 格式
 - 每个动作占单独一行，动作本身必须放在回复末尾。
 - 动作执行结果会自动追加显示，不需要在文字里猜测文件内容或命令输出。
 
@@ -202,6 +203,16 @@ func (s *Server) buildWorkspaceSummary() string {
 	toolchain, err := ProjectToolchain(s.workspace)
 	if err == nil {
 		summary = append(summary, fmt.Sprintf("工具链: %s (工具就绪: %d)", toolchain.Status, toolchain.ToolsReady))
+		actions := ProjectToolchainActions(toolchain)
+		if len(actions) > 0 {
+			toolList := make([]string, 0, len(actions))
+			for _, action := range actions {
+				toolList = append(toolList, fmt.Sprintf("  - %s (%s, %s)", action.ID, action.Label, action.PackName))
+			}
+			summary = append(summary, fmt.Sprintf("可用工具动作 (%d 个):\n%s", len(actions), strings.Join(toolList, "\n")))
+		} else {
+			summary = append(summary, "可用工具动作: 0 个")
+		}
 	}
 
 	if len(summary) == 0 {
@@ -337,9 +348,9 @@ func (s *Server) parseAndExecuteAIActions(text string) ([]string, []ChatActionRe
 			parts := strings.SplitN(strings.TrimPrefix(line, "ACTION:WRITE "), " ", 2)
 			if len(parts) == 2 {
 				filePath := strings.TrimSpace(parts[0])
-				content := parts[1]
+				fileContent := parts[1]
 				if filePath != "" {
-					if _, err := WriteWorkspaceFile(s.workspace, filePath, content); err != nil {
+					if _, err := WriteWorkspaceFile(s.workspace, filePath, fileContent); err != nil {
 						results = append(results, ChatActionResult{Kind: "write", Summary: "写入失败: " + err.Error(), Path: filePath})
 						continue
 					}
@@ -348,7 +359,37 @@ func (s *Server) parseAndExecuteAIActions(text string) ([]string, []ChatActionRe
 						Kind:    "write",
 						Summary: "已写入文件",
 						Path:    filePath,
-						Output:  truncateForAI(content, 2000),
+						Output:  truncateForAI(fileContent, 2000),
+					})
+				}
+			}
+		} else if strings.HasPrefix(line, "ACTION:TOOL ") {
+			toolSpec := strings.TrimPrefix(line, "ACTION:TOOL ")
+			toolSpec = strings.TrimSpace(toolSpec)
+			parts := strings.SplitN(toolSpec, " ", 2)
+			if len(parts) > 0 {
+				actionID := strings.TrimSpace(parts[0])
+				arguments := ""
+				if len(parts) == 2 {
+					arguments = strings.TrimSpace(parts[1])
+				}
+				if actionID != "" {
+					response, err := s.StartToolchainAction(actionID, ToolchainActionRunRequestDTO{Arguments: arguments})
+					if err != nil {
+						results = append(results, ChatActionResult{Kind: "tool", Summary: "工具动作失败: " + err.Error(), Path: actionID})
+						continue
+					}
+					refs = append(refs, fmt.Sprintf("tool:%s:%s", actionID, response.Execution.ID))
+					time.Sleep(800 * time.Millisecond)
+					output := ""
+					if logs, logErr := ReadExecutionLogs(s.workspace, response.Execution.ID); logErr == nil {
+						output = truncateForAI(logs.Content, 4000)
+					}
+					results = append(results, ChatActionResult{
+						Kind:    "tool",
+						Summary: fmt.Sprintf("已启动工具动作 %s", response.Action.Label),
+						Path:    response.Execution.LogPath,
+						Output:  output,
 					})
 				}
 			}
