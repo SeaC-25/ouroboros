@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ouroboros/ouroboros/internal/app"
+	"github.com/ouroboros/ouroboros/internal/eventlog"
 )
 
 // ChatMessage 持久化的对话消息
@@ -344,6 +345,59 @@ func (s *Server) appendAIConversation(msg ChatMessage) {
 	}
 	file.Write(data)
 	file.WriteString("\n")
+
+	s.appendAIReplayEvents(msg)
+}
+
+func (s *Server) appendAIReplayEvents(msg ChatMessage) {
+	if s.eventStore == nil {
+		return
+	}
+	ctx := context.Background()
+	if msg.Role == "assistant" {
+		payload, _ := json.Marshal(map[string]any{
+			"fact_id":    msg.ID,
+			"kind":       "ai_reply",
+			"statement":  msg.Content,
+			"source":     "ai-agent",
+			"message_id": msg.ID,
+		})
+		if len(payload) > 0 {
+			if _, err := s.eventStore.Append(ctx, eventlog.Event{RunID: "ai-chat", Type: eventlog.EventFact, Payload: payload}); err != nil {
+				log.Printf("Failed to append AI reply replay event: %v", err)
+			}
+		}
+	} else {
+		payload, _ := json.Marshal(map[string]any{
+			"intent_id":  msg.ID,
+			"kind":       "ai_request",
+			"goal":       msg.Content,
+			"source":     "user",
+			"message_id": msg.ID,
+		})
+		if len(payload) > 0 {
+			if _, err := s.eventStore.Append(ctx, eventlog.Event{RunID: "ai-chat", Type: eventlog.EventIntent, Payload: payload}); err != nil {
+				log.Printf("Failed to append AI request replay event: %v", err)
+			}
+		}
+	}
+	for index, action := range msg.Actions {
+		payload, _ := json.Marshal(map[string]any{
+			"fact_id":    fmt.Sprintf("%s:action:%d", msg.ID, index),
+			"kind":       "ai_action_" + action.Kind,
+			"statement":  action.Summary,
+			"source":     "ai-agent",
+			"path":       action.Path,
+			"output":     action.Output,
+			"message_id": msg.ID,
+		})
+		if len(payload) == 0 {
+			continue
+		}
+		if _, err := s.eventStore.Append(ctx, eventlog.Event{RunID: "ai-chat", Type: eventlog.EventFact, Payload: payload}); err != nil {
+			log.Printf("Failed to append AI action replay event: %v", err)
+		}
+	}
 }
 
 // parseAndExecuteAIActions 解析并执行 AI 回复中的动作标记

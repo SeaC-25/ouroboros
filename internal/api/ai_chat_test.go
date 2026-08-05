@@ -1,10 +1,14 @@
 package api
 
 import (
+	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/ouroboros/ouroboros/internal/eventlog"
 )
 
 func TestParseAndExecuteAIActionsRealWorkspaceFiles(t *testing.T) {
@@ -45,4 +49,38 @@ func hasChatActionResult(results []ChatActionResult, kind string) bool {
 		}
 	}
 	return false
+}
+
+func TestAppendAIConversationWritesReplayEvents(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workspace, "replay"), 0o755); err != nil {
+		t.Fatalf("mkdir replay: %v", err)
+	}
+	store, err := eventlog.OpenSQLite(filepath.Join(workspace, "replay", "events.db"))
+	if err != nil {
+		t.Fatalf("open event store: %v", err)
+	}
+	defer store.Close()
+
+	server := &Server{workspace: workspace, eventStore: store}
+	server.appendAIConversation(ChatMessage{ID: "msg-user", Role: "user", Content: "执行真实操作"})
+	server.appendAIConversation(ChatMessage{ID: "msg-ai", Role: "assistant", Content: "已经开始", Actions: []ChatActionResult{{Kind: "list", Summary: "已列出文件"}}})
+
+	events, err := store.Replay(context.Background(), "ai-chat")
+	if err != nil {
+		t.Fatalf("replay ai-chat: %v", err)
+	}
+	if len(events) != 3 {
+		t.Fatalf("expected 3 replay events, got %d", len(events))
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(events[0].Payload, &payload); err != nil {
+		t.Fatalf("decode first payload: %v", err)
+	}
+	if payload["kind"] != "ai_request" || payload["message_id"] != "msg-user" {
+		t.Fatalf("unexpected first event payload: %#v", payload)
+	}
+	if events[1].Type != eventlog.EventFact || events[2].Type != eventlog.EventFact {
+		t.Fatalf("expected assistant and action to be facts, got %s and %s", events[1].Type, events[2].Type)
+	}
 }
