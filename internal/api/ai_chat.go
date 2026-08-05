@@ -154,6 +154,9 @@ func (s *Server) handleAIChatPost(w http.ResponseWriter, r *http.Request) {
 	// 检查 AI 回复中是否有动作标记并执行
 	refs, actionResults := s.parseAndExecuteAIActions(result.Text)
 
+	// 有真实动作结果时，把结果回填给模型做一次后续推理，让 AI 真正基于输出继续工作
+	result.Text, refs, actionResults = s.continueAfterAIActions(result.Text, systemPrompt, refs, actionResults)
+
 	// 用户明确要求创建/推进子目标时，即使模型没输出动作，也创建真实目标文件
 	actionResults = s.applyExplicitGoalFallback(message, actionResults, &refs)
 
@@ -936,6 +939,35 @@ func (s *Server) completeWorkspaceGoal(match string) (WorkspaceGoal, error) {
 		}
 	}
 	return WorkspaceGoal{}, fmt.Errorf("completed goal not found")
+}
+
+func (s *Server) continueAfterAIActions(initialText string, systemPrompt string, refs []string, actionResults []ChatActionResult) (string, []string, []ChatActionResult) {
+	var feedback []string
+	for _, result := range actionResults {
+		if result.Kind == "execute" || result.Kind == "tool" || result.Kind == "read" {
+			if strings.TrimSpace(result.Output) != "" {
+				feedback = append(feedback, fmt.Sprintf("[%s] %s\n%s", result.Kind, result.Summary, result.Output))
+			}
+		}
+	}
+	if len(feedback) == 0 {
+		return initialText, refs, actionResults
+	}
+	followUpPrompt := "这是刚才动作的真实执行结果，请基于这些结果直接给出简洁的结论、下一步建议和需要关注的风险。不要再次输出 ACTION 标记。\n\n" + strings.Join(feedback, "\n\n")
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	followUp, err := app.GenerateProviderMessage(ctx, s.workspace, app.ProviderGenerationRequest{
+		SystemPrompt:         systemPrompt,
+		UserPrompt:           followUpPrompt,
+		MaxTokens:            2048,
+		RequiredCapabilities: []string{"chat"},
+		Stream:               false,
+	})
+	if err != nil {
+		return initialText, refs, actionResults
+	}
+	combined := initialText + "\n\n【动作结果分析】\n" + followUp.Text
+	return combined, refs, actionResults
 }
 
 func (s *Server) applyExplicitGoalFallback(message string, results []ChatActionResult, refs *[]string) []ChatActionResult {
