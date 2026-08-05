@@ -14,21 +14,21 @@ import (
 
 // AIActionResponseDTO 匹配前端 AIActionResponse
 type AIActionResponseDTO struct {
-	ID            string   `json:"id"`
-	Kind          string   `json:"kind"`
-	Label         string   `json:"label"`
-	Status        string   `json:"status"`
-	Description   string   `json:"description,omitempty"`
-	PackID        string   `json:"packId,omitempty"`
-	PackName      string   `json:"packName,omitempty"`
-	Command       []string `json:"command,omitempty"`
-	CommandText   string   `json:"commandText,omitempty"`
-	RunTimeoutMs  int      `json:"runTimeoutMs,omitempty"`
-	ManifestPath  string   `json:"manifestPath,omitempty"`
-	Capabilities  []string `json:"capabilities,omitempty"`
-	Runner        string   `json:"runner,omitempty"`
-	Parser        string   `json:"parser,omitempty"`
-	ArgumentHint  string   `json:"argumentHint,omitempty"`
+	ID           string   `json:"id"`
+	Kind         string   `json:"kind"`
+	Label        string   `json:"label"`
+	Status       string   `json:"status"`
+	Description  string   `json:"description,omitempty"`
+	PackID       string   `json:"packId,omitempty"`
+	PackName     string   `json:"packName,omitempty"`
+	Command      []string `json:"command,omitempty"`
+	CommandText  string   `json:"commandText,omitempty"`
+	RunTimeoutMs int      `json:"runTimeoutMs,omitempty"`
+	ManifestPath string   `json:"manifestPath,omitempty"`
+	Capabilities []string `json:"capabilities,omitempty"`
+	Runner       string   `json:"runner,omitempty"`
+	Parser       string   `json:"parser,omitempty"`
+	ArgumentHint string   `json:"argumentHint,omitempty"`
 }
 
 // AIActionsListResponse 匹配前端 AIActionsResponsePayload
@@ -38,8 +38,8 @@ type AIActionsListResponse struct {
 
 // AIActionRunRequestDTO 匹配前端 AIActionRunRequest
 type AIActionRunRequestDTO struct {
-	ActionID  string `json:"actionId"`
-	Input     *struct {
+	ActionID string `json:"actionId"`
+	Input    *struct {
 		Title          string `json:"title,omitempty"`
 		Goal           string `json:"goal,omitempty"`
 		Kind           string `json:"kind,omitempty"`
@@ -54,11 +54,12 @@ type AIActionRunRequestDTO struct {
 
 // AIActionResultDTO 匹配前端 AIActionResult
 type AIActionResultDTO struct {
-	Kind          string `json:"kind"`
-	Operation     string `json:"operation,omitempty"`
-	Summary       string `json:"summary,omitempty"`
+	Kind            string `json:"kind"`
+	Operation       string `json:"operation,omitempty"`
+	Summary         string `json:"summary,omitempty"`
 	OrchestratorRun *struct {
 		ID             string `json:"id"`
+		ExecutionID    string `json:"executionId,omitempty"`
 		Title          string `json:"title"`
 		Goal           string `json:"goal"`
 		Kind           string `json:"kind"`
@@ -74,8 +75,8 @@ type AIActionResultDTO struct {
 
 // AIActionRunResponseDTO 匹配前端 AIActionRunResponse
 type AIActionRunResponseDTO struct {
-	Action    AIActionResponseDTO `json:"action"`
-	Result    AIActionResultDTO   `json:"result"`
+	Action AIActionResponseDTO `json:"action"`
+	Result AIActionResultDTO   `json:"result"`
 }
 
 // handleAIActions 返回可用的 AI 动作列表
@@ -86,11 +87,11 @@ func (s *Server) handleAIActions(w http.ResponseWriter, r *http.Request) {
 	}
 	actions := []AIActionResponseDTO{
 		{
-			ID:          "orchestrator.run",
-			Kind:        "orchestrator",
-			Label:       "AI 编排执行",
-			Status:      "ready",
-			Description: "使用 AI 模型分析目标并生成执行计划，然后自动运行",
+			ID:           "orchestrator.run",
+			Kind:         "orchestrator",
+			Label:        "AI 编排执行",
+			Status:       "ready",
+			Description:  "使用 AI 模型分析目标并生成执行计划，然后自动运行",
 			Capabilities: []string{"chat", "reasoning"},
 		},
 	}
@@ -154,23 +155,49 @@ func (s *Server) handleAIActionRun(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().Unix()
 	runID := fmt.Sprintf("orchestrator-run-%d", now)
 
+	execution := ExecutionDTO{}
+	started := false
+	if strings.TrimSpace(input.Command) != "" {
+		if ex, execErr := s.StartExecution(ExecutionCreateRequestDTO{Command: "bash", Args: []string{"-c", input.Command}}); execErr == nil {
+			execution = ex
+			started = true
+		} else {
+			log.Printf("orchestrator.run failed to start execution: %v", execErr)
+		}
+	}
+
 	action := AIActionResponseDTO{
-		ID:          "orchestrator.run",
-		Kind:        "orchestrator",
-		Label:       "AI 编排执行",
-		Status:      "completed",
-		Description: fmt.Sprintf("已使用 %s 模型生成执行计划", result.Model),
+		ID:           "orchestrator.run",
+		Kind:         "orchestrator",
+		Label:        "AI 编排执行",
+		Status:       "started",
+		Description:  fmt.Sprintf("已使用 %s 模型生成执行计划并启动真实执行", result.Model),
 		Capabilities: []string{"chat", "reasoning"},
+	}
+	if !started {
+		action.Status = "failed"
+		action.Description = fmt.Sprintf("已使用 %s 模型生成执行计划，但真实执行启动失败", result.Model)
+	}
+	status := "started"
+	if !started {
+		status = "failed"
+	}
+	summary := result.Text
+	operation := "ai_generate"
+	if started {
+		summary = result.Text + "\n\n已启动真实执行: " + execution.ID
+		operation = "ai_generate_execute"
 	}
 
 	respondJSON(w, http.StatusOK, AIActionRunResponseDTO{
 		Action: action,
 		Result: AIActionResultDTO{
 			Kind:      "orchestrator_run",
-			Operation: "ai_generate",
-			Summary:   result.Text,
+			Operation: operation,
+			Summary:   summary,
 			OrchestratorRun: &struct {
 				ID             string `json:"id"`
+				ExecutionID    string `json:"executionId,omitempty"`
 				Title          string `json:"title"`
 				Goal           string `json:"goal"`
 				Kind           string `json:"kind"`
@@ -183,6 +210,7 @@ func (s *Server) handleAIActionRun(w http.ResponseWriter, r *http.Request) {
 				CreatedAt      int64  `json:"createdAt"`
 			}{
 				ID:             runID,
+				ExecutionID:    execution.ID,
 				Title:          input.Title,
 				Goal:           input.Goal,
 				Kind:           input.Kind,
@@ -191,7 +219,7 @@ func (s *Server) handleAIActionRun(w http.ResponseWriter, r *http.Request) {
 				Priority:       input.Priority,
 				Source:         input.Source,
 				FilePath:       input.FilePath,
-				Status:         "completed",
+				Status:         status,
 				CreatedAt:      now,
 			},
 		},
