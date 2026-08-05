@@ -110,6 +110,8 @@ func (s *Server) handleAIChatPost(w http.ResponseWriter, r *http.Request) {
 - 写入文件：使用 ACTION:WRITE <文件路径> 格式，后跟文件内容
 - 列出文件：使用 ACTION:LIST <目录> 格式
 - 调用工具动作：使用 ACTION:TOOL <动作ID> <参数> 格式
+- 创建子目标：使用 ACTION:GOAL <标题> 格式
+- 标记子目标完成：使用 ACTION:GOAL-DONE <标题> 格式
 - 每个动作占单独一行，动作本身必须放在回复末尾。
 - 动作执行结果会自动追加显示，不需要在文字里猜测文件内容或命令输出。
 
@@ -146,6 +148,9 @@ func (s *Server) handleAIChatPost(w http.ResponseWriter, r *http.Request) {
 	// 检查 AI 回复中是否有动作标记并执行
 	refs, actionResults := s.parseAndExecuteAIActions(result.Text)
 
+	// 用户明确要求创建/推进子目标时，即使模型没输出动作，也创建真实目标文件
+	actionResults = s.applyExplicitGoalFallback(message, actionResults, &refs)
+
 	// 持久化 AI 回复
 	assistantMsg := ChatMessage{
 		ID:        fmt.Sprintf("msg-%d", time.Now().Unix()),
@@ -177,6 +182,16 @@ func (s *Server) buildWorkspaceSummary() string {
 	provider, err := ProjectProvider(s.workspace)
 	if err == nil {
 		summary = append(summary, fmt.Sprintf("模型: %s (Provider: %s, 状态: %s)", provider.Model, provider.Name, provider.Status))
+	}
+
+	// 子目标
+	goals := s.loadWorkspaceGoals()
+	if len(goals) > 0 {
+		goalList := make([]string, 0, len(goals))
+		for _, goal := range goals {
+			goalList = append(goalList, fmt.Sprintf("  - %s: %s (状态: %s)", goal.ID[:min(8, len(goal.ID))], goal.Title, goal.Status))
+		}
+		summary = append(summary, fmt.Sprintf("子目标 (%d 个):\n%s", len(goals), strings.Join(goalList, "\n")))
 	}
 
 	// 文件列表
@@ -363,6 +378,30 @@ func (s *Server) parseAndExecuteAIActions(text string) ([]string, []ChatActionRe
 					})
 				}
 			}
+		} else if strings.HasPrefix(line, "ACTION:GOAL ") {
+			title := strings.TrimPrefix(line, "ACTION:GOAL ")
+			title = strings.TrimSpace(title)
+			if title != "" {
+				goal, err := s.createWorkspaceGoal(title)
+				if err != nil {
+					results = append(results, ChatActionResult{Kind: "goal", Summary: "创建子目标失败: " + err.Error()})
+				} else {
+					refs = append(refs, fmt.Sprintf("goal:%s:%s", goal.ID, goal.Title))
+					results = append(results, ChatActionResult{Kind: "goal", Summary: "已创建子目标", Path: goal.ID, Output: truncateForAI(goal.Title, 500)})
+				}
+			}
+		} else if strings.HasPrefix(line, "ACTION:GOAL-DONE ") {
+			title := strings.TrimPrefix(line, "ACTION:GOAL-DONE ")
+			title = strings.TrimSpace(title)
+			if title != "" {
+				goal, err := s.completeWorkspaceGoal(title)
+				if err != nil {
+					results = append(results, ChatActionResult{Kind: "goal", Summary: "推进子目标失败: " + err.Error()})
+				} else {
+					refs = append(refs, fmt.Sprintf("goal-done:%s", goal.ID))
+					results = append(results, ChatActionResult{Kind: "goal", Summary: "子目标已完成", Path: goal.ID, Output: goal.Title})
+				}
+			}
 		} else if strings.HasPrefix(line, "ACTION:TOOL ") {
 			toolSpec := strings.TrimPrefix(line, "ACTION:TOOL ")
 			toolSpec = strings.TrimSpace(toolSpec)
@@ -396,6 +435,138 @@ func (s *Server) parseAndExecuteAIActions(text string) ([]string, []ChatActionRe
 		}
 	}
 	return refs, results
+}
+
+type WorkspaceGoal struct {
+	ID        string `json:"id"`
+	Title     string `json:"title"`
+	Status    string `json:"status"`
+	CreatedAt int64  `json:"createdAt"`
+	UpdatedAt int64  `json:"updatedAt"`
+}
+
+func (s *Server) workspaceGoalPath() string {
+	return filepath.Join(s.workspace, "runtime", "goals.jsonl")
+}
+
+func (s *Server) loadWorkspaceGoals() []WorkspaceGoal {
+	path := s.workspaceGoalPath()
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return []WorkspaceGoal{}
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return []WorkspaceGoal{}
+	}
+	defer file.Close()
+	var goals []WorkspaceGoal
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		var goal WorkspaceGoal
+		if json.Unmarshal(scanner.Bytes(), &goal) == nil {
+			goals = append(goals, goal)
+		}
+	}
+	return goals
+}
+
+func (s *Server) createWorkspaceGoal(title string) (WorkspaceGoal, error) {
+	runtimeDir := filepath.Join(s.workspace, "runtime")
+	os.MkdirAll(runtimeDir, 0o755)
+	path := s.workspaceGoalPath()
+	now := time.Now().Unix()
+	goal := WorkspaceGoal{ID: fmt.Sprintf("goal-%d", now), Title: title, Status: "open", CreatedAt: now, UpdatedAt: now}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return WorkspaceGoal{}, err
+	}
+	defer file.Close()
+	data, err := json.Marshal(goal)
+	if err != nil {
+		return WorkspaceGoal{}, err
+	}
+	_, err = file.Write(append(data, '\n'))
+	return goal, err
+}
+
+func (s *Server) completeWorkspaceGoal(match string) (WorkspaceGoal, error) {
+	goals := s.loadWorkspaceGoals()
+	path := s.workspaceGoalPath()
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return WorkspaceGoal{}, fmt.Errorf("goals file missing")
+	}
+	matched := false
+	now := time.Now().Unix()
+	for i, goal := range goals {
+		if strings.TrimSpace(goal.Title) == strings.TrimSpace(match) || goal.ID == match {
+			if goal.Status != "completed" {
+				goals[i].Status = "completed"
+				goals[i].UpdatedAt = now
+				matched = true
+			}
+		}
+	}
+	if !matched {
+		return WorkspaceGoal{}, fmt.Errorf("子目标未找到: %s", match)
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return WorkspaceGoal{}, err
+	}
+	defer file.Close()
+	for _, goal := range goals {
+		data, _ := json.Marshal(goal)
+		file.Write(append(data, '\n'))
+	}
+	for _, goal := range goals {
+		if goal.Status == "completed" && (goal.Title == match || goal.ID == match) {
+			return goal, nil
+		}
+	}
+	return WorkspaceGoal{}, fmt.Errorf("completed goal not found")
+}
+
+func (s *Server) applyExplicitGoalFallback(message string, results []ChatActionResult, refs *[]string) []ChatActionResult {
+	lower := strings.ToLower(message)
+	if !strings.Contains(lower, "子目标") && !strings.Contains(lower, "goal") {
+		return results
+	}
+	// Already has goal action
+	for _, result := range results {
+		if result.Kind == "goal" {
+			return results
+		}
+	}
+	if strings.Contains(lower, "完成") || strings.Contains(lower, "推进") {
+		title := strings.TrimSpace(strings.TrimPrefix(message, "完成子目标"))
+		title = strings.TrimSpace(strings.TrimPrefix(title, "推进子目标"))
+		title = strings.TrimSpace(strings.Trim(title, "：:。"))
+		if title != "" {
+			goal, err := s.completeWorkspaceGoal(title)
+			if err == nil {
+				*refs = append(*refs, fmt.Sprintf("goal-done:%s", goal.ID))
+				return append(results, ChatActionResult{Kind: "goal", Summary: "子目标已完成", Path: goal.ID, Output: goal.Title})
+			}
+		}
+	}
+	// Default creation: parse after keywords like "创建子目标：" or trailing suffix
+	title := message
+	for _, prefix := range []string{"创建子目标", "新建子目标", "添加子目标", "子目标"} {
+		if idx := strings.Index(title, prefix); idx >= 0 {
+			title = strings.TrimSpace(strings.TrimPrefix(title[idx+len(prefix):], "："))
+			title = strings.TrimSpace(strings.Trim(title, "：:。为"))
+			break
+		}
+	}
+	if title == "" {
+		return results
+	}
+	goal, err := s.createWorkspaceGoal(title)
+	if err != nil {
+		return append(results, ChatActionResult{Kind: "goal", Summary: "创建子目标失败: " + err.Error()})
+	}
+	*refs = append(*refs, fmt.Sprintf("goal:%s:%s", goal.ID, goal.Title))
+	return append(results, ChatActionResult{Kind: "goal", Summary: "已创建子目标", Path: goal.ID, Output: goal.Title})
 }
 
 func truncateForAI(value string, max int) string {
