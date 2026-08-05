@@ -115,6 +115,7 @@ func (s *Server) handleAIChatPost(w http.ResponseWriter, r *http.Request) {
 - 记录黑板发现：使用 ACTION:BLACKBOARD <发现内容> 格式
 - 保存 prompt：使用 ACTION:PROMPT-SAVE <名称> <内容> 格式
 - 运行 harness：使用 ACTION:HARNESS <prompt名称> <输入> 格式
+- 保存 markdown 报告：使用 ACTION:REPORT <文件相对路径> <标题> 格式，后续行作为正文
 - 每个动作占单独一行，动作本身必须放在回复末尾。
 - 动作执行结果会自动追加显示，不需要在文字里猜测文件内容或命令输出。
 
@@ -185,6 +186,16 @@ func (s *Server) buildWorkspaceSummary() string {
 	provider, err := ProjectProvider(s.workspace)
 	if err == nil {
 		summary = append(summary, fmt.Sprintf("模型: %s (Provider: %s, 状态: %s)", provider.Model, provider.Name, provider.Status))
+	}
+
+	// 报告文件
+	reports, _ := ProjectReports(s.workspace)
+	if len(reports) > 0 {
+		reportList := make([]string, 0, min(len(reports), 10))
+		for _, rep := range reports {
+			reportList = append(reportList, fmt.Sprintf("  - %s: %s (%s)", rep.ID, rep.Title, rep.Status))
+		}
+		summary = append(summary, fmt.Sprintf("报告 (%d 个):\n%s", len(reports), strings.Join(reportList, "\n")))
 	}
 
 	// Harness 结果摘要
