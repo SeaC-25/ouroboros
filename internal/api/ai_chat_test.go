@@ -109,3 +109,22 @@ func TestRunAgentTaskStartsRealExecution(t *testing.T) {
 		t.Fatalf("expected real execution log, got %q", logs.Content)
 	}
 }
+
+func TestParseReportGenerateSpec(t *testing.T) {
+	title, goal := parseReportGenerateSpec("当前工作区状态报告; 汇总真实执行与黑板状态")
+	if title != "当前工作区状态报告" || goal != "汇总真实执行与黑板状态" {
+		t.Fatalf("unexpected report generate spec: title=%q goal=%q", title, goal)
+	}
+	title, goal = parseReportGenerateSpec("仅标题")
+	if title != "仅标题" || goal != "" {
+		t.Fatalf("unexpected bare report title: title=%q goal=%q", title, goal)
+	}
+}
+
+func TestCleanGeneratedReportMarkdownStripsReasoningPreamble(t *testing.T) {
+	input := "用户要求我生成报告，让我先分析工作区。\n\n## 摘要\n\n真实状态。\n"
+	cleaned := cleanGeneratedReportMarkdown(input)
+	if strings.HasPrefix(cleaned, "用户要求我") || !strings.HasPrefix(cleaned, "## 摘要") {
+		t.Fatalf("expected preamble stripped, got %q", cleaned)
+	}
+}

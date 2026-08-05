@@ -52,10 +52,14 @@ type ChatPostResponse struct {
 
 // ChatActionResult 动作执行后的结构化结果
 type ChatActionResult struct {
-	Kind    string `json:"kind"`
-	Summary string `json:"summary"`
-	Path    string `json:"path,omitempty"`
-	Output  string `json:"output,omitempty"`
+	Kind        string `json:"kind"`
+	Summary     string `json:"summary"`
+	Path        string `json:"path,omitempty"`
+	Output      string `json:"output,omitempty"`
+	Diff        string `json:"diff,omitempty"`
+	Status      string `json:"status,omitempty"`
+	ExitCode    *int   `json:"exitCode,omitempty"`
+	ExecutionID string `json:"executionId,omitempty"`
 }
 
 func (s *Server) handleAIChat(w http.ResponseWriter, r *http.Request) {
@@ -138,7 +142,10 @@ func (s *Server) handleAIChatPost(w http.ResponseWriter, r *http.Request) {
 - 记录黑板发现：使用 ACTION:BLACKBOARD <发现内容> 格式
 - 保存 prompt：使用 ACTION:PROMPT-SAVE <名称> <内容> 格式
 - 运行 harness：使用 ACTION:HARNESS <prompt名称> <输入> 格式
+- 启动多智能体调度：使用 ACTION:SWARM <目标> 格式，可带 ;角色:命令，例如 ACTION:SWARM 目标;Planner:echo plan;Operator:echo run
+- 失败恢复：使用 ACTION:RETRY <执行ID> <可选原因> 格式
 - 保存 markdown 报告：使用 ACTION:REPORT <文件相对路径> <Markdown正文> 格式（单行）
+- 自动生成真实报告：使用 ACTION:REPORT-GENERATE <标题>; <补充目标> 格式，后端基于工作区真实状态调用模型生成 Markdown 报告并落盘
 - 创建 agent 任务：使用 ACTION:AGENT <角色> <目标> 格式
 - 启动 agent 任务执行：使用 ACTION:AGENT-RUN <任务ID> <命令> 格式
 - 完成 agent 任务：使用 ACTION:AGENT-DONE <任务ID> 格式
@@ -420,6 +427,22 @@ func (s *Server) appendAIReplayEvents(msg ChatMessage) {
 	}
 }
 
+func (s *Server) waitForExecution(executionID string, timeout time.Duration) ExecutionDTO {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		execution, err := ReadExecution(s.workspace, executionID)
+		if err == nil && execution.Status != "running" && execution.Status != "queued" {
+			return execution
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	execution, err := ReadExecution(s.workspace, executionID)
+	if err != nil {
+		return ExecutionDTO{ID: executionID, Status: "unknown"}
+	}
+	return execution
+}
+
 // parseAndExecuteAIActions 解析并执行 AI 回复中的动作标记
 func (s *Server) parseAndExecuteAIActions(text string) ([]string, []ChatActionResult) {
 	var refs []string
@@ -440,17 +463,19 @@ func (s *Server) parseAndExecuteAIActions(text string) ([]string, []ChatActionRe
 					continue
 				}
 				refs = append(refs, fmt.Sprintf("executed:%s", execution.ID))
-				// 给后台命令一点时间写出日志，然后回填已捕获输出
-				time.Sleep(800 * time.Millisecond)
+				execution = s.waitForExecution(execution.ID, 3*time.Second)
 				output := ""
 				if logs, logErr := ReadExecutionLogs(s.workspace, execution.ID); logErr == nil {
 					output = truncateForAI(logs.Content, 4000)
 				}
 				results = append(results, ChatActionResult{
-					Kind:    "execute",
-					Summary: fmt.Sprintf("已执行命令，执行记录 %s", execution.ID),
-					Path:    execution.LogPath,
-					Output:  output,
+					Kind:        "execute",
+					Summary:     fmt.Sprintf("已执行命令，执行记录 %s（状态: %s）", execution.ID, execution.Status),
+					Path:        execution.LogPath,
+					Output:      output,
+					Status:      execution.Status,
+					ExitCode:    execution.ExitCode,
+					ExecutionID: execution.ID,
 				})
 			}
 		} else if strings.HasPrefix(line, "ACTION:LIST ") {
@@ -501,6 +526,10 @@ func (s *Server) parseAndExecuteAIActions(text string) ([]string, []ChatActionRe
 				filePath := strings.TrimSpace(parts[0])
 				fileContent := parts[1]
 				if filePath != "" {
+					oldContent := ""
+					if existing, readErr := ReadWorkspaceFile(s.workspace, filePath); readErr == nil {
+						oldContent = existing.Content
+					}
 					if _, err := WriteWorkspaceFile(s.workspace, filePath, fileContent); err != nil {
 						results = append(results, ChatActionResult{Kind: "write", Summary: "写入失败: " + err.Error(), Path: filePath})
 						continue
@@ -511,6 +540,7 @@ func (s *Server) parseAndExecuteAIActions(text string) ([]string, []ChatActionRe
 						Summary: "已写入文件",
 						Path:    filePath,
 						Output:  truncateForAI(fileContent, 2000),
+						Diff:    unifiedLineDiff(filePath, oldContent, fileContent),
 					})
 				}
 			}
@@ -584,6 +614,22 @@ func (s *Server) parseAndExecuteAIActions(text string) ([]string, []ChatActionRe
 					}
 				}
 			}
+		} else if strings.HasPrefix(line, "ACTION:REPORT-GENERATE ") {
+			spec := strings.TrimSpace(strings.TrimPrefix(line, "ACTION:REPORT-GENERATE "))
+			title, goal := parseReportGenerateSpec(spec)
+			report, err := s.generateWorkspaceReport(ReportGenerateInput{Title: title, Goal: goal})
+			if err != nil {
+				results = append(results, ChatActionResult{Kind: "report_generate", Summary: "AI 报告生成失败: " + err.Error(), Path: title})
+			} else {
+				refs = append(refs, fmt.Sprintf("report:%s", report.RelativePath))
+				results = append(results, ChatActionResult{
+					Kind:    "report_generate",
+					Summary: fmt.Sprintf("已生成报告 %s（模型: %s）", report.RelativePath, report.Model),
+					Path:    report.RelativePath,
+					Output:  truncateForAI(report.Text, 4000),
+					Diff:    report.Diff,
+				})
+			}
 		} else if strings.HasPrefix(line, "ACTION:REPORT ") {
 			reportSpec := strings.TrimPrefix(line, "ACTION:REPORT ")
 			parts := strings.SplitN(strings.TrimSpace(reportSpec), " ", 2)
@@ -627,6 +673,101 @@ func (s *Server) parseAndExecuteAIActions(text string) ([]string, []ChatActionRe
 					}
 				}
 			}
+		} else if strings.HasPrefix(line, "ACTION:RETRY ") {
+			retrySpec := strings.TrimPrefix(line, "ACTION:RETRY ")
+			parts := strings.SplitN(strings.TrimSpace(retrySpec), " ", 2)
+			if len(parts) > 0 {
+				executionID := strings.TrimSpace(parts[0])
+				reason := ""
+				if len(parts) == 2 {
+					reason = strings.TrimSpace(parts[1])
+				}
+				if executionID != "" {
+					original, retry, _, err := s.recoverFailedExecution(executionID, reason, "")
+					if err != nil {
+						results = append(results, ChatActionResult{Kind: "retry", Summary: "失败恢复失败: " + err.Error(), Path: executionID})
+					} else {
+						retry = s.waitForExecution(retry.ID, 3*time.Second)
+						output := ""
+						if logs, logErr := ReadExecutionLogs(s.workspace, retry.ID); logErr == nil {
+							output = truncateForAI(logs.Content, 4000)
+						}
+						refs = append(refs, fmt.Sprintf("retry:%s:%s", original.ID, retry.ID))
+						results = append(results, ChatActionResult{
+							Kind:     "retry",
+							Summary:  fmt.Sprintf("已启动失败恢复，原始执行 %s -> 重试执行 %s（状态: %s）", original.ID, retry.ID, retry.Status),
+							Path:     retry.LogPath,
+							Output:   output,
+							Status:   retry.Status,
+							ExitCode: retry.ExitCode,
+						})
+					}
+				}
+			}
+		} else if strings.HasPrefix(line, "ACTION:SWARM ") {
+			swarmSpec := strings.TrimPrefix(line, "ACTION:SWARM ")
+			parsedParts := strings.SplitN(strings.TrimSpace(swarmSpec), ";", -1)
+			if len(parsedParts) > 0 {
+				goal := strings.TrimSpace(parsedParts[0])
+				roles := []string{}
+				commands := []string{}
+				for _, part := range parsedParts[1:] {
+					part = strings.TrimSpace(part)
+					if part == "" {
+						continue
+					}
+					if strings.Contains(part, ":") {
+						roleCommand := strings.SplitN(part, ":", 2)
+						roles = append(roles, strings.TrimSpace(roleCommand[0]))
+						commands = append(commands, strings.TrimSpace(roleCommand[1]))
+					} else {
+						roles = append(roles, part)
+						commands = append(commands, "echo "+part+"-done")
+					}
+				}
+				if goal != "" {
+					rec := &responseRecorder{}
+					s.runSwarmWorkflow(rec, "swarm.run", &struct {
+						Title          string   `json:"title,omitempty"`
+						Goal           string   `json:"goal,omitempty"`
+						Kind           string   `json:"kind,omitempty"`
+						Command        string   `json:"command,omitempty"`
+						ExpectedResult string   `json:"expectedResult,omitempty"`
+						Priority       string   `json:"priority,omitempty"`
+						Source         string   `json:"source,omitempty"`
+						FilePath       string   `json:"filePath,omitempty"`
+						Content        string   `json:"content,omitempty"`
+						Role           string   `json:"role,omitempty"`
+						PromptName     string   `json:"promptName,omitempty"`
+						PromptContent  string   `json:"promptContent,omitempty"`
+						InputText      string   `json:"inputText,omitempty"`
+						HarnessCaseId  string   `json:"harnessCaseId,omitempty"`
+						Roles          []string `json:"roles,omitempty"`
+						Commands       []string `json:"commands,omitempty"`
+						Agents         []string `json:"agents,omitempty"`
+						ExecutionID    string   `json:"executionId,omitempty"`
+						Reason         string   `json:"reason,omitempty"`
+					}{Goal: goal, Roles: roles, Commands: commands})
+					if rec.body != "" {
+						var parsed SwarmActionPayload
+						if json.Unmarshal([]byte(rec.body), &parsed) == nil && parsed.Result.SwarmRun != nil {
+							var lines []string
+							lines = append(lines, fmt.Sprintf("调度 ID: %s", parsed.Result.SwarmRun.ID))
+							lines = append(lines, fmt.Sprintf("状态: %s", parsed.Result.SwarmRun.Status))
+							for _, task := range parsed.Result.SwarmRun.Tasks {
+								lines = append(lines, fmt.Sprintf("Agent %s (%s): %s", task.ID, task.Role, task.Status))
+							}
+							for _, execution := range parsed.Result.SwarmRun.Executions {
+								lines = append(lines, fmt.Sprintf("执行 %s: %s", execution.ID, execution.LogPath))
+							}
+							refs = append(refs, fmt.Sprintf("swarm:%s", parsed.Result.SwarmRun.ID))
+							results = append(results, ChatActionResult{Kind: "swarm", Summary: "已启动多智能体调度", Path: parsed.Result.SwarmRun.ID, Output: strings.Join(lines, "\n")})
+						} else {
+							results = append(results, ChatActionResult{Kind: "swarm", Summary: rec.body, Path: goal})
+						}
+					}
+				}
+			}
 		} else if strings.HasPrefix(line, "ACTION:HARNESS ") {
 			harnessSpec := strings.TrimPrefix(line, "ACTION:HARNESS ")
 			parts := strings.SplitN(strings.TrimSpace(harnessSpec), " ", 2)
@@ -666,12 +807,12 @@ func (s *Server) parseAndExecuteAIActions(text string) ([]string, []ChatActionRe
 					results = append(results, ChatActionResult{Kind: "agent", Summary: "启动 agent 执行失败: " + err.Error(), Path: taskID})
 				} else {
 					refs = append(refs, fmt.Sprintf("agent:%s:executed:%s", task.ID, execution.ID))
-					time.Sleep(800 * time.Millisecond)
+					execution = s.waitForExecution(execution.ID, 3*time.Second)
 					output := ""
 					if logs, logErr := ReadExecutionLogs(s.workspace, execution.ID); logErr == nil {
 						output = truncateForAI(logs.Content, 4000)
 					}
-					results = append(results, ChatActionResult{Kind: "agent", Summary: fmt.Sprintf("已启动 agent 执行 %s", task.ID), Path: execution.LogPath, Output: output})
+					results = append(results, ChatActionResult{Kind: "agent", Summary: fmt.Sprintf("已启动 agent 执行 %s（状态: %s）", task.ID, execution.Status), Path: execution.LogPath, Output: output, Status: execution.Status, ExitCode: execution.ExitCode, ExecutionID: execution.ID})
 				}
 			}
 		} else if strings.HasPrefix(line, "ACTION:AGENT-DONE ") {
@@ -727,22 +868,37 @@ func (s *Server) parseAndExecuteAIActions(text string) ([]string, []ChatActionRe
 						continue
 					}
 					refs = append(refs, fmt.Sprintf("tool:%s:%s", actionID, response.Execution.ID))
-					time.Sleep(800 * time.Millisecond)
+					execution := s.waitForExecution(response.Execution.ID, 3*time.Second)
 					output := ""
 					if logs, logErr := ReadExecutionLogs(s.workspace, response.Execution.ID); logErr == nil {
 						output = truncateForAI(logs.Content, 4000)
 					}
 					results = append(results, ChatActionResult{
-						Kind:    "tool",
-						Summary: fmt.Sprintf("已启动工具动作 %s", response.Action.Label),
-						Path:    response.Execution.LogPath,
-						Output:  output,
+						Kind:        "tool",
+						Summary:     fmt.Sprintf("已启动工具动作 %s（状态: %s）", response.Action.Label, execution.Status),
+						Path:        execution.LogPath,
+						Output:      output,
+						Status:      execution.Status,
+						ExitCode:    execution.ExitCode,
+						ExecutionID: execution.ID,
 					})
 				}
 			}
 		}
 	}
 	return refs, results
+}
+
+func parseReportGenerateSpec(spec string) (string, string) {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return "", ""
+	}
+	if !strings.Contains(spec, ";") {
+		return spec, ""
+	}
+	parts := strings.SplitN(spec, ";", 2)
+	return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
 }
 
 type BlackboardFact struct {
@@ -884,6 +1040,7 @@ type AgentTaskRecord struct {
 	Status      string `json:"status"`
 	Command     string `json:"command,omitempty"`
 	ExecutionID string `json:"executionId,omitempty"`
+	WorkerID    string `json:"workerId,omitempty"`
 	CreatedAt   int64  `json:"createdAt"`
 	UpdatedAt   int64  `json:"updatedAt"`
 }
@@ -922,7 +1079,7 @@ func (s *Server) createAgentTask(role string, goal string) (AgentTaskRecord, err
 	runtimeDir := filepath.Join(s.workspace, "runtime")
 	os.MkdirAll(runtimeDir, 0o755)
 	now := time.Now().Unix()
-	task := AgentTaskRecord{ID: fmt.Sprintf("agent-%d", now), Role: role, Goal: goal, Status: "queued", CreatedAt: now, UpdatedAt: now}
+	task := AgentTaskRecord{ID: fmt.Sprintf("agent-%d", time.Now().UnixNano()), Role: role, Goal: goal, Status: "queued", CreatedAt: now, UpdatedAt: now}
 	file, err := os.OpenFile(s.agentTasksPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return AgentTaskRecord{}, err
@@ -956,6 +1113,9 @@ func (s *Server) completeAgentTask(match string) (AgentTaskRecord, error) {
 	if err := s.writeAgentTasks(tasks); err != nil {
 		return AgentTaskRecord{}, err
 	}
+	if _, workerErr := app.UpdateRuntimeWorkerHeartbeat(s.workspace, "agent-worker-"+match, app.RuntimeWorkerHeartbeatOptions{Status: "available"}); workerErr != nil {
+		log.Printf("Failed to mark agent worker available: %v", workerErr)
+	}
 	for _, task := range tasks {
 		if task.ID == match {
 			return task, nil
@@ -978,6 +1138,24 @@ func (s *Server) writeAgentTasks(tasks []AgentTaskRecord) error {
 	return nil
 }
 
+func (s *Server) markAgentTaskRunning(taskID string, command string, executionID string) error {
+	tasks := s.loadAgentTasks()
+	updated := false
+	for i := range tasks {
+		if tasks[i].ID == taskID && tasks[i].Status != "complete" {
+			tasks[i].Status = "running"
+			tasks[i].Command = command
+			tasks[i].ExecutionID = executionID
+			tasks[i].UpdatedAt = time.Now().Unix()
+			updated = true
+		}
+	}
+	if !updated {
+		return fmt.Errorf("未找到待运行的 agent 任务: %s", taskID)
+	}
+	return s.writeAgentTasks(tasks)
+}
+
 func (s *Server) runAgentTask(taskID string, command string) (AgentTaskRecord, ExecutionDTO, error) {
 	taskID = strings.TrimSpace(taskID)
 	command = strings.TrimSpace(command)
@@ -993,6 +1171,24 @@ func (s *Server) runAgentTask(taskID string, command string) (AgentTaskRecord, E
 			execution, err := s.StartExecution(ExecutionCreateRequestDTO{Command: "bash", Args: []string{"-c", command}})
 			if err != nil {
 				return AgentTaskRecord{}, ExecutionDTO{}, fmt.Errorf("启动 agent 执行失败: %w", err)
+			}
+			workerID := "agent-worker-" + taskID
+			worker, workerErr := app.RegisterRuntimeWorker(s.workspace, app.RuntimeWorkerArtifact{
+				WorkerID:     workerID,
+				Mode:         "local",
+				Status:       "busy",
+				Capabilities: []string{"ai", "execution"},
+				Labels: map[string]string{
+					"role":         task.Role,
+					"goal":         task.Goal,
+					"task_id":      taskID,
+					"execution_id": execution.ID,
+				},
+			}, app.RuntimeWorkerRegistrationOptions{})
+			if workerErr == nil {
+				tasks[i].WorkerID = worker.WorkerID
+			} else {
+				log.Printf("Failed to register agent worker: %v", workerErr)
 			}
 			tasks[i].Status = "running"
 			tasks[i].Command = command
@@ -1161,32 +1357,81 @@ func (s *Server) completeWorkspaceGoal(match string) (WorkspaceGoal, error) {
 }
 
 func (s *Server) continueAfterAIActions(initialText string, systemPrompt string, refs []string, actionResults []ChatActionResult) (string, []string, []ChatActionResult) {
-	var feedback []string
-	for _, result := range actionResults {
-		if result.Kind == "execute" || result.Kind == "tool" || result.Kind == "read" || result.Kind == "search" || result.Kind == "delete" || result.Kind == "rename" {
-			if strings.TrimSpace(result.Output) != "" {
-				feedback = append(feedback, fmt.Sprintf("[%s] %s\n%s", result.Kind, result.Summary, result.Output))
+	combined := initialText
+	combinedRefs := append([]string{}, refs...)
+	combinedResults := append([]ChatActionResult{}, actionResults...)
+	currentResults := actionResults
+	retriedExecutions := map[string]bool{}
+	for round := 0; round < 3; round++ {
+		var autoRetries []ChatActionResult
+		for _, result := range currentResults {
+			if result.Status == "failed" && result.ExecutionID != "" && !retriedExecutions[result.ExecutionID] {
+				retriedExecutions[result.ExecutionID] = true
+				original, retry, _, err := s.recoverFailedExecution(result.ExecutionID, result.Summary, "")
+				if err == nil {
+					retry = s.waitForExecution(retry.ID, 3*time.Second)
+					output := ""
+					if logs, logErr := ReadExecutionLogs(s.workspace, retry.ID); logErr == nil {
+						output = truncateForAI(logs.Content, 4000)
+					}
+					combinedRefs = append(combinedRefs, fmt.Sprintf("retry:%s:%s", original.ID, retry.ID))
+					autoRetries = append(autoRetries, ChatActionResult{
+						Kind:        "retry",
+						Summary:     fmt.Sprintf("自动重试原始执行 %s -> 重试执行 %s（状态: %s）", original.ID, retry.ID, retry.Status),
+						Path:        retry.LogPath,
+						Output:      output,
+						Status:      retry.Status,
+						ExitCode:    retry.ExitCode,
+						ExecutionID: retry.ID,
+					})
+				}
 			}
 		}
+		if len(autoRetries) > 0 {
+			combinedResults = append(combinedResults, autoRetries...)
+			currentResults = append(currentResults, autoRetries...)
+		}
+		var feedback []string
+		for _, result := range currentResults {
+			if result.Output == "" && result.Summary == "" {
+				continue
+			}
+			statusLine := ""
+			if result.Status != "" {
+				statusLine = fmt.Sprintf("\n状态: %s", result.Status)
+			}
+			if result.ExitCode != nil {
+				statusLine += fmt.Sprintf(", 退出码: %d", *result.ExitCode)
+			}
+			feedback = append(feedback, fmt.Sprintf("[%s] %s%s\n%s", result.Kind, result.Summary, statusLine, result.Output))
+		}
+		if len(feedback) == 0 {
+			break
+		}
+		instruction := "如果已经完成，直接输出中文结论，不要输出 ACTION。如果还需要继续，输出下一步真实 ACTION 标记。"
+		followUpPrompt := instruction + "\n\n这是刚才动作的真实执行结果，请基于这些结果给出简洁结论，并决定是否继续动作。\n\n" + strings.Join(feedback, "\n\n")
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		followUp, err := app.GenerateProviderMessage(ctx, s.workspace, app.ProviderGenerationRequest{
+			SystemPrompt:         systemPrompt,
+			UserPrompt:           followUpPrompt,
+			MaxTokens:            2048,
+			RequiredCapabilities: []string{"chat"},
+			Stream:               false,
+		})
+		if err != nil {
+			break
+		}
+		combined += "\n\n【动作结果分析】\n" + followUp.Text
+		newRefs, newResults := s.parseAndExecuteAIActions(followUp.Text)
+		combinedRefs = append(combinedRefs, newRefs...)
+		combinedResults = append(combinedResults, newResults...)
+		if len(newResults) == 0 {
+			break
+		}
+		currentResults = newResults
 	}
-	if len(feedback) == 0 {
-		return initialText, refs, actionResults
-	}
-	followUpPrompt := "这是刚才动作的真实执行结果，请基于这些结果直接给出简洁的结论、下一步建议和需要关注的风险。不要再次输出 ACTION 标记。\n\n" + strings.Join(feedback, "\n\n")
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	followUp, err := app.GenerateProviderMessage(ctx, s.workspace, app.ProviderGenerationRequest{
-		SystemPrompt:         systemPrompt,
-		UserPrompt:           followUpPrompt,
-		MaxTokens:            2048,
-		RequiredCapabilities: []string{"chat"},
-		Stream:               false,
-	})
-	if err != nil {
-		return initialText, refs, actionResults
-	}
-	combined := initialText + "\n\n【动作结果分析】\n" + followUp.Text
-	return combined, refs, actionResults
+	return combined, combinedRefs, combinedResults
 }
 
 func (s *Server) applyExplicitGoalFallback(message string, results []ChatActionResult, refs *[]string) []ChatActionResult {
@@ -1267,4 +1512,27 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+type SwarmActionPayload struct {
+	Result AIActionResultDTO `json:"result"`
+}
+
+type responseRecorder struct {
+	code int
+	body string
+}
+
+func (r *responseRecorder) Header() http.Header { return http.Header{} }
+func (r *responseRecorder) WriteHeader(code int) {
+	if r.code == 0 {
+		r.code = code
+	}
+}
+func (r *responseRecorder) Write(data []byte) (int, error) {
+	if r.code == 0 {
+		r.code = http.StatusOK
+	}
+	r.body += string(data)
+	return len(data), nil
 }
