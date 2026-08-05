@@ -116,6 +116,8 @@ func (s *Server) handleAIChatPost(w http.ResponseWriter, r *http.Request) {
 - 保存 prompt：使用 ACTION:PROMPT-SAVE <名称> <内容> 格式
 - 运行 harness：使用 ACTION:HARNESS <prompt名称> <输入> 格式
 - 保存 markdown 报告：使用 ACTION:REPORT <文件相对路径> <标题> 格式，后续行作为正文
+- 创建 agent 任务：使用 ACTION:AGENT <角色> <目标> 格式
+- 完成 agent 任务：使用 ACTION:AGENT-DONE <任务ID> 格式
 - 每个动作占单独一行，动作本身必须放在回复末尾。
 - 动作执行结果会自动追加显示，不需要在文字里猜测文件内容或命令输出。
 
@@ -216,6 +218,16 @@ func (s *Server) buildWorkspaceSummary() string {
 			promptList = append(promptList, fmt.Sprintf("  - %s: %s", prompt.Name, truncateForAI(prompt.Content, 80)))
 		}
 		summary = append(summary, fmt.Sprintf("Prompt 注册表 (%d 个):\n%s", len(prompts), strings.Join(promptList, "\n")))
+	}
+
+	// Agent 任务
+	agentTasks := s.loadAgentTasks()
+	if len(agentTasks) > 0 {
+		taskList := make([]string, 0, min(len(agentTasks), 15))
+		for _, task := range agentTasks {
+			taskList = append(taskList, fmt.Sprintf("  - %s: %s (%s, 状态: %s)", task.ID, task.Goal, task.Role, task.Status))
+		}
+		summary = append(summary, fmt.Sprintf("Agent 任务 (%d 个):\n%s", len(agentTasks), strings.Join(taskList, "\n")))
 	}
 
 	// 黑板事实
@@ -464,6 +476,32 @@ func (s *Server) parseAndExecuteAIActions(text string) ([]string, []ChatActionRe
 				results = append(results, ChatActionResult{Kind: "harness", Summary: "Harness 已运行", Path: result.ID, Output: truncateForAI(result.Output, 3000)})
 				}
 			}
+		} else if strings.HasPrefix(line, "ACTION:AGENT ") {
+			spec := strings.TrimPrefix(line, "ACTION:AGENT ")
+			parts := strings.SplitN(strings.TrimSpace(spec), " ", 2)
+			if len(parts) == 2 {
+				role := strings.TrimSpace(parts[0])
+				goal := strings.TrimSpace(parts[1])
+				task, err := s.createAgentTask(role, goal)
+				if err != nil {
+					results = append(results, ChatActionResult{Kind: "agent", Summary: "创建 agent 任务失败: " + err.Error()})
+				} else {
+					refs = append(refs, fmt.Sprintf("agent:%s", task.ID))
+					results = append(results, ChatActionResult{Kind: "agent", Summary: "已创建 agent 任务", Path: task.ID, Output: fmt.Sprintf("角色: %s\n目标: %s", task.Role, task.Goal)})
+				}
+			}
+		} else if strings.HasPrefix(line, "ACTION:AGENT-DONE ") {
+			taskID := strings.TrimPrefix(line, "ACTION:AGENT-DONE ")
+			taskID = strings.TrimSpace(taskID)
+			if taskID != "" {
+				task, err := s.completeAgentTask(taskID)
+				if err != nil {
+					results = append(results, ChatActionResult{Kind: "agent", Summary: "完成 agent 任务失败: " + err.Error(), Path: taskID})
+				} else {
+					refs = append(refs, fmt.Sprintf("agent-done:%s", task.ID))
+					results = append(results, ChatActionResult{Kind: "agent", Summary: "Agent 任务已完成", Path: task.ID, Output: task.Goal})
+				}
+			}
 		} else if strings.HasPrefix(line, "ACTION:GOAL ") {
 			title := strings.TrimPrefix(line, "ACTION:GOAL ")
 			title = strings.TrimSpace(title)
@@ -653,6 +691,98 @@ func (s *Server) runWorkspaceHarness(promptName string, inputText string) (Harne
 	}
 	_, err = file.Write(append(data, '\n'))
 	return harness, err
+}
+
+type AgentTaskRecord struct {
+	ID        string `json:"id"`
+	Role      string `json:"role"`
+	Goal      string `json:"goal"`
+	Status    string `json:"status"`
+	CreatedAt int64  `json:"createdAt"`
+	UpdatedAt int64  `json:"updatedAt"`
+}
+
+func (s *Server) agentTasksPath() string {
+	return filepath.Join(s.workspace, "runtime", "agent-tasks.jsonl")
+}
+
+func (s *Server) loadAgentTasks() []AgentTaskRecord {
+	path := s.agentTasksPath()
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return []AgentTaskRecord{}
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return []AgentTaskRecord{}
+	}
+	defer file.Close()
+	var tasks []AgentTaskRecord
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		var task AgentTaskRecord
+		if json.Unmarshal(scanner.Bytes(), &task) == nil {
+			tasks = append(tasks, task)
+		}
+	}
+	return tasks
+}
+
+func (s *Server) createAgentTask(role string, goal string) (AgentTaskRecord, error) {
+	role = strings.TrimSpace(role)
+	goal = strings.TrimSpace(goal)
+	if role == "" || goal == "" {
+		return AgentTaskRecord{}, fmt.Errorf("agent 角色和目标不能为空")
+	}
+	runtimeDir := filepath.Join(s.workspace, "runtime")
+	os.MkdirAll(runtimeDir, 0o755)
+	now := time.Now().Unix()
+	task := AgentTaskRecord{ID: fmt.Sprintf("agent-%d", now), Role: role, Goal: goal, Status: "queued", CreatedAt: now, UpdatedAt: now}
+	file, err := os.OpenFile(s.agentTasksPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return AgentTaskRecord{}, err
+	}
+	defer file.Close()
+	data, err := json.Marshal(task)
+	if err != nil {
+		return AgentTaskRecord{}, err
+	}
+	_, err = file.Write(append(data, '\n'))
+	return task, err
+}
+
+func (s *Server) completeAgentTask(match string) (AgentTaskRecord, error) {
+	match = strings.TrimSpace(match)
+	tasks := s.loadAgentTasks()
+	if len(tasks) == 0 {
+		return AgentTaskRecord{}, fmt.Errorf("未找到 agent 任务")
+	}
+	path := s.agentTasksPath()
+	updated := false
+	for i, task := range tasks {
+		if task.ID == match && task.Status != "complete" {
+			tasks[i].Status = "complete"
+			tasks[i].UpdatedAt = time.Now().Unix()
+			updated = true
+		}
+	}
+	if !updated {
+		return AgentTaskRecord{}, fmt.Errorf("未找到待完成的 agent 任务: %s", match)
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return AgentTaskRecord{}, err
+	}
+	defer file.Close()
+	for _, task := range tasks {
+		data, _ := json.Marshal(task)
+		file.Write(append(data, '\n'))
+	}
+	for _, task := range tasks {
+		if task.ID == match {
+			return task, nil
+		}
+	}
+	return AgentTaskRecord{}, fmt.Errorf("完成的 agent 任务未找到")
 }
 
 type WorkspacePrompt struct {
