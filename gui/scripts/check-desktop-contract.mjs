@@ -5,7 +5,7 @@ const root = new URL('..', import.meta.url).pathname;
 const repoRoot = new URL('../..', import.meta.url).pathname;
 let failed = false;
 
-for (const file of ['src/main/main.js', 'src/main/preload.js', 'src/main/backend.js', 'src/main/workspace.js', 'src/main/desktop-state.js', 'scripts/package-desktop.mjs']) {
+for (const file of ['src/main/main.js', 'src/main/env.js', 'src/main/preload.js', 'src/main/backend.js', 'src/main/workspace.js', 'src/main/desktop-state.js', 'scripts/package-desktop.mjs']) {
   if (!existsSync(join(root, file))) {
     console.error(`missing desktop file: ${file}`);
     failed = true;
@@ -13,7 +13,7 @@ for (const file of ['src/main/main.js', 'src/main/preload.js', 'src/main/backend
 }
 
 const main = read('src/main/main.js');
-for (const required of ['Menu', 'buildApplicationMenu', 'preload:', 'backend:get-api-base-url', 'backend:status', 'backend:restart', 'workspace:select', 'workspace:open', 'workspace:create', 'desktop:recent-workspaces', 'desktop:open-recent-workspace', 'desktop:window-state', 'window:minimize', 'window:toggle-maximize', 'window:close', 'desktop:menu-action', 'initializeWorkspace', 'BackendManager', 'WorkspaceManager', 'DesktopStateManager']) {
+for (const required of ['Menu', 'buildApplicationMenu', 'preload:', 'backend:get-api-base-url', 'backend:status', 'backend:restart', 'workspace:select', 'workspace:open', 'workspace:create', 'desktop:recent-workspaces', 'desktop:open-recent-workspace', 'desktop:window-state', 'window:minimize', 'window:toggle-maximize', 'window:close', 'desktop:menu-action', 'initializeWorkspace', 'BackendManager', 'WorkspaceManager', 'DesktopStateManager', 'loadOuroEnv']) {
   if (!main.includes(required)) {
     console.error(`main process missing ${required}`);
     failed = true;
@@ -26,6 +26,14 @@ for (const required of ['contextBridge.exposeInMainWorld', 'getAPIBaseURL', 'bac
     console.error(`preload bridge missing ${required}`);
     failed = true;
   }
+}
+if (preload.includes("import { contextBridge, ipcRenderer } from 'electron'") || preload.includes('import { contextBridge, ipcRenderer } from "electron"')) {
+  console.error('preload bridge must be packaged-runtime compatible CommonJS, not a top-level ESM import');
+  failed = true;
+}
+if (!preload.includes("require('electron')") && !preload.includes('require("electron")')) {
+  console.error('preload bridge must require electron so packaged Electron can load the preload script');
+  failed = true;
 }
 
 const shell = read('src/app/OuroborosIDE.tsx');

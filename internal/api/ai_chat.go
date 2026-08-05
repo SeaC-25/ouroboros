@@ -115,7 +115,7 @@ func (s *Server) handleAIChatPost(w http.ResponseWriter, r *http.Request) {
 - 记录黑板发现：使用 ACTION:BLACKBOARD <发现内容> 格式
 - 保存 prompt：使用 ACTION:PROMPT-SAVE <名称> <内容> 格式
 - 运行 harness：使用 ACTION:HARNESS <prompt名称> <输入> 格式
-- 保存 markdown 报告：使用 ACTION:REPORT <文件相对路径> <标题> 格式，后续行作为正文
+- 保存 markdown 报告：使用 ACTION:REPORT <文件相对路径> <Markdown正文> 格式（单行）
 - 创建 agent 任务：使用 ACTION:AGENT <角色> <目标> 格式
 - 完成 agent 任务：使用 ACTION:AGENT-DONE <任务ID> 格式
 - 每个动作占单独一行，动作本身必须放在回复末尾。
@@ -435,6 +435,21 @@ func (s *Server) parseAndExecuteAIActions(text string) ([]string, []ChatActionRe
 						Path:    filePath,
 						Output:  truncateForAI(fileContent, 2000),
 					})
+				}
+			}
+		} else if strings.HasPrefix(line, "ACTION:REPORT ") {
+			reportSpec := strings.TrimPrefix(line, "ACTION:REPORT ")
+			parts := strings.SplitN(strings.TrimSpace(reportSpec), " ", 2)
+			if len(parts) == 2 {
+				filePath := strings.TrimSpace(parts[0])
+				body := strings.TrimSpace(parts[1])
+				if filePath != "" {
+					if err := s.writeWorkspaceFile(filePath, body); err != nil {
+						results = append(results, ChatActionResult{Kind: "report", Summary: "报告写入失败: " + err.Error(), Path: filePath})
+					} else {
+						refs = append(refs, fmt.Sprintf("report:%s", filePath))
+						results = append(results, ChatActionResult{Kind: "report", Summary: "已写入报告", Path: filePath, Output: truncateForAI(body, 2000)})
+					}
 				}
 			}
 		} else if strings.HasPrefix(line, "ACTION:BLACKBOARD ") {
@@ -1011,6 +1026,29 @@ func (s *Server) applyExplicitGoalFallback(message string, results []ChatActionR
 	}
 	*refs = append(*refs, fmt.Sprintf("goal:%s:%s", goal.ID, goal.Title))
 	return append(results, ChatActionResult{Kind: "goal", Summary: "已创建子目标", Path: goal.ID, Output: goal.Title})
+}
+
+func (s *Server) writeWorkspaceFile(relativePath string, content string) error {
+	relativePath = strings.TrimSpace(relativePath)
+	if relativePath == "" {
+		return fmt.Errorf("文件路径不能为空")
+	}
+	root, err := filepath.Abs(s.workspace)
+	if err != nil {
+		return err
+	}
+	path, err := filepath.Abs(filepath.Join(root, relativePath))
+	if err != nil {
+		return err
+	}
+	if !strings.HasPrefix(path, filepath.Clean(root)+string(os.PathSeparator)) && path != filepath.Clean(root) {
+		return fmt.Errorf("文件路径超出工作区: %s", relativePath)
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(content), 0o644)
 }
 
 func truncateForAI(value string, max int) string {
