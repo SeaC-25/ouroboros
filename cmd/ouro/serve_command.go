@@ -1,4 +1,4 @@
-package main
+﻿package main
 
 import (
 	"context"
@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ouroboros/ouroboros/internal/api"
+	"github.com/ouroboros/ouroboros/internal/app"
 	"github.com/spf13/cobra"
 )
 
@@ -23,6 +24,12 @@ func newServeCommand(out io.Writer) *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			workspace := args[0]
+
+			// 适配任意工作区：如果目录还不是有效的 Ouroboros 工作区，
+			// 自动补齐必需文件与目录（幂等，对已有工作区安全）。
+			if err := app.InitWorkspace(workspace); err != nil {
+				return fmt.Errorf("初始化工作区失败: %w", err)
+			}
 
 			// 创建API服务器
 			server, err := api.NewServer(workspace, port)
