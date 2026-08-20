@@ -1,4 +1,4 @@
-package app
+﻿package app
 
 import (
 	"bytes"
@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -1205,8 +1206,9 @@ func runtimeWorkerTransportCommandTimeout(request RuntimeWorkerTransportDispatch
 }
 
 func workerTransportCommandEnv(root, workDir string, request RuntimeWorkerTransportDispatchRequest) []string {
-	return []string{
-		"PATH=" + os.Getenv("PATH"),
+	env := append([]string(nil), os.Environ()...)
+	return append(env,
+		"PATH="+os.Getenv("PATH"),
 		"OURO_WORKSPACE=" + root,
 		"OURO_WORKER_RUN_DIR=" + workDir,
 		"OURO_WORKER_ID=" + request.WorkerID,
@@ -1233,7 +1235,7 @@ func workerTransportCommandEnv(root, workDir string, request RuntimeWorkerTransp
 		"OURO_RUN_COMMAND_JSON=" + runtimeWorkerTransportJSONEnvValue(request.ToolPlan.RunCommand),
 		"OURO_INPUT_NODE_IDS_JSON=" + runtimeWorkerTransportJSONEnvValue(request.ToolPlan.InputNodeIDs),
 		"OURO_EXPECTED_EVIDENCE_JSON=" + runtimeWorkerTransportJSONEnvValue(request.ToolPlan.ExpectedEvidence),
-	}
+	)
 }
 
 func runtimeWorkerTransportJSONEnvValue(value any) string {
@@ -1828,13 +1830,20 @@ func runtimeWorkerTransportDaemonControlWorkerDir(root, workerID string) string 
 }
 
 func runtimeWorkerTransportRunDir(root string, request RuntimeWorkerTransportDispatchRequest) string {
-	return filepath.Join(root, "runtime", "worker-transport-runs", safeRuntimeWorkerFileName(request.WorkerID), safeInstallRequestName(strings.Join([]string{
+	name := safeInstallRequestName(strings.Join([]string{
 		request.RunID,
 		request.ExecutionID,
 		request.Tool,
 		request.Capability,
 		request.Path,
-	}, "|")))
+	}, "|"))
+	if runtime.GOOS == "windows" {
+		// Windows CreateProcess fails with ERROR_DIRECTORY when the working
+		// directory exceeds MAX_PATH (260). The long test/workspace prefix plus
+		// the slug can exceed that limit, so use a compact directory name here.
+		name = "run-" + name[len(name)-13:]
+	}
+	return filepath.Join(root, "runtime", "worker-transport-runs", safeRuntimeWorkerFileName(request.WorkerID), name)
 }
 
 func ensureRuntimeWorkerQueueDispatchExecutionPath(root string, execution *RuntimeWorkerQueueDispatchExecution) {

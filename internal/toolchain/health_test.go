@@ -1,4 +1,4 @@
-package toolchain
+﻿package toolchain
 
 import (
 	"errors"
@@ -51,6 +51,7 @@ func TestHealthUpdateAvailable(t *testing.T) {
 }
 
 func TestDefaultHealthRunnerExecutesExternalProbe(t *testing.T) {
+	skipOnWindowsProbe(t)
 	probe := filepath.Join(t.TempDir(), "probe")
 	if err := os.WriteFile(probe, []byte("#!/bin/sh\nprintf 'probe-1.2.3\\n'\n"), 0o755); err != nil {
 		t.Fatalf("write probe: %v", err)

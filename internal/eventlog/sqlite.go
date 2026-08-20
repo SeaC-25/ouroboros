@@ -1,4 +1,4 @@
-package eventlog
+﻿package eventlog
 
 import (
 	"context"
@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -32,6 +34,37 @@ func OpenSQLite(path string) (*SQLiteStore, error) {
 		return nil, err
 	}
 	return store, nil
+}
+
+func OpenSQLiteReadOnly(path string) (*SQLiteStore, error) {
+	if strings.TrimSpace(path) == "" {
+		return nil, errors.New("sqlite path is required")
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolve sqlite path: %w", err)
+	}
+	slashed := filepath.ToSlash(absPath)
+	if !strings.HasPrefix(slashed, "/") {
+		slashed = "/" + slashed
+	}
+	uri := url.URL{Scheme: "file", Path: slashed}
+	query := uri.Query()
+	query.Set("mode", "ro")
+	query.Set("immutable", "1")
+	query.Set("_query_only", "1")
+	query.Set("_foreign_keys", "1")
+	uri.RawQuery = query.Encode()
+
+	db, err := sql.Open("sqlite3", uri.String())
+	if err != nil {
+		return nil, fmt.Errorf("open sqlite read-only: %w", err)
+	}
+	if err := db.Ping(); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("open sqlite read-only: %w", err)
+	}
+	return &SQLiteStore{db: db}, nil
 }
 
 func (s *SQLiteStore) Close() error {
@@ -114,6 +147,29 @@ func (s *SQLiteStore) Replay(ctx context.Context, runID string) ([]Event, error)
 		return nil, fmt.Errorf("iterate events: %w", err)
 	}
 	return events, nil
+}
+
+func (s *SQLiteStore) ListRunIDs(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT run_id FROM events GROUP BY run_id ORDER BY MAX(id) ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("query run ids: %w", err)
+	}
+	defer rows.Close()
+
+	runIDs := []string{}
+	for rows.Next() {
+		var runID string
+		if err := rows.Scan(&runID); err != nil {
+			return nil, fmt.Errorf("scan run id: %w", err)
+		}
+		if strings.TrimSpace(runID) != "" {
+			runIDs = append(runIDs, runID)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate run ids: %w", err)
+	}
+	return runIDs, nil
 }
 
 func (s *SQLiteStore) migrate() error {

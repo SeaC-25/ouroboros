@@ -1,4 +1,4 @@
-package app
+﻿package app
 
 import (
 	"errors"
@@ -583,10 +583,22 @@ func validateYAMLFile(path string) error {
 
 const defaultProviderConfigYAML = `version: 1
 providers:
+  - name: web-ai-media-editor
+    type: openai_compatible
+    model: claude-opus-4-7
+    base_url: https://niuwa88.vip/v1
+    api_key_env: OURO_WEB_AI_MEDIA_EDITOR_KEY
+    timeout_ms: 30000
+    context_window_tokens: 32768
+    capabilities:
+      - chat
+      - code
+      - reasoning
+    enabled: true
   - name: offline
     type: offline
     model: offline-model
-    enabled: true
+    enabled: false
 `
 
 var workspaceToolchainManifestYAML = map[string]string{

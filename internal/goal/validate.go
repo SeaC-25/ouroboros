@@ -9,9 +9,12 @@ import (
 
 const weightTolerance = 0.000001
 
-func Validate(stack GoalStack) error {
+func Validate(stack *GoalStack) error {
 	var errs []error
 
+	if stack == nil {
+		return errors.New("goal stack is required")
+	}
 	if strings.TrimSpace(stack.Mission) == "" {
 		errs = append(errs, errors.New("mission is required"))
 	}

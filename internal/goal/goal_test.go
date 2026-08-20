@@ -27,7 +27,7 @@ func TestValidateAcceptsCompleteGoalStack(t *testing.T) {
 		},
 	}
 
-	if err := Validate(stack); err != nil {
+	if err := Validate(&stack); err != nil {
 		t.Fatalf("expected valid stack: %v", err)
 	}
 }
@@ -36,7 +36,7 @@ func TestValidateRejectsEmptyMission(t *testing.T) {
 	stack := validGoalStack()
 	stack.Mission = " "
 
-	if err := Validate(stack); err == nil {
+	if err := Validate(&stack); err == nil {
 		t.Fatalf("expected empty mission to fail")
 	}
 }
@@ -45,7 +45,7 @@ func TestValidateRejectsUnnormalizedWeights(t *testing.T) {
 	stack := validGoalStack()
 	stack.Weights.Report = 0.40
 
-	if err := Validate(stack); err == nil {
+	if err := Validate(&stack); err == nil {
 		t.Fatalf("expected unnormalized weights to fail")
 	}
 }
@@ -54,7 +54,7 @@ func TestValidateRejectsMissingSuccessCriteria(t *testing.T) {
 	stack := validGoalStack()
 	stack.SuccessCriteria = nil
 
-	if err := Validate(stack); err == nil {
+	if err := Validate(&stack); err == nil {
 		t.Fatalf("expected missing success criteria to fail")
 	}
 }

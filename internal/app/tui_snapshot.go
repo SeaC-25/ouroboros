@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -12,9 +13,14 @@ import (
 	"time"
 
 	"github.com/ouroboros/ouroboros/internal/compiler"
+	"github.com/ouroboros/ouroboros/internal/contracts"
 	"github.com/ouroboros/ouroboros/internal/eventlog"
+	"github.com/ouroboros/ouroboros/internal/evidence"
 	"github.com/ouroboros/ouroboros/internal/frontier"
+	reportpkg "github.com/ouroboros/ouroboros/internal/report"
+	"github.com/ouroboros/ouroboros/internal/toolchain"
 	"github.com/ouroboros/ouroboros/internal/tui"
+	"gopkg.in/yaml.v3"
 )
 
 func NewTUIModelForWorkspace(root string) tui.Model {
@@ -64,7 +70,7 @@ func tuiRuntimeActionRequester(root string) tui.RuntimeActionRequester {
 func tuiRuntimeActionExecutor(root string) tui.RuntimeActionExecutor {
 	return func(action tui.RuntimeAction) (tui.RuntimeActionExecutionResult, error) {
 		kind := strings.TrimSpace(action.Kind)
-		if kind != "compile-preview" && kind != "compile-preview-review-artifact" && kind != "compile-preview-review-selection" && kind != "report-projection-dispatch-artifact" && kind != "report-projection-dispatch-execution-artifact" && kind != "report-projection-execution-selection" && kind != "replay-workbench-session-artifact" && kind != "replay-workbench-session-selection" && kind != "replay-workbench-collaboration-artifact" && kind != "replay-workbench-collaboration-selection" && kind != "replay-workbench-collaboration-note" && kind != "replay-workbench-collaboration-note-selection" && kind != "install-dispatch-artifact" && kind != "install-retry-dispatch-artifact" && kind != "worker-lifecycle-action-plan-artifact" && kind != "worker-lifecycle-action-plan-selection" && kind != "worker-lifecycle-policy-artifact" && kind != "worker-lifecycle-policy-selection" && kind != "worker-lease-result-reconciliation-artifact" && kind != "worker-lease-reclaim-artifact" && kind != "worker-placement-artifact" && kind != "worker-placement-dispatch-artifact" && kind != "worker-queue-claim-artifact" && kind != "worker-transport-request-artifact" && kind != "worker-transport-daemon-artifact" {
+		if kind != "compile-preview" && kind != "compile-preview-review-artifact" && kind != "compile-preview-review-selection" && kind != "compile-preview-review-execution-dispatch-artifact" && kind != "model-tool-plan-preview" && kind != "workflow-status" && kind != "report-projection-dispatch-artifact" && kind != "report-projection-dispatch-execution-artifact" && kind != "report-projection-execution-selection" && kind != "replay-workbench-session-artifact" && kind != "replay-workbench-session-selection" && kind != "replay-workbench-collaboration-artifact" && kind != "replay-workbench-collaboration-selection" && kind != "replay-workbench-collaboration-note" && kind != "replay-workbench-collaboration-note-selection" && kind != "install-dispatch-artifact" && kind != "install-retry-dispatch-artifact" && kind != "worker-lifecycle-action-plan-artifact" && kind != "worker-lifecycle-action-plan-selection" && kind != "worker-lifecycle-policy-artifact" && kind != "worker-lifecycle-policy-selection" && kind != "worker-lease-result-reconciliation-artifact" && kind != "worker-lease-reclaim-artifact" && kind != "worker-placement-artifact" && kind != "worker-placement-dispatch-artifact" && kind != "worker-queue-claim-artifact" && kind != "worker-transport-request-artifact" && kind != "worker-transport-daemon-artifact" {
 			return tui.RuntimeActionExecutionResult{}, fmt.Errorf("unsupported runtime action kind: %s", action.Kind)
 		}
 		if kind == "compile-preview" {
@@ -96,6 +102,30 @@ func tuiRuntimeActionExecutor(root string) tui.RuntimeActionExecutor {
 			reviewPath := strings.TrimSpace(action.ArtifactPath)
 			if reviewPath == "" {
 				return tui.RuntimeActionExecutionResult{}, fmt.Errorf("compile-preview review artifact runtime action is missing artifact path")
+			}
+			if strings.TrimSpace(action.Current) == "true" {
+				dispatch, err := CreateToolCompilePreviewReviewExecutionDispatch(root, reviewPath, ToolCompilePreviewReviewExecutionDispatchOptions{
+					Actor:  "tui",
+					Reason: "dispatched from TUI",
+				})
+				dispatches := []ToolCompilePreviewReviewExecutionDispatch{dispatch}
+				if listed, listErr := ListToolCompilePreviewReviewExecutionDispatches(root); listErr == nil {
+					dispatches = listed
+				}
+				result := tui.RuntimeActionExecutionResult{
+					Status:      "completed",
+					Path:        dispatch.Path,
+					Output:      "execution dispatch created",
+					RuntimeRows: compilePreviewReviewExecutionDispatchRuntimeRows(dispatches),
+				}
+				if dispatch.Path == "" {
+					result.RuntimeRows = nil
+				}
+				if err != nil {
+					result.Status = "failed"
+					return result, err
+				}
+				return result, nil
 			}
 			selection, err := SelectToolCompilePreviewReview(root, reviewPath, ToolCompilePreviewReviewSelectionOptions{
 				SelectedBy: "tui",
@@ -159,6 +189,37 @@ func tuiRuntimeActionExecutor(root string) tui.RuntimeActionExecutor {
 			if readErr != nil {
 				result.Status = "failed"
 				return result, readErr
+			}
+			return result, nil
+		}
+		if kind == "model-tool-plan-preview" {
+			if strings.TrimSpace(action.State) != "valid" {
+				return tui.RuntimeActionExecutionResult{}, fmt.Errorf("model tool-plan preview runtime action must be valid")
+			}
+			previewPath := strings.TrimSpace(action.ArtifactPath)
+			if previewPath == "" {
+				return tui.RuntimeActionExecutionResult{}, fmt.Errorf("model tool-plan preview runtime action is missing artifact path")
+			}
+			acceptance, err := AcceptModelToolPlanPreviewArtifact(root, previewPath, ModelToolPlanPreviewAcceptanceOptions{
+				AcceptedBy: "tui",
+				Reason:     "accepted from TUI",
+			})
+			acceptances := []ModelToolPlanPreviewAcceptance{acceptance}
+			if listed, listErr := ListModelToolPlanPreviewAcceptances(root); listErr == nil {
+				acceptances = listed
+			}
+			result := tui.RuntimeActionExecutionResult{
+				Status:      "completed",
+				Path:        acceptance.Path,
+				Output:      "model tool-plan preview accepted",
+				RuntimeRows: modelToolPlanPreviewAcceptanceRuntimeRows(acceptances),
+			}
+			if acceptance.Path == "" {
+				result.RuntimeRows = nil
+			}
+			if err != nil {
+				result.Status = "failed"
+				return result, err
 			}
 			return result, nil
 		}
@@ -441,6 +502,242 @@ func tuiRuntimeActionExecutor(root string) tui.RuntimeActionExecutor {
 				return result, readErr
 			}
 			return result, nil
+		}
+		if kind == "compile-preview-review-execution-dispatch-artifact" {
+			dispatchPath := strings.TrimSpace(action.ArtifactPath)
+			if dispatchPath == "" {
+				return tui.RuntimeActionExecutionResult{}, fmt.Errorf("compile-preview review execution dispatch runtime action is missing artifact path")
+			}
+			execution, err := ExecuteToolCompilePreviewReviewExecutionDispatch(context.Background(), root, dispatchPath, ToolCompilePreviewReviewExecutionOptions{
+				Execute: true,
+				Actor:   "tui",
+				Reason:  "executed from TUI",
+			})
+			executions := []ToolCompilePreviewReviewExecution{execution}
+			if listed, listErr := ListToolCompilePreviewReviewExecutions(root); listErr == nil {
+				executions = listed
+			}
+			result := tui.RuntimeActionExecutionResult{
+				Status:      "completed",
+				Path:        execution.Path,
+				Output:      "compile preview review execution dispatch executed",
+				RuntimeRows: compilePreviewReviewExecutionRuntimeRows(executions),
+			}
+			if execution.Path == "" {
+				result.RuntimeRows = nil
+			}
+			if err != nil {
+				result.Status = "failed"
+				return result, err
+			}
+			return result, nil
+		}
+		if kind == "workflow-status" {
+			if strings.TrimSpace(action.RequestPath) == "create-compile-preview-review-execution-dispatch" {
+				if strings.TrimSpace(action.Source) != "model-tool-plan" {
+					return tui.RuntimeActionExecutionResult{}, fmt.Errorf("workflow status compile dispatch runtime action requires model-tool-plan stage")
+				}
+				reviewPath := strings.TrimSpace(action.ReviewPath)
+				if reviewPath == "" || reviewPath == "-" || strings.EqualFold(reviewPath, "none") {
+					return tui.RuntimeActionExecutionResult{}, fmt.Errorf("workflow status compile dispatch runtime action is missing review")
+				}
+				dispatch, err := CreateToolCompilePreviewReviewExecutionDispatch(root, reviewPath, ToolCompilePreviewReviewExecutionDispatchOptions{
+					Actor:  "tui",
+					Reason: "created from TUI workflow status",
+				})
+				dispatches := []ToolCompilePreviewReviewExecutionDispatch{dispatch}
+				if listed, listErr := ListToolCompilePreviewReviewExecutionDispatches(root); listErr == nil {
+					dispatches = listed
+				}
+				result := tui.RuntimeActionExecutionResult{
+					Status:      "completed",
+					Path:        dispatch.Path,
+					Output:      "workflow status compile dispatch created",
+					RuntimeRows: compilePreviewReviewExecutionDispatchRuntimeRows(dispatches),
+				}
+				if dispatch.Path == "" {
+					result.RuntimeRows = nil
+				}
+				if err != nil {
+					result.Status = "failed"
+					return result, err
+				}
+				return result, nil
+			}
+			if strings.TrimSpace(action.RequestPath) == "execute-compile-preview-review-execution-dispatch" {
+				if strings.TrimSpace(action.Source) != "model-tool-plan" {
+					return tui.RuntimeActionExecutionResult{}, fmt.Errorf("workflow status compile dispatch execution runtime action requires model-tool-plan stage")
+				}
+				dispatchPath := strings.TrimSpace(action.DispatchPath)
+				if dispatchPath == "" || dispatchPath == "-" || strings.EqualFold(dispatchPath, "none") {
+					return tui.RuntimeActionExecutionResult{}, fmt.Errorf("workflow status compile dispatch execution runtime action is missing dispatch")
+				}
+				execution, err := ExecuteToolCompilePreviewReviewExecutionDispatch(context.Background(), root, dispatchPath, ToolCompilePreviewReviewExecutionOptions{
+					Execute: true,
+					Actor:   "tui",
+					Reason:  "executed from TUI workflow status",
+				})
+				executions := []ToolCompilePreviewReviewExecution{execution}
+				if listed, listErr := ListToolCompilePreviewReviewExecutions(root); listErr == nil {
+					executions = listed
+				}
+				result := tui.RuntimeActionExecutionResult{
+					Status:      "completed",
+					Path:        execution.Path,
+					Output:      "workflow status compile dispatch executed",
+					RuntimeRows: compilePreviewReviewExecutionRuntimeRows(executions),
+				}
+				if execution.Path == "" {
+					result.RuntimeRows = nil
+				}
+				if err != nil {
+					result.Status = "failed"
+					return result, err
+				}
+				return result, nil
+			}
+			if strings.TrimSpace(action.Source) != "report-projection" {
+				return tui.RuntimeActionExecutionResult{}, fmt.Errorf("workflow status report projection dispatch runtime action requires report-projection stage")
+			}
+			switch strings.TrimSpace(action.RequestPath) {
+			case "create-report-projection-dispatch":
+				runID := strings.TrimSpace(action.RunID)
+				if runID == "" {
+					return tui.RuntimeActionExecutionResult{}, fmt.Errorf("workflow status report projection dispatch runtime action is missing report run")
+				}
+				dispatch, err := CreateReportProjectionDispatch(context.Background(), root, runID, ReportProjectionDispatchOptions{
+					Actor:  "tui",
+					Reason: "created from TUI workflow status",
+				})
+				dispatches, listErr := ListReportProjectionDispatches(root)
+				result := tui.RuntimeActionExecutionResult{
+					Status:      "completed",
+					Path:        dispatch.Path,
+					Output:      "report projection dispatch created",
+					RuntimeRows: reportProjectionDispatchRuntimeRows(dispatches),
+				}
+				if dispatch.Path == "" {
+					result.RuntimeRows = nil
+				}
+				if err != nil {
+					result.Status = "failed"
+					return result, err
+				}
+				if listErr != nil {
+					result.Status = "failed"
+					return result, listErr
+				}
+				return result, nil
+			case "execute-report-projection-dispatch":
+				dispatchPath := strings.TrimSpace(action.ReportDispatchPath)
+				if dispatchPath == "" {
+					dispatchPath = strings.TrimSpace(action.DispatchPath)
+				}
+				if dispatchPath == "" || dispatchPath == "-" {
+					return tui.RuntimeActionExecutionResult{}, fmt.Errorf("workflow status report projection dispatch execution runtime action is missing report dispatch")
+				}
+				execution, err := ExecuteReportProjectionDispatch(context.Background(), root, dispatchPath, ReportProjectionDispatchExecutionOptions{
+					Execute: true,
+					Actor:   "tui",
+					Reason:  "executed from TUI workflow status",
+				})
+				executions, listErr := ListReportProjectionDispatchExecutions(root)
+				selection, selectionFound, readErr := ReadReportProjectionDispatchExecutionSelection(root)
+				result := tui.RuntimeActionExecutionResult{
+					Status:      "completed",
+					Path:        execution.Path,
+					Output:      "report projection dispatch executed",
+					RuntimeRows: reportProjectionDispatchExecutionRuntimeRowsWithSelection(executions, selection, selectionFound),
+				}
+				if execution.Path == "" {
+					result.RuntimeRows = nil
+				}
+				if err != nil {
+					result.Status = "failed"
+					return result, err
+				}
+				if listErr != nil {
+					result.Status = "failed"
+					return result, listErr
+				}
+				if readErr != nil {
+					result.Status = "failed"
+					return result, readErr
+				}
+				return result, nil
+			case "review-report-projection-execution":
+				executionPath := strings.TrimSpace(action.ReportExecutionPath)
+				if executionPath == "" || executionPath == "-" {
+					return tui.RuntimeActionExecutionResult{}, fmt.Errorf("workflow status report projection execution review runtime action is missing report execution")
+				}
+				execution, err := AnnotateReportProjectionDispatchExecution(root, executionPath, ReportProjectionDispatchExecutionAnnotationOptions{
+					Decision: "accepted",
+					Reviewer: "tui",
+					Reason:   "reviewed from TUI workflow status",
+				})
+				executions, listErr := ListReportProjectionDispatchExecutions(root)
+				selection, selectionFound, readErr := ReadReportProjectionDispatchExecutionSelection(root)
+				result := tui.RuntimeActionExecutionResult{
+					Status:      "completed",
+					Path:        execution.Path,
+					Output:      "report projection execution reviewed",
+					RuntimeRows: reportProjectionDispatchExecutionRuntimeRowsWithSelection(executions, selection, selectionFound),
+				}
+				if execution.Path == "" {
+					result.RuntimeRows = nil
+				}
+				if err != nil {
+					result.Status = "failed"
+					return result, err
+				}
+				if listErr != nil {
+					result.Status = "failed"
+					return result, listErr
+				}
+				if readErr != nil {
+					result.Status = "failed"
+					return result, readErr
+				}
+				return result, nil
+			case "select-report-projection-execution":
+				executionPath := strings.TrimSpace(action.ReportExecutionPath)
+				if executionPath == "" || executionPath == "-" {
+					return tui.RuntimeActionExecutionResult{}, fmt.Errorf("workflow status report projection execution selection runtime action is missing report execution")
+				}
+				selection, err := SelectReportProjectionDispatchExecution(root, executionPath, ReportProjectionDispatchExecutionSelectionOptions{
+					SelectedBy: "tui",
+					Reason:     "selected from TUI workflow status",
+				})
+				executions, listErr := ListReportProjectionDispatchExecutions(root)
+				refreshedSelection, found, readErr := ReadReportProjectionDispatchExecutionSelection(root)
+				if found {
+					selection = refreshedSelection
+				}
+				result := tui.RuntimeActionExecutionResult{
+					Status:      "completed",
+					Path:        selection.Path,
+					Output:      "report projection execution selected",
+					RuntimeRows: reportProjectionDispatchExecutionRuntimeRowsWithSelection(executions, selection, true),
+				}
+				if selection.Path == "" {
+					result.RuntimeRows = nil
+				}
+				if err != nil {
+					result.Status = "failed"
+					return result, err
+				}
+				if listErr != nil {
+					result.Status = "failed"
+					return result, listErr
+				}
+				if readErr != nil {
+					result.Status = "failed"
+					return result, readErr
+				}
+				return result, nil
+			default:
+				return tui.RuntimeActionExecutionResult{}, fmt.Errorf("workflow status runtime action is not executable for next gate: %s", action.RequestPath)
+			}
 		}
 		if kind == "report-projection-dispatch-artifact" {
 			dispatchPath := strings.TrimSpace(action.ArtifactPath)
@@ -1071,15 +1368,1911 @@ func runtimeActionReadyCount(action tui.RuntimeAction) int {
 func baseTUIModelForWorkspace(root string) tui.Model {
 	return tui.NewModel().
 		WithRuntimeActionRequester(tuiRuntimeActionRequester(root)).
-		WithRuntimeActionExecutor(tuiRuntimeActionExecutor(root))
+		WithRuntimeActionExecutor(tuiRuntimeActionExecutor(root)).
+		WithAIDialogSubmitter(tuiAIDialogSubmitter(root))
+}
+
+const tuiAIDialogSystemPrompt = "You are Ouroboros, a TUI-first IDE assistant for authorized security work. Help the operator reason about scoped objectives, evidence, toolchain state, and safe next gates. Do not turn model output into command execution; recommend operator-reviewed actions through existing Ouroboros gates. If a tool-plan preview is warranted, emit at most one marker line in the declared marker format using an allowed semantic action from the workspace context; otherwise answer normally."
+
+func tuiAIDialogSystemPromptForWorkspace(root string) string {
+	context := strings.TrimSpace(tuiAIDialogWorkspaceContext(root))
+	if context == "" {
+		return tuiAIDialogSystemPrompt
+	}
+	return tuiAIDialogSystemPrompt + "\n\nWorkspace context:\n" + context
+}
+
+func tuiAIDialogWorkspaceContext(root string) string {
+	status, err := SummarizeWorkspaceWorkflow(root)
+	if err != nil {
+		return "workspace.context_status=unavailable\nworkspace.context_error=workflow_status_unavailable"
+	}
+	action := workflowStatusRowValue(string(status.Action), "none")
+	safetyErrorCount := status.SafetyErrorCount
+	if safetyErrorCount == 0 && len(status.SafetyErrors) > 0 {
+		safetyErrorCount = len(status.SafetyErrors)
+	}
+	lines := []string{
+		"workspace.context_status=available",
+		"workspace.context_mode=read-only",
+		"workflow.mode=" + workflowStatusRowValue(status.Mode, "read-only"),
+		"workflow.status=" + workflowStatusRowValue(status.Status, "unknown"),
+		"workflow.stage=" + workflowStatusRowValue(status.Stage, "unknown"),
+		"workflow.next_gate=" + workflowStatusRowValue(status.NextGate, "none"),
+		"workflow.reason=" + workflowStatusRowValue(status.Reason, "none"),
+		"workflow.action=" + action,
+		fmt.Sprintf("workflow.safety_errors=%d", safetyErrorCount),
+		fmt.Sprintf(
+			"workflow.counts previews=%d acceptances=%d compile_dispatches=%d compile_executions=%d report_dispatches=%d report_executions=%d",
+			status.PreviewCount,
+			status.AcceptanceCount,
+			status.DispatchCount,
+			status.ExecutionCount,
+			status.ReportDispatchCount,
+			status.ReportExecutionCount,
+		),
+	}
+	lines = append(lines, tuiAIDialogSemanticActionContext()...)
+	lines = append(lines, tuiAIDialogWorkspaceOverviewContext(root)...)
+	return strings.Join(lines, "\n")
+}
+
+func tuiAIDialogWorkspaceOverviewContext(root string) []string {
+	summary, err := tuiAIDialogOverviewSummary(root)
+	if err != nil {
+		return []string{
+			"overview.status=unavailable",
+			"overview.error=overview_unavailable",
+		}
+	}
+	return []string{
+		"overview.status=available",
+		"overview.workflow_status=" + workflowStatusRowValue(summary.WorkflowStatus, "unknown"),
+		"overview.stage=" + workflowStatusRowValue(summary.Stage, "unknown"),
+		"overview.next_gate=" + workflowStatusRowValue(summary.NextGate, "none"),
+		fmt.Sprintf("overview.mission_configured=%t", summary.MissionConfigured),
+		"overview.target_policy=" + workflowStatusRowValue(summary.TargetPolicy, "unknown"),
+		"overview.isolation=" + workflowStatusRowValue(summary.Isolation, "unknown"),
+		fmt.Sprintf("overview.targets=%d", summary.Targets),
+		fmt.Sprintf("overview.safety_ready=%t", summary.SafetyReady),
+		fmt.Sprintf("overview.strict_ready=%t", summary.StrictReady),
+		"overview.providers_status=" + workflowStatusRowValue(summary.ProvidersStatus, "unknown"),
+		fmt.Sprintf("overview.providers=%d", summary.Providers),
+		fmt.Sprintf("overview.provider_enabled=%d", summary.ProviderEnabled),
+		fmt.Sprintf("overview.chat=%t", summary.Chat),
+		fmt.Sprintf("overview.tool_planning=%t", summary.ToolPlanning),
+		"overview.capabilities_status=" + workflowStatusRowValue(summary.CapabilitiesStatus, "blocked"),
+		fmt.Sprintf("overview.domain_packs=%d", summary.DomainPacks),
+		fmt.Sprintf("overview.tools=%d", summary.Tools),
+		fmt.Sprintf("overview.evidence_runs=%d", summary.EvidenceRuns),
+		fmt.Sprintf("overview.findings=%d", summary.Findings),
+		fmt.Sprintf("overview.reports_current=%t", summary.ReportsCurrent),
+		fmt.Sprintf("overview.workers_registered=%d", summary.WorkersRegistered),
+		fmt.Sprintf("overview.worker_queue_claims=%d", summary.WorkerQueueClaims),
+	}
+}
+
+func tuiAIDialogSemanticActionContext() []string {
+	allowed := tuiAIDialogAllowedSemanticActionNames()
+	if len(allowed) == 0 {
+		return []string{
+			"semantic_actions.status=unavailable",
+			"semantic_actions.error=no_declared_actions",
+		}
+	}
+	return []string{
+		"semantic_actions.status=available",
+		fmt.Sprintf("semantic_actions.count=%d", len(allowed)),
+		"semantic_actions.allowed=" + strings.Join(allowed, ","),
+		"semantic_actions.marker_format=semantic_action:<action>",
+		"semantic_actions.mode=preview_only",
+		"semantic_actions.acceptance=operator_review_required",
+	}
+}
+
+func tuiAIDialogAllowedSemanticActionNames() []string {
+	actions := compiler.DeclaredSemanticActions()
+	allowed := make([]string, 0, len(actions))
+	for _, action := range actions {
+		value := strings.TrimSpace(string(action))
+		if value == "" {
+			continue
+		}
+		allowed = append(allowed, value)
+	}
+	return allowed
+}
+
+func tuiAIDialogSemanticActionCommandText() string {
+	allowed := tuiAIDialogAllowedSemanticActionNames()
+	if len(allowed) == 0 {
+		return "semantic actions: status=unavailable error=no_declared_actions stored=false"
+	}
+	return fmt.Sprintf(
+		"semantic actions: status=available count=%d allowed=%s marker_format=semantic_action:<action> mode=preview_only acceptance=operator_review_required stored=false",
+		len(allowed),
+		strings.Join(allowed, ","),
+	)
+}
+
+type tuiAIDialogModelPreviewSummary struct {
+	Previews          int
+	Valid             int
+	Completed         int
+	Acceptances       int
+	PendingAcceptance int
+	LatestAction      string
+	LatestStatus      string
+	LatestValid       bool
+	ReviewAvailable   bool
+}
+
+func tuiAIDialogModelPreviewSummaryForWorkspace(root string) (tuiAIDialogModelPreviewSummary, error) {
+	previews, err := ListModelToolPlanPreviewArtifacts(root)
+	if err != nil {
+		return tuiAIDialogModelPreviewSummary{}, err
+	}
+	acceptances, err := ListModelToolPlanPreviewAcceptances(root)
+	if err != nil {
+		return tuiAIDialogModelPreviewSummary{}, err
+	}
+	accepted := map[string]struct{}{}
+	for _, acceptance := range acceptances {
+		path := strings.TrimSpace(acceptance.PreviewArtifactPath)
+		if path == "" {
+			continue
+		}
+		accepted[filepath.Clean(path)] = struct{}{}
+		accepted[filepath.Base(path)] = struct{}{}
+	}
+	summary := tuiAIDialogModelPreviewSummary{
+		Previews:     len(previews),
+		Acceptances:  len(acceptances),
+		LatestAction: "none",
+		LatestStatus: "none",
+	}
+	for _, preview := range previews {
+		if preview.Valid {
+			summary.Valid++
+		}
+		if strings.TrimSpace(preview.Status) == "completed" {
+			summary.Completed++
+		}
+		if preview.Valid && strings.TrimSpace(preview.Status) == "completed" && strings.TrimSpace(preview.ReviewPath) != "" {
+			summary.ReviewAvailable = true
+			if !tuiAIDialogPreviewAccepted(preview, accepted) {
+				summary.PendingAcceptance++
+			}
+		}
+	}
+	if len(previews) > 0 {
+		latest := previews[len(previews)-1]
+		summary.LatestAction = workflowStatusRowValue(string(latest.Action), "none")
+		summary.LatestStatus = workflowStatusRowValue(latest.Status, "none")
+		summary.LatestValid = latest.Valid
+	}
+	return summary, nil
+}
+
+func tuiAIDialogPreviewAccepted(preview ModelToolPlanPreviewArtifact, accepted map[string]struct{}) bool {
+	path := strings.TrimSpace(preview.Path)
+	if path == "" {
+		return false
+	}
+	if _, ok := accepted[filepath.Clean(path)]; ok {
+		return true
+	}
+	if _, ok := accepted[filepath.Base(path)]; ok {
+		return true
+	}
+	return false
+}
+
+func SubmitWorkspaceAIDialogPrompt(root string, prompt string) (tui.AIDialogResult, error) {
+	trimmedPrompt := strings.TrimSpace(prompt)
+	if trimmedPrompt == "" {
+		return tui.AIDialogResult{}, fmt.Errorf("chat prompt is required")
+	}
+	return tuiAIDialogSubmitter(root)(tui.AIDialogRequest{Prompt: trimmedPrompt})
+}
+
+func tuiAIDialogSubmitter(root string) tui.AIDialogSubmitter {
+	return func(request tui.AIDialogRequest) (tui.AIDialogResult, error) {
+		if result, handled, err := tuiAIDialogLocalCommand(root, request); handled {
+			return result, err
+		}
+		messages := providerGenerationMessagesForAIDialog(request)
+		result, err := GenerateProviderMessage(context.Background(), root, ProviderGenerationRequest{
+			SystemPrompt: tuiAIDialogSystemPromptForWorkspace(root),
+			UserPrompt:   request.Prompt,
+			Messages:     messages,
+		})
+		if err != nil {
+			return tui.AIDialogResult{Status: "failed"}, fmt.Errorf("%s; %s", err.Error(), aiProviderSetupFailureHint(root))
+		}
+		dialogResult := tui.AIDialogResult{
+			Status:         "completed",
+			Provider:       result.ProviderName,
+			Model:          result.Model,
+			Text:           result.Text,
+			InputTokens:    result.InputTokens,
+			OutputTokens:   result.OutputTokens,
+			TotalTokens:    result.TotalTokens,
+			MetadataOnly:   true,
+			PromptStored:   false,
+			ResponseStored: false,
+		}
+		extraction := ExtractModelToolPlanPreview(result.Text)
+		if extraction.Found {
+			dialogResult.PreviewStatus = "skipped"
+			dialogResult.PreviewAction = string(extraction.Action)
+			dialogResult.PreviewMarker = extraction.MarkerPreview
+		}
+		if extraction.Valid {
+			review, err := CreateToolCompilePreviewReview(root, ToolCompilePreviewOptions{Action: extraction.Action})
+			if err != nil {
+				return tui.AIDialogResult{Status: "failed"}, fmt.Errorf("create AI dialog tool-plan compile preview review: %w", err)
+			}
+			artifact, err := RecordModelToolPlanPreviewArtifact(root, "tui-ai-dialog", result, "", extraction, review, ModelToolPlanPreviewArtifactOptions{
+				Source:  "tui-ai-dialog",
+				AgentID: "tui-ai-dialog",
+				Role:    "operator-assistant",
+			})
+			if err != nil {
+				return tui.AIDialogResult{Status: "failed"}, err
+			}
+			dialogResult.PreviewStatus = "created"
+			dialogResult.PreviewAction = string(artifact.Action)
+			dialogResult.PreviewMarker = artifact.MarkerPreview
+			dialogResult.PreviewPath = artifact.Path
+			dialogResult.RuntimeRows = modelToolPlanPreviewArtifactRuntimeRows([]ModelToolPlanPreviewArtifact{artifact})
+		}
+		return dialogResult, nil
+	}
+}
+
+func tuiAIDialogLocalCommand(root string, request tui.AIDialogRequest) (tui.AIDialogResult, bool, error) {
+	switch strings.ToLower(strings.TrimSpace(request.Prompt)) {
+	case "/doctor", "/readiness", "/health":
+		summary, err := tuiAIDialogDoctorSummary(root)
+		if err != nil {
+			return tui.AIDialogResult{Status: "failed", MetadataOnly: true, HistoryExcluded: true}, true, fmt.Errorf("doctor: %w", err)
+		}
+		return tui.AIDialogResult{
+			Status: "completed",
+			Text: fmt.Sprintf(
+				"doctor: workspace_ready=%t strict_ready=%t warnings=%d errors=%d strict_errors=%d safety_bypasses=%d providers_status=%s provider_enabled=%d chat=%t tool_planning=%t workflow_status=%s next_gate=%s toolchain_status=%s tools=%d stored=false",
+				summary.WorkspaceReady,
+				summary.StrictReady,
+				summary.Warnings,
+				summary.Errors,
+				summary.StrictErrors,
+				summary.SafetyBypasses,
+				workflowStatusRowValue(summary.ProvidersStatus, "unknown"),
+				summary.ProviderEnabled,
+				summary.Chat,
+				summary.ToolPlanning,
+				workflowStatusRowValue(summary.WorkflowStatus, "unknown"),
+				workflowStatusRowValue(summary.NextGate, "none"),
+				workflowStatusRowValue(summary.ToolchainStatus, "blocked"),
+				summary.Tools,
+			),
+			MetadataOnly:    true,
+			PromptStored:    false,
+			ResponseStored:  false,
+			HistoryExcluded: true,
+		}, true, nil
+	case "/completion", "/progress", "/percent", "/acceptance", "/completion-status":
+		return tui.AIDialogResult{
+			Status: "completed",
+			Text: "completion: local_ide_usable=true direct_chat=true completion_estimate=99.99 " +
+				"claim_100_ready=false final_review_status=external_evidence_required production_acceptance_required=true " +
+				"completion_audit_required=true attestation_required=true manifest_review_required=true operator_acceptance_required=true stored=false",
+			MetadataOnly:    true,
+			PromptStored:    false,
+			ResponseStored:  false,
+			HistoryExcluded: true,
+		}, true, nil
+	case "/final", "/final-evidence", "/final-review", "/audit", "/audit-completion", "/production-acceptance":
+		return tui.AIDialogResult{
+			Status: "completed",
+			Text: "final evidence: production_acceptance=make_smoke-production-acceptance " +
+				"inventory=<payload-inventory> policy=<deployment-policy> attestation=<completion-attestation> " +
+				"completion_audit=make_audit-completion review=manifest_and_digest_sidecar claim_100_after=operator_acceptance stored=false",
+			MetadataOnly:    true,
+			PromptStored:    false,
+			ResponseStored:  false,
+			HistoryExcluded: true,
+		}, true, nil
+	case "/status", "/workflow", "/workflow-status":
+		status, err := SummarizeWorkspaceWorkflow(root)
+		if err != nil {
+			return tui.AIDialogResult{Status: "failed", MetadataOnly: true, HistoryExcluded: true}, true, fmt.Errorf("workflow status: %w", err)
+		}
+		safetyErrorCount := status.SafetyErrorCount
+		if safetyErrorCount == 0 && len(status.SafetyErrors) > 0 {
+			safetyErrorCount = len(status.SafetyErrors)
+		}
+		return tui.AIDialogResult{
+			Status: "completed",
+			Text: fmt.Sprintf(
+				"workflow status: status=%s stage=%s next_gate=%s reason=%s safety_errors=%d stored=false",
+				workflowStatusRowValue(status.Status, "unknown"),
+				workflowStatusRowValue(status.Stage, "unknown"),
+				workflowStatusRowValue(status.NextGate, "none"),
+				workflowStatusRowValue(status.Reason, "none"),
+				safetyErrorCount,
+			),
+			MetadataOnly:    true,
+			PromptStored:    false,
+			ResponseStored:  false,
+			HistoryExcluded: true,
+		}, true, nil
+	case "/next", "/next-gate":
+		status, err := SummarizeWorkspaceWorkflow(root)
+		if err != nil {
+			return tui.AIDialogResult{Status: "failed", MetadataOnly: true, HistoryExcluded: true}, true, fmt.Errorf("workflow next gate: %w", err)
+		}
+		safetyErrorCount := status.SafetyErrorCount
+		if safetyErrorCount == 0 && len(status.SafetyErrors) > 0 {
+			safetyErrorCount = len(status.SafetyErrors)
+		}
+		return tui.AIDialogResult{
+			Status: "completed",
+			Text: fmt.Sprintf(
+				"next gate: status=%s stage=%s next_gate=%s reason=%s action=%s safety_errors=%d command_available=%t stored=false",
+				workflowStatusRowValue(status.Status, "unknown"),
+				workflowStatusRowValue(status.Stage, "unknown"),
+				workflowStatusRowValue(status.NextGate, "none"),
+				workflowStatusRowValue(status.Reason, "none"),
+				workflowStatusRowValue(string(status.Action), "none"),
+				safetyErrorCount,
+				strings.TrimSpace(status.Command) != "",
+			),
+			MetadataOnly:    true,
+			PromptStored:    false,
+			ResponseStored:  false,
+			HistoryExcluded: true,
+		}, true, nil
+	case "/command", "/next-command", "/workflow-command":
+		status, err := SummarizeWorkspaceWorkflow(root)
+		if err != nil {
+			return tui.AIDialogResult{Status: "failed", MetadataOnly: true, HistoryExcluded: true}, true, fmt.Errorf("workflow command: %w", err)
+		}
+		return tui.AIDialogResult{
+			Status: "completed",
+			Text: fmt.Sprintf(
+				"next command: status=%s stage=%s next_gate=%s reason=%s command=%s stored=false",
+				workflowStatusRowValue(status.Status, "unknown"),
+				workflowStatusRowValue(status.Stage, "unknown"),
+				workflowStatusRowValue(status.NextGate, "none"),
+				workflowStatusRowValue(status.Reason, "none"),
+				tuiAIDialogSanitizedWorkflowCommand(root, status.Command),
+			),
+			MetadataOnly:    true,
+			PromptStored:    false,
+			ResponseStored:  false,
+			HistoryExcluded: true,
+		}, true, nil
+	case "/artifacts", "/artifact-counts", "/workflow-artifacts":
+		status, err := SummarizeWorkspaceWorkflow(root)
+		if err != nil {
+			return tui.AIDialogResult{Status: "failed", MetadataOnly: true, HistoryExcluded: true}, true, fmt.Errorf("workflow artifacts: %w", err)
+		}
+		safetyErrorCount := status.SafetyErrorCount
+		if safetyErrorCount == 0 && len(status.SafetyErrors) > 0 {
+			safetyErrorCount = len(status.SafetyErrors)
+		}
+		return tui.AIDialogResult{
+			Status: "completed",
+			Text: fmt.Sprintf(
+				"workflow artifacts: status=%s stage=%s previews=%d acceptances=%d compile_dispatches=%d compile_executions=%d report_dispatches=%d report_executions=%d safety_errors=%d stored=false",
+				workflowStatusRowValue(status.Status, "unknown"),
+				workflowStatusRowValue(status.Stage, "unknown"),
+				status.PreviewCount,
+				status.AcceptanceCount,
+				status.DispatchCount,
+				status.ExecutionCount,
+				status.ReportDispatchCount,
+				status.ReportExecutionCount,
+				safetyErrorCount,
+			),
+			MetadataOnly:    true,
+			PromptStored:    false,
+			ResponseStored:  false,
+			HistoryExcluded: true,
+		}, true, nil
+	case "/gates", "/review-gates", "/gate-status":
+		status, err := SummarizeWorkspaceWorkflow(root)
+		if err != nil {
+			return tui.AIDialogResult{Status: "failed", MetadataOnly: true, HistoryExcluded: true}, true, fmt.Errorf("review gates: %w", err)
+		}
+		safetyErrorCount := status.SafetyErrorCount
+		if safetyErrorCount == 0 && len(status.SafetyErrors) > 0 {
+			safetyErrorCount = len(status.SafetyErrors)
+		}
+		return tui.AIDialogResult{
+			Status: "completed",
+			Text: fmt.Sprintf(
+				"review gates: status=%s stage=%s next_gate=%s reason=%s action=%s previews=%d acceptances=%d compile_dispatches=%d compile_executions=%d report_dispatches=%d report_executions=%d report_selected=%t safety_errors=%d command_available=%t stored=false",
+				workflowStatusRowValue(status.Status, "unknown"),
+				workflowStatusRowValue(status.Stage, "unknown"),
+				workflowStatusRowValue(status.NextGate, "none"),
+				workflowStatusRowValue(status.Reason, "none"),
+				workflowStatusRowValue(string(status.Action), "none"),
+				status.PreviewCount,
+				status.AcceptanceCount,
+				status.DispatchCount,
+				status.ExecutionCount,
+				status.ReportDispatchCount,
+				status.ReportExecutionCount,
+				strings.TrimSpace(status.ReportSelectionPath) != "",
+				safetyErrorCount,
+				strings.TrimSpace(status.Command) != "",
+			),
+			MetadataOnly:    true,
+			PromptStored:    false,
+			ResponseStored:  false,
+			HistoryExcluded: true,
+		}, true, nil
+	case "/previews", "/tool-plan-previews", "/model-previews":
+		summary, err := tuiAIDialogModelPreviewSummaryForWorkspace(root)
+		if err != nil {
+			return tui.AIDialogResult{Status: "failed", MetadataOnly: true, HistoryExcluded: true}, true, fmt.Errorf("model previews: %w", err)
+		}
+		return tui.AIDialogResult{
+			Status: "completed",
+			Text: fmt.Sprintf(
+				"model previews: previews=%d valid=%d completed=%d acceptances=%d pending_acceptance=%d latest_action=%s latest_status=%s latest_valid=%t review_available=%t stored=false",
+				summary.Previews,
+				summary.Valid,
+				summary.Completed,
+				summary.Acceptances,
+				summary.PendingAcceptance,
+				workflowStatusRowValue(summary.LatestAction, "none"),
+				workflowStatusRowValue(summary.LatestStatus, "none"),
+				summary.LatestValid,
+				summary.ReviewAvailable,
+			),
+			MetadataOnly:    true,
+			PromptStored:    false,
+			ResponseStored:  false,
+			HistoryExcluded: true,
+		}, true, nil
+	case "/runs", "/replay-runs", "/run-history":
+		count, latest, err := tuiAIDialogReplayRuns(root)
+		if err != nil {
+			return tui.AIDialogResult{Status: "failed", MetadataOnly: true, HistoryExcluded: true}, true, fmt.Errorf("replay runs: %w", err)
+		}
+		return tui.AIDialogResult{
+			Status: "completed",
+			Text: fmt.Sprintf(
+				"replay runs: runs=%d latest=%s stored=false",
+				count,
+				workflowStatusRowValue(latest, "none"),
+			),
+			MetadataOnly:    true,
+			PromptStored:    false,
+			ResponseStored:  false,
+			HistoryExcluded: true,
+		}, true, nil
+	case "/evidence", "/findings", "/graph":
+		summary, err := tuiAIDialogSummarizeEvidence(root)
+		if err != nil {
+			return tui.AIDialogResult{Status: "failed", MetadataOnly: true, HistoryExcluded: true}, true, fmt.Errorf("evidence: %w", err)
+		}
+		return tui.AIDialogResult{
+			Status: "completed",
+			Text: fmt.Sprintf(
+				"evidence: runs=%d latest_available=%t events=%d facts=%d intents=%d hints=%d nodes=%d edges=%d findings=%d surfaces=%d artifacts=%d verified_findings=%d paths=%d evidence_refs=%d exhausted=%d suggestions=%d stored=false",
+				summary.Runs,
+				summary.LatestAvailable,
+				summary.Events,
+				summary.Facts,
+				summary.Intents,
+				summary.Hints,
+				summary.Nodes,
+				summary.Edges,
+				summary.Findings,
+				summary.Surfaces,
+				summary.Artifacts,
+				summary.VerifiedFindings,
+				summary.Paths,
+				summary.EvidenceRefs,
+				summary.Exhausted,
+				summary.Suggestions,
+			),
+			MetadataOnly:    true,
+			PromptStored:    false,
+			ResponseStored:  false,
+			HistoryExcluded: true,
+		}, true, nil
+	case "/mission", "/targets", "/target-scope":
+		summary, err := tuiAIDialogSummarizeMissionScope(root)
+		if err != nil {
+			return tui.AIDialogResult{Status: "failed", MetadataOnly: true, HistoryExcluded: true}, true, fmt.Errorf("mission: %w", err)
+		}
+		return tui.AIDialogResult{
+			Status: "completed",
+			Text: fmt.Sprintf(
+				"mission: configured=%t goal_set=%t target_policy=%s isolation=%s targets=%d urls=%d domains=%d hosts=%d cidrs=%d artifacts=%d challenges=%d exclusions=%d stored=false",
+				summary.Configured,
+				summary.GoalSet,
+				workflowStatusRowValue(summary.TargetPolicy, "unknown"),
+				workflowStatusRowValue(summary.Isolation, "unknown"),
+				summary.Targets,
+				summary.URLs,
+				summary.Domains,
+				summary.Hosts,
+				summary.CIDRs,
+				summary.Artifacts,
+				summary.Challenges,
+				summary.Exclusions,
+			),
+			MetadataOnly:    true,
+			PromptStored:    false,
+			ResponseStored:  false,
+			HistoryExcluded: true,
+		}, true, nil
+	case "/reports", "/report-status", "/current-report":
+		summary, err := tuiAIDialogSummarizeReports(root)
+		if err != nil {
+			return tui.AIDialogResult{Status: "failed", MetadataOnly: true, HistoryExcluded: true}, true, fmt.Errorf("reports: %w", err)
+		}
+		return tui.AIDialogResult{
+			Status: "completed",
+			Text: fmt.Sprintf(
+				"reports: dispatches=%d executions=%d current=%t run=%s events=%d written=%t stored=false",
+				summary.Dispatches,
+				summary.Executions,
+				summary.Current,
+				workflowStatusRowValue(summary.RunID, "none"),
+				summary.EventCount,
+				summary.Written,
+			),
+			MetadataOnly:    true,
+			PromptStored:    false,
+			ResponseStored:  false,
+			HistoryExcluded: true,
+		}, true, nil
+	case "/toolchain", "/tools", "/toolchain-contract":
+		check := tuiAIDialogToolchainSummary(root)
+		return tui.AIDialogResult{
+			Status: "completed",
+			Text: fmt.Sprintf(
+				"toolchain: status=%s manifests=%d tools=%d domain_packs=%d patterns=%d semantic_actions=%d errors=%d stored=false",
+				workflowStatusRowValue(check.Status, "blocked"),
+				check.ManifestCount,
+				check.ToolCount,
+				check.DomainPackCount,
+				check.PatternCount,
+				check.SemanticActionCount,
+				len(check.Errors),
+			),
+			MetadataOnly:    true,
+			PromptStored:    false,
+			ResponseStored:  false,
+			HistoryExcluded: true,
+		}, true, nil
+	case "/capabilities", "/packs", "/domains":
+		summary := tuiAIDialogCapabilitiesSummary(root)
+		return tui.AIDialogResult{
+			Status: "completed",
+			Text: fmt.Sprintf(
+				"capabilities: status=%s domains=%d domain_packs=%d pack_capabilities=%d parsers=%d strategies=%d semantic_actions=%d semantic_capabilities=%d manifests=%d manifest_capabilities=%d manifest_dependencies=%d tools=%d tool_capabilities=%d tool_categories=%d target_kinds=%d managed_bundles=%d managed_installed=%d managed_blocked=%d patterns=%d errors=%d stored=false",
+				workflowStatusRowValue(summary.Status, "blocked"),
+				summary.Domains,
+				summary.DomainPacks,
+				summary.PackCapabilities,
+				summary.Parsers,
+				summary.Strategies,
+				summary.SemanticActions,
+				summary.SemanticCapabilities,
+				summary.Manifests,
+				summary.ManifestCapabilities,
+				summary.ManifestDependencies,
+				summary.Tools,
+				summary.ToolCapabilities,
+				summary.ToolCategories,
+				summary.TargetKinds,
+				summary.ManagedBundles,
+				summary.ManagedInstalled,
+				summary.ManagedBlocked,
+				summary.Patterns,
+				summary.Errors,
+			),
+			MetadataOnly:    true,
+			PromptStored:    false,
+			ResponseStored:  false,
+			HistoryExcluded: true,
+		}, true, nil
+	case "/overview", "/summary", "/dashboard":
+		summary, err := tuiAIDialogOverviewSummary(root)
+		if err != nil {
+			return tui.AIDialogResult{Status: "failed", MetadataOnly: true, HistoryExcluded: true}, true, fmt.Errorf("overview: %w", err)
+		}
+		return tui.AIDialogResult{
+			Status: "completed",
+			Text: fmt.Sprintf(
+				"overview: workflow_status=%s stage=%s next_gate=%s mission_configured=%t target_policy=%s isolation=%s targets=%d safety_ready=%t strict_ready=%t providers_status=%s providers=%d provider_enabled=%d chat=%t tool_planning=%t capabilities_status=%s domain_packs=%d tools=%d evidence_runs=%d findings=%d reports_current=%t workers_registered=%d worker_queue_claims=%d stored=false",
+				workflowStatusRowValue(summary.WorkflowStatus, "unknown"),
+				workflowStatusRowValue(summary.Stage, "unknown"),
+				workflowStatusRowValue(summary.NextGate, "none"),
+				summary.MissionConfigured,
+				workflowStatusRowValue(summary.TargetPolicy, "unknown"),
+				workflowStatusRowValue(summary.Isolation, "unknown"),
+				summary.Targets,
+				summary.SafetyReady,
+				summary.StrictReady,
+				workflowStatusRowValue(summary.ProvidersStatus, "unknown"),
+				summary.Providers,
+				summary.ProviderEnabled,
+				summary.Chat,
+				summary.ToolPlanning,
+				workflowStatusRowValue(summary.CapabilitiesStatus, "blocked"),
+				summary.DomainPacks,
+				summary.Tools,
+				summary.EvidenceRuns,
+				summary.Findings,
+				summary.ReportsCurrent,
+				summary.WorkersRegistered,
+				summary.WorkerQueueClaims,
+			),
+			MetadataOnly:    true,
+			PromptStored:    false,
+			ResponseStored:  false,
+			HistoryExcluded: true,
+		}, true, nil
+	case "/safety", "/scope", "/authorization":
+		summary, err := tuiAIDialogSafetySummary(root)
+		if err != nil {
+			return tui.AIDialogResult{Status: "failed", MetadataOnly: true, HistoryExcluded: true}, true, fmt.Errorf("safety: %w", err)
+		}
+		return tui.AIDialogResult{
+			Status: "completed",
+			Text: fmt.Sprintf(
+				"safety: ready=%t strict_ready=%t warnings=%d errors=%d strict_errors=%d bypasses=%d authorized=%d missing=%d expired=%d stored=false",
+				summary.Ready,
+				summary.StrictReady,
+				summary.Warnings,
+				summary.Errors,
+				summary.StrictErrors,
+				summary.Bypasses,
+				summary.Authorized,
+				summary.Missing,
+				summary.Expired,
+			),
+			MetadataOnly:    true,
+			PromptStored:    false,
+			ResponseStored:  false,
+			HistoryExcluded: true,
+		}, true, nil
+	case "/providers", "/provider", "/models":
+		summary := tuiAIDialogSummarizeProviders(root)
+		return tui.AIDialogResult{
+			Status: "completed",
+			Text: fmt.Sprintf(
+				"providers: status=%s reason=%s providers=%d enabled=%d routing=%s first_type=%s first_model=%s chat=%t tool_planning=%t api_key_env_configured=%t api_key_env_set=%t api_key_value_stored=false stored=false",
+				workflowStatusRowValue(summary.Status, "unknown"),
+				workflowStatusRowValue(summary.Reason, "unknown"),
+				summary.ProviderCount,
+				summary.EnabledCount,
+				workflowStatusRowValue(summary.Routing, "unknown"),
+				workflowStatusRowValue(summary.FirstType, "none"),
+				workflowStatusRowValue(summary.FirstModel, "none"),
+				summary.Chat,
+				summary.ToolPlanning,
+				summary.APIKeyEnvConfigured,
+				summary.APIKeyEnvSet,
+			),
+			MetadataOnly:    true,
+			PromptStored:    false,
+			ResponseStored:  false,
+			HistoryExcluded: true,
+		}, true, nil
+	case "/workers", "/agents", "/runtime":
+		summary, err := tuiAIDialogSummarizeWorkers(root)
+		if err != nil {
+			return tui.AIDialogResult{Status: "failed", MetadataOnly: true, HistoryExcluded: true}, true, fmt.Errorf("workers: %w", err)
+		}
+		return tui.AIDialogResult{
+			Status: "completed",
+			Text: fmt.Sprintf(
+				"workers: registered=%d available=%d busy=%d draining=%d offline=%d stale=%d local=%d remote=%d queue_claims=%d queue_claimed=%d queue_dispatched=%d queue_completed=%d queue_failed=%d dispatch_executions=%d dispatch_dispatched=%d dispatch_completed=%d dispatch_failed=%d transport_requests=%d transport_pending=%d transport_ack=%d transport_completed=%d transport_failed=%d dispatch_results=%d dispatch_results_completed=%d dispatch_results_failed=%d leases=%d active_leases=%d stale_leases=%d completed_leases=%d failed_leases=%d reclaimed_leases=%d stored=false",
+				summary.Registered,
+				summary.Available,
+				summary.Busy,
+				summary.Draining,
+				summary.Offline,
+				summary.Stale,
+				summary.Local,
+				summary.Remote,
+				summary.QueueClaims,
+				summary.QueueClaimed,
+				summary.QueueDispatched,
+				summary.QueueCompleted,
+				summary.QueueFailed,
+				summary.DispatchExecutions,
+				summary.DispatchDispatched,
+				summary.DispatchCompleted,
+				summary.DispatchFailed,
+				summary.TransportRequests,
+				summary.TransportPending,
+				summary.TransportAck,
+				summary.TransportCompleted,
+				summary.TransportFailed,
+				summary.DispatchResults,
+				summary.DispatchResultsCompleted,
+				summary.DispatchResultsFailed,
+				summary.Leases,
+				summary.ActiveLeases,
+				summary.StaleLeases,
+				summary.CompletedLeases,
+				summary.FailedLeases,
+				summary.ReclaimedLeases,
+			),
+			MetadataOnly:    true,
+			PromptStored:    false,
+			ResponseStored:  false,
+			HistoryExcluded: true,
+		}, true, nil
+	case "/actions", "/semantic-actions", "/action-list":
+		return tui.AIDialogResult{
+			Status:          "completed",
+			Text:            tuiAIDialogSemanticActionCommandText(),
+			MetadataOnly:    true,
+			PromptStored:    false,
+			ResponseStored:  false,
+			HistoryExcluded: true,
+		}, true, nil
+	case "/quickstart", "/use", "/runbook":
+		return tui.AIDialogResult{
+			Status: "completed",
+			Text: "quickstart: init=./bin/ouro init <workspace> chat=./bin/ouro chat <workspace> " +
+				"provider=ouro provider configure-openai-compatible <workspace> --name local-openai --base-url <base-url> --model <model> --api-key-env <ENV_VAR> --capability chat --capability tool_planning --enable " +
+				"smoke=make smoke-ide commands=/help /overview /setup /status /next /command /evidence /mission /capabilities /workers api_key_value_stored=false stored=false",
+			MetadataOnly:    true,
+			PromptStored:    false,
+			ResponseStored:  false,
+			HistoryExcluded: true,
+		}, true, nil
+	case "/keys", "/shortcuts", "/controls":
+		return tui.AIDialogResult{
+			Status: "completed",
+			Text: "keys: chat_focus=i submit=enter cancel_draft=esc quit=q|ctrl+c back=esc " +
+				"runtime_select=up|down runtime_details=d runtime_execute=x_then_x runtime_request=r runtime_control=R_restart|L_renew|C_cancel|E_expire " +
+				"replay_step=left|right replay_jump=home|end|g|G run_control=c_cancel|p_pause stored=false",
+			MetadataOnly:    true,
+			PromptStored:    false,
+			ResponseStored:  false,
+			HistoryExcluded: true,
+		}, true, nil
+	case "/help":
+		return tui.AIDialogResult{
+			Status:          "completed",
+			Text:            "local commands: /quickstart /use /runbook /keys /shortcuts /controls /doctor /readiness /health /completion /progress /percent /acceptance /completion-status /final /final-evidence /final-review /audit /audit-completion /production-acceptance /status /workflow /workflow-status /overview /context /actions /usage /providers /workers /evidence /mission /next /command /artifacts /gates /previews /runs /reports /toolchain /capabilities /safety /setup /clear /help; normal prompts call configured provider; stored=false",
+			MetadataOnly:    true,
+			PromptStored:    false,
+			ResponseStored:  false,
+			HistoryExcluded: true,
+		}, true, nil
+	case "/context", "/workspace-context":
+		contextText := strings.Join(strings.Fields(tuiAIDialogWorkspaceContext(root)), " ")
+		if strings.TrimSpace(contextText) == "" {
+			contextText = "workspace.context_status=unavailable"
+		}
+		return tui.AIDialogResult{
+			Status:          "completed",
+			Text:            "workspace context: " + contextText + " stored=false",
+			MetadataOnly:    true,
+			PromptStored:    false,
+			ResponseStored:  false,
+			HistoryExcluded: true,
+		}, true, nil
+	case "/usage", "/provider-usage":
+		summary, err := SummarizeProviderUsageRecords(root)
+		if err != nil {
+			return tui.AIDialogResult{Status: "failed", MetadataOnly: true, HistoryExcluded: true}, true, fmt.Errorf("provider usage summary: %w", err)
+		}
+		return tui.AIDialogResult{
+			Status: "completed",
+			Text: fmt.Sprintf(
+				"provider usage: records=%d providers=%s models=%s input_tokens=%d output_tokens=%d total_tokens=%d estimated_cost_usd=%.6f estimated_cost_records=%d budget_enforced_records=%d budget_within_limit_records=%d first_created_at=%s last_created_at=%s stored=false",
+				summary.RecordCount,
+				providerUsageSummaryRowList(summary.Providers),
+				providerUsageSummaryRowList(summary.Models),
+				summary.InputTokens,
+				summary.OutputTokens,
+				summary.TotalTokens,
+				summary.EstimatedCostUSD,
+				summary.EstimatedCostRecordCount,
+				summary.BudgetEnforcedCount,
+				summary.BudgetWithinLimitCount,
+				installRequestDisplayValue(summary.FirstCreatedAt, "none"),
+				installRequestDisplayValue(summary.LastCreatedAt, "none"),
+			),
+			MetadataOnly:    true,
+			PromptStored:    false,
+			ResponseStored:  false,
+			HistoryExcluded: true,
+		}, true, nil
+	case "/setup":
+		return tui.AIDialogResult{
+			Status:          "completed",
+			Text:            "AI setup: " + aiProviderSetupConversationMessage(aiProviderSetupGuidanceForWorkspace(root)) + " stored=false",
+			MetadataOnly:    true,
+			PromptStored:    false,
+			ResponseStored:  false,
+			HistoryExcluded: true,
+		}, true, nil
+	case "/clear":
+		return tui.AIDialogResult{
+			Status:          "completed",
+			Text:            "dialog cleared; stored=false",
+			MetadataOnly:    true,
+			PromptStored:    false,
+			ResponseStored:  false,
+			HistoryExcluded: true,
+			ClearHistory:    true,
+		}, true, nil
+	default:
+		return tui.AIDialogResult{}, false, nil
+	}
+}
+
+func tuiAIDialogReplayRuns(root string) (int, string, error) {
+	eventDBPath := filepath.Join(root, "replay", "events.db")
+	info, err := os.Lstat(eventDBPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, "none", nil
+		}
+		return 0, "", fmt.Errorf("stat replay events db: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return 0, "", fmt.Errorf("replay events db must be a regular file")
+	}
+
+	store, err := eventlog.OpenSQLiteReadOnly(eventDBPath)
+	if err != nil {
+		return 0, "", err
+	}
+	defer store.Close()
+
+	runIDs, err := store.ListRunIDs(context.Background())
+	if err != nil {
+		return 0, "", err
+	}
+	latest := "none"
+	if len(runIDs) > 0 {
+		latest = runIDs[len(runIDs)-1]
+	}
+	return len(runIDs), latest, nil
+}
+
+type tuiAIDialogEvidenceStatus struct {
+	Runs             int
+	LatestAvailable  bool
+	Events           int
+	Facts            int
+	Intents          int
+	Hints            int
+	Nodes            int
+	Edges            int
+	Findings         int
+	Surfaces         int
+	Artifacts        int
+	VerifiedFindings int
+	Paths            int
+	EvidenceRefs     int
+	Exhausted        int
+	Suggestions      int
+}
+
+type tuiAIDialogOverviewStatus struct {
+	WorkflowStatus     string
+	Stage              string
+	NextGate           string
+	MissionConfigured  bool
+	TargetPolicy       string
+	Isolation          string
+	Targets            int
+	SafetyReady        bool
+	StrictReady        bool
+	ProvidersStatus    string
+	Providers          int
+	ProviderEnabled    int
+	Chat               bool
+	ToolPlanning       bool
+	CapabilitiesStatus string
+	DomainPacks        int
+	Tools              int
+	EvidenceRuns       int
+	Findings           int
+	ReportsCurrent     bool
+	WorkersRegistered  int
+	WorkerQueueClaims  int
+}
+
+type tuiAIDialogDoctorStatus struct {
+	WorkspaceReady  bool
+	StrictReady     bool
+	Warnings        int
+	Errors          int
+	StrictErrors    int
+	SafetyBypasses  int
+	ProvidersStatus string
+	ProviderEnabled int
+	Chat            bool
+	ToolPlanning    bool
+	WorkflowStatus  string
+	NextGate        string
+	ToolchainStatus string
+	Tools           int
+}
+
+func tuiAIDialogDoctorSummary(root string) (tuiAIDialogDoctorStatus, error) {
+	safety, err := tuiAIDialogSafetySummary(root)
+	if err != nil {
+		return tuiAIDialogDoctorStatus{}, fmt.Errorf("summarize safety: %w", err)
+	}
+	providers := tuiAIDialogSummarizeProviders(root)
+	toolchain := tuiAIDialogToolchainSummary(root)
+
+	summary := tuiAIDialogDoctorStatus{
+		WorkspaceReady:  safety.Ready,
+		StrictReady:     safety.StrictReady,
+		Warnings:        safety.Warnings,
+		Errors:          safety.Errors,
+		StrictErrors:    safety.StrictErrors,
+		SafetyBypasses:  safety.Bypasses,
+		ProvidersStatus: providers.Status,
+		ProviderEnabled: providers.EnabledCount,
+		Chat:            providers.Chat,
+		ToolPlanning:    providers.ToolPlanning,
+		WorkflowStatus:  "blocked",
+		NextGate:        "doctor",
+		ToolchainStatus: toolchain.Status,
+		Tools:           toolchain.ToolCount,
+	}
+	if !safety.Ready {
+		return summary, nil
+	}
+
+	workflow, err := SummarizeWorkspaceWorkflow(root)
+	if err != nil {
+		return summary, nil
+	}
+	summary.WorkflowStatus = workflow.Status
+	summary.NextGate = workflow.NextGate
+	return summary, nil
+}
+
+func tuiAIDialogOverviewSummary(root string) (tuiAIDialogOverviewStatus, error) {
+	workflow, err := SummarizeWorkspaceWorkflow(root)
+	if err != nil {
+		return tuiAIDialogOverviewStatus{}, fmt.Errorf("summarize workflow: %w", err)
+	}
+	mission, err := tuiAIDialogSummarizeMissionScope(root)
+	if err != nil {
+		return tuiAIDialogOverviewStatus{}, fmt.Errorf("summarize mission: %w", err)
+	}
+	safety, err := tuiAIDialogSafetySummary(root)
+	if err != nil {
+		return tuiAIDialogOverviewStatus{}, fmt.Errorf("summarize safety: %w", err)
+	}
+	providers := tuiAIDialogSummarizeProviders(root)
+	capabilities := tuiAIDialogCapabilitiesSummary(root)
+	evidenceSummary, err := tuiAIDialogSummarizeEvidence(root)
+	if err != nil {
+		return tuiAIDialogOverviewStatus{}, fmt.Errorf("summarize evidence: %w", err)
+	}
+	reports, err := tuiAIDialogSummarizeReports(root)
+	if err != nil {
+		return tuiAIDialogOverviewStatus{}, fmt.Errorf("summarize reports: %w", err)
+	}
+	workers, err := tuiAIDialogSummarizeWorkers(root)
+	if err != nil {
+		return tuiAIDialogOverviewStatus{}, fmt.Errorf("summarize workers: %w", err)
+	}
+
+	return tuiAIDialogOverviewStatus{
+		WorkflowStatus:     workflow.Status,
+		Stage:              workflow.Stage,
+		NextGate:           workflow.NextGate,
+		MissionConfigured:  mission.Configured,
+		TargetPolicy:       mission.TargetPolicy,
+		Isolation:          mission.Isolation,
+		Targets:            mission.Targets,
+		SafetyReady:        safety.Ready,
+		StrictReady:        safety.StrictReady,
+		ProvidersStatus:    providers.Status,
+		Providers:          providers.ProviderCount,
+		ProviderEnabled:    providers.EnabledCount,
+		Chat:               providers.Chat,
+		ToolPlanning:       providers.ToolPlanning,
+		CapabilitiesStatus: capabilities.Status,
+		DomainPacks:        capabilities.DomainPacks,
+		Tools:              capabilities.Tools,
+		EvidenceRuns:       evidenceSummary.Runs,
+		Findings:           evidenceSummary.Findings,
+		ReportsCurrent:     reports.Current,
+		WorkersRegistered:  workers.Registered,
+		WorkerQueueClaims:  workers.QueueClaims,
+	}, nil
+}
+
+type tuiAIDialogMissionScopeStatus struct {
+	Configured   bool
+	GoalSet      bool
+	TargetPolicy string
+	Isolation    string
+	Targets      int
+	URLs         int
+	Domains      int
+	Hosts        int
+	CIDRs        int
+	Artifacts    int
+	Challenges   int
+	Exclusions   int
+}
+
+func tuiAIDialogSummarizeMissionScope(root string) (tuiAIDialogMissionScopeStatus, error) {
+	summary := tuiAIDialogMissionScopeStatus{
+		TargetPolicy: "unknown",
+		Isolation:    "unknown",
+	}
+
+	missionLoaded := false
+	missionData, err := os.ReadFile(filepath.Join(root, "mission.yaml"))
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return tuiAIDialogMissionScopeStatus{}, fmt.Errorf("read mission config: %w", err)
+		}
+	} else {
+		missionLoaded = true
+		var missionConfig struct {
+			Mission struct {
+				Goal string `yaml:"goal"`
+			} `yaml:"mission"`
+		}
+		if err := yaml.Unmarshal(missionData, &missionConfig); err != nil {
+			return tuiAIDialogMissionScopeStatus{}, fmt.Errorf("parse mission config: %w", err)
+		}
+		summary.GoalSet = strings.TrimSpace(missionConfig.Mission.Goal) != ""
+	}
+
+	scopeConfig, err := LoadScopeConfig(filepath.Join(root, "scope.yaml"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			summary.Configured = false
+			return summary, nil
+		}
+		return tuiAIDialogMissionScopeStatus{}, fmt.Errorf("read scope config: %w", err)
+	}
+	summary.Configured = missionLoaded
+	if policy, ok := normalizeScopeTargetPolicy(scopeConfig.Scope.TargetPolicy); ok {
+		summary.TargetPolicy = policy
+	}
+	if isolation, ok := normalizeExecutionIsolation(scopeConfig.Execution.Isolation); ok {
+		summary.Isolation = isolation
+	}
+	summary.Targets = len(scopeConfig.Scope.Targets)
+	summary.Exclusions = len(scopeConfig.Scope.Exclusions)
+	for _, target := range scopeConfig.Scope.Targets {
+		switch strings.ToLower(strings.TrimSpace(target.Kind)) {
+		case "url":
+			summary.URLs++
+		case "domain":
+			summary.Domains++
+		case "host":
+			summary.Hosts++
+		case "cidr":
+			summary.CIDRs++
+		case "artifact":
+			summary.Artifacts++
+		case "challenge":
+			summary.Challenges++
+		}
+	}
+	return summary, nil
+}
+
+func tuiAIDialogSummarizeEvidence(root string) (tuiAIDialogEvidenceStatus, error) {
+	eventDBPath := filepath.Join(root, "replay", "events.db")
+	info, err := os.Lstat(eventDBPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return tuiAIDialogEvidenceStatus{}, nil
+		}
+		return tuiAIDialogEvidenceStatus{}, fmt.Errorf("stat replay events db: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return tuiAIDialogEvidenceStatus{}, fmt.Errorf("replay events db must be a regular file")
+	}
+
+	store, err := eventlog.OpenSQLiteReadOnly(eventDBPath)
+	if err != nil {
+		return tuiAIDialogEvidenceStatus{}, err
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	runIDs, err := store.ListRunIDs(ctx)
+	if err != nil {
+		return tuiAIDialogEvidenceStatus{}, err
+	}
+	summary := tuiAIDialogEvidenceStatus{Runs: len(runIDs)}
+	if len(runIDs) == 0 {
+		return summary, nil
+	}
+	summary.LatestAvailable = true
+
+	events, err := store.Replay(ctx, runIDs[len(runIDs)-1])
+	if err != nil {
+		return tuiAIDialogEvidenceStatus{}, err
+	}
+	summary.Events = len(events)
+	snapshot, err := eventlog.BuildReplaySnapshot(events)
+	if err != nil {
+		return tuiAIDialogEvidenceStatus{}, err
+	}
+	summary.Facts = len(snapshot.Blackboard.Facts)
+	summary.Intents = len(snapshot.Blackboard.Intents)
+	summary.Hints = len(snapshot.Blackboard.Hints)
+	nodes := snapshot.Evidence.Nodes()
+	summary.Nodes = len(nodes)
+	summary.Edges = len(snapshot.Evidence.Edges())
+	for _, node := range nodes {
+		switch node.Type {
+		case evidence.NodeFinding:
+			summary.Findings++
+		case evidence.NodeSurface:
+			summary.Surfaces++
+		case evidence.NodeArtifact:
+			if strings.EqualFold(strings.TrimSpace(node.SourceKind), "artifact") {
+				summary.Artifacts++
+			}
+		}
+	}
+	projected := reportpkg.Project(snapshot.Evidence)
+	summary.VerifiedFindings = len(projected.VerifiedFindings)
+	summary.Paths = len(projected.Paths)
+	summary.EvidenceRefs = len(projected.EvidenceRefs)
+	summary.Exhausted = len(projected.ExhaustedAreas)
+	summary.Suggestions = len(projected.NextRunSuggestions)
+	return summary, nil
+}
+
+type tuiAIDialogReportSummary struct {
+	Dispatches int
+	Executions int
+	Current    bool
+	RunID      string
+	EventCount int
+	Written    bool
+}
+
+func tuiAIDialogSummarizeReports(root string) (tuiAIDialogReportSummary, error) {
+	if strings.TrimSpace(root) == "" {
+		return tuiAIDialogReportSummary{}, fmt.Errorf("workspace path is required")
+	}
+	info, err := os.Stat(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return tuiAIDialogReportSummary{}, fmt.Errorf("workspace root missing")
+		}
+		return tuiAIDialogReportSummary{}, fmt.Errorf("stat workspace root: %w", err)
+	}
+	if !info.IsDir() {
+		return tuiAIDialogReportSummary{}, fmt.Errorf("workspace root is not a directory")
+	}
+
+	dispatches, err := tuiAIDialogCountReportJSON(filepath.Join(root, "reports", "report-projection-dispatches"), "report projection dispatch directory")
+	if err != nil {
+		return tuiAIDialogReportSummary{}, err
+	}
+	executions, err := tuiAIDialogCountReportJSON(filepath.Join(root, "reports", "report-projection-dispatch-executions"), "report projection dispatch execution directory")
+	if err != nil {
+		return tuiAIDialogReportSummary{}, err
+	}
+
+	summary := tuiAIDialogReportSummary{
+		Dispatches: dispatches,
+		Executions: executions,
+	}
+	selection, found, err := tuiAIDialogReadReportSelection(filepath.Join(root, "reports", "report-projection-selection.json"))
+	if err != nil {
+		return tuiAIDialogReportSummary{}, err
+	}
+	if found && strings.EqualFold(strings.TrimSpace(selection.Status), "current") {
+		summary.Current = true
+		summary.RunID = selection.RunID
+		summary.EventCount = selection.EventCount
+		summary.Written = selection.Written
+	}
+	return summary, nil
+}
+
+func tuiAIDialogCountReportJSON(dir string, label string) (int, error) {
+	info, err := os.Lstat(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("inspect %s: %w", label, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return 0, fmt.Errorf("%s must not be a symlink", label)
+	}
+	if !info.IsDir() {
+		return 0, fmt.Errorf("%s is not a directory", label)
+	}
+	paths, err := filepath.Glob(filepath.Join(dir, "*.json"))
+	if err != nil {
+		return 0, fmt.Errorf("glob %s: %w", label, err)
+	}
+	return len(paths), nil
+}
+
+func tuiAIDialogReadReportSelection(path string) (ReportProjectionDispatchExecutionSelection, bool, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return ReportProjectionDispatchExecutionSelection{}, false, nil
+		}
+		return ReportProjectionDispatchExecutionSelection{}, false, fmt.Errorf("inspect report projection selection: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return ReportProjectionDispatchExecutionSelection{}, false, fmt.Errorf("report projection selection must not be a symlink")
+	}
+	if info.IsDir() {
+		return ReportProjectionDispatchExecutionSelection{}, false, fmt.Errorf("report projection selection is a directory")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ReportProjectionDispatchExecutionSelection{}, false, fmt.Errorf("read report projection selection: %w", err)
+	}
+	var selection ReportProjectionDispatchExecutionSelection
+	if err := json.Unmarshal(data, &selection); err != nil {
+		return ReportProjectionDispatchExecutionSelection{}, false, fmt.Errorf("decode report projection selection: %w", err)
+	}
+	return selection, true, nil
+}
+
+func tuiAIDialogToolchainSummary(root string) ToolchainContractCheck {
+	check, err := CheckToolchainContracts(root)
+	if err != nil {
+		return ToolchainContractCheck{
+			Status: "blocked",
+			Errors: []string{
+				"contract-check-unavailable",
+			},
+		}
+	}
+	if strings.TrimSpace(check.Status) == "" {
+		check.Status = "blocked"
+	}
+	return check
+}
+
+type tuiAIDialogCapabilitiesStatus struct {
+	Status               string
+	Domains              int
+	DomainPacks          int
+	PackCapabilities     int
+	Parsers              int
+	Strategies           int
+	SemanticActions      int
+	SemanticCapabilities int
+	Manifests            int
+	ManifestCapabilities int
+	ManifestDependencies int
+	Tools                int
+	ToolCapabilities     int
+	ToolCategories       int
+	TargetKinds          int
+	ManagedBundles       int
+	ManagedInstalled     int
+	ManagedBlocked       int
+	Patterns             int
+	Errors               int
+}
+
+func tuiAIDialogCapabilitiesSummary(root string) tuiAIDialogCapabilitiesStatus {
+	check := tuiAIDialogToolchainSummary(root)
+	summary := tuiAIDialogCapabilitiesStatus{
+		Status:          workflowStatusRowValue(check.Status, "blocked"),
+		DomainPacks:     check.DomainPackCount,
+		Manifests:       check.ManifestCount,
+		Tools:           check.ToolCount,
+		Patterns:        check.PatternCount,
+		SemanticActions: check.SemanticActionCount,
+		Errors:          len(check.Errors),
+	}
+
+	packs := contracts.BuiltInDomainPacks()
+	if summary.DomainPacks == 0 {
+		summary.DomainPacks = len(packs)
+	}
+	domains := map[string]bool{}
+	for _, pack := range packs {
+		if pack == nil {
+			summary.Errors++
+			continue
+		}
+		if domainName := strings.TrimSpace(string(pack.Domain())); domainName != "" {
+			domains[domainName] = true
+		}
+		summary.PackCapabilities += len(pack.Capabilities())
+		summary.Parsers += len(pack.Parsers())
+		summary.Strategies += len(pack.StrategyPatterns())
+	}
+	summary.Domains = len(domains)
+
+	actions := compiler.DeclaredSemanticActions()
+	if summary.SemanticActions == 0 {
+		summary.SemanticActions = len(actions)
+	}
+	for _, action := range actions {
+		capabilities, ok := compiler.CapabilitiesForAction(action)
+		if !ok {
+			summary.Errors++
+			continue
+		}
+		summary.SemanticCapabilities += len(capabilities)
+	}
+
+	manifests, err := toolchain.LoadManifests(filepath.Join(root, "toolchain"))
+	if err != nil {
+		summary.Errors++
+	} else {
+		summary.Manifests = len(manifests)
+		for _, manifest := range manifests {
+			summary.ManifestCapabilities += len(manifest.Capabilities)
+			summary.ManifestDependencies += len(manifest.Dependencies)
+		}
+	}
+
+	tools := toolchain.BuiltInAppSecTools()
+	if summary.Tools == 0 {
+		summary.Tools = len(tools)
+	}
+	toolCategories := map[string]bool{}
+	targetKinds := map[string]bool{}
+	for _, builtInTool := range tools {
+		summary.ToolCapabilities += len(builtInTool.Capabilities)
+		if category := strings.TrimSpace(builtInTool.Category); category != "" {
+			toolCategories[category] = true
+		}
+		if targetKind := strings.TrimSpace(builtInTool.TargetKind); targetKind != "" {
+			targetKinds[targetKind] = true
+		}
+	}
+	summary.ToolCategories = len(toolCategories)
+	summary.TargetKinds = len(targetKinds)
+
+	bundles, err := ListManagedToolBundles(root)
+	if err != nil {
+		summary.Errors++
+	} else {
+		summary.ManagedBundles = len(bundles)
+		for _, bundle := range bundles {
+			switch strings.ToLower(strings.TrimSpace(bundle.Status)) {
+			case "installed":
+				summary.ManagedInstalled++
+			case "blocked":
+				summary.ManagedBlocked++
+			}
+		}
+	}
+	return summary
+}
+
+type tuiAIDialogSafetyStatus struct {
+	Ready        bool
+	StrictReady  bool
+	Warnings     int
+	Errors       int
+	StrictErrors int
+	Bypasses     int
+	Authorized   int
+	Missing      int
+	Expired      int
+}
+
+func tuiAIDialogSafetySummary(root string) (tuiAIDialogSafetyStatus, error) {
+	report, err := doctorWorkspaceMetadataOnly(root)
+	if err != nil {
+		return tuiAIDialogSafetyStatus{}, err
+	}
+	strictReport, err := doctorWorkspaceStrictMetadataOnly(root)
+	if err != nil {
+		return tuiAIDialogSafetyStatus{}, err
+	}
+	summary := tuiAIDialogSafetyStatus{
+		Ready:        report.Ready,
+		StrictReady:  strictReport.Ready,
+		Warnings:     len(report.Warnings),
+		Errors:       len(report.Errors),
+		StrictErrors: len(strictReport.Errors),
+		Bypasses:     len(report.SafetyBypasses),
+	}
+	for _, bypass := range report.SafetyBypasses {
+		if bypass.Authorized {
+			summary.Authorized++
+		}
+		if bypass.MissingAuthorization {
+			summary.Missing++
+		}
+		if bypass.ExpiredAuthorization {
+			summary.Expired++
+		}
+	}
+	return summary, nil
+}
+
+type tuiAIDialogProviderStatus struct {
+	Status              string
+	Reason              string
+	ProviderCount       int
+	EnabledCount        int
+	Routing             string
+	FirstType           string
+	FirstModel          string
+	Chat                bool
+	ToolPlanning        bool
+	APIKeyEnvConfigured bool
+	APIKeyEnvSet        bool
+}
+
+func tuiAIDialogSummarizeProviders(root string) tuiAIDialogProviderStatus {
+	guidance := aiProviderSetupGuidanceForWorkspace(root)
+	summary := tuiAIDialogProviderStatus{
+		Status:     guidance.Status,
+		Reason:     guidance.Reason,
+		Routing:    "unknown",
+		FirstType:  "none",
+		FirstModel: "none",
+	}
+	config, err := LoadProviderConfig(filepath.Join(root, "providers.yaml"))
+	if err != nil {
+		if summary.Status == "" {
+			summary.Status = "blocked"
+		}
+		if summary.Reason == "" {
+			summary.Reason = "load-provider-config"
+		}
+		return summary
+	}
+
+	summary.ProviderCount = len(config.Providers)
+	enabledProviders := EnabledProviders(config)
+	summary.EnabledCount = len(enabledProviders)
+	if routing, err := providerRoutingStrategy(config); err == nil {
+		summary.Routing = routing
+	}
+	if len(enabledProviders) == 0 {
+		return summary
+	}
+
+	first := enabledProviders[0]
+	summary.FirstType = strings.TrimSpace(first.Type)
+	summary.FirstModel = strings.TrimSpace(first.Model)
+	for _, capability := range NormalizeProviderCapabilities(first.Capabilities) {
+		switch capability {
+		case "chat":
+			summary.Chat = true
+		case "tool_planning":
+			summary.ToolPlanning = true
+		}
+	}
+	apiKeyEnv := strings.TrimSpace(first.APIKeyEnv)
+	summary.APIKeyEnvConfigured = validProviderAPIKeyEnvName(apiKeyEnv)
+	if summary.APIKeyEnvConfigured {
+		_, summary.APIKeyEnvSet = os.LookupEnv(apiKeyEnv)
+	}
+	return summary
+}
+
+type tuiAIDialogWorkerRuntimeStatus struct {
+	Registered               int
+	Available                int
+	Busy                     int
+	Draining                 int
+	Offline                  int
+	Stale                    int
+	Local                    int
+	Remote                   int
+	QueueClaims              int
+	QueueClaimed             int
+	QueueDispatched          int
+	QueueCompleted           int
+	QueueFailed              int
+	DispatchExecutions       int
+	DispatchDispatched       int
+	DispatchCompleted        int
+	DispatchFailed           int
+	TransportRequests        int
+	TransportPending         int
+	TransportAck             int
+	TransportCompleted       int
+	TransportFailed          int
+	DispatchResults          int
+	DispatchResultsCompleted int
+	DispatchResultsFailed    int
+	Leases                   int
+	ActiveLeases             int
+	StaleLeases              int
+	CompletedLeases          int
+	FailedLeases             int
+	ReclaimedLeases          int
+}
+
+func tuiAIDialogSummarizeWorkers(root string) (tuiAIDialogWorkerRuntimeStatus, error) {
+	now := time.Now().UTC()
+	summary := tuiAIDialogWorkerRuntimeStatus{}
+
+	workers, err := ListRuntimeWorkersWithStaleness(root, now, DefaultRuntimeWorkerStaleAfter)
+	if err != nil {
+		return tuiAIDialogWorkerRuntimeStatus{}, err
+	}
+	summary.Registered = len(workers)
+	for _, worker := range workers {
+		switch strings.TrimSpace(worker.Mode) {
+		case "local":
+			summary.Local++
+		case "remote":
+			summary.Remote++
+		}
+		if worker.Stale {
+			summary.Stale++
+			continue
+		}
+		switch strings.TrimSpace(worker.Status) {
+		case "available":
+			summary.Available++
+		case "busy":
+			summary.Busy++
+		case "draining":
+			summary.Draining++
+		case "offline":
+			summary.Offline++
+		}
+	}
+
+	claims, err := ListRuntimeWorkerQueueClaims(root)
+	if err != nil {
+		return tuiAIDialogWorkerRuntimeStatus{}, err
+	}
+	summary.QueueClaims = len(claims)
+	for _, claim := range claims {
+		switch strings.TrimSpace(claim.Status) {
+		case "claimed":
+			summary.QueueClaimed++
+		case "dispatched":
+			summary.QueueDispatched++
+		case "completed":
+			summary.QueueCompleted++
+		case "failed":
+			summary.QueueFailed++
+		}
+	}
+
+	dispatches, err := ListRuntimeWorkerQueueDispatchExecutions(root)
+	if err != nil {
+		return tuiAIDialogWorkerRuntimeStatus{}, err
+	}
+	summary.DispatchExecutions = len(dispatches)
+	for _, dispatch := range dispatches {
+		switch strings.TrimSpace(dispatch.Status) {
+		case "dispatched":
+			summary.DispatchDispatched++
+		case "completed":
+			summary.DispatchCompleted++
+		case "failed":
+			summary.DispatchFailed++
+		}
+	}
+
+	requests, err := ListRuntimeWorkerTransportDispatchRequests(root, "")
+	if err != nil {
+		return tuiAIDialogWorkerRuntimeStatus{}, err
+	}
+	summary.TransportRequests = len(requests)
+	for _, request := range requests {
+		switch strings.TrimSpace(request.Status) {
+		case "pending":
+			summary.TransportPending++
+		case "acknowledged":
+			summary.TransportAck++
+		case "completed":
+			summary.TransportCompleted++
+		case "failed":
+			summary.TransportFailed++
+		}
+	}
+
+	results, err := ListRuntimeWorkerQueueDispatchResults(root)
+	if err != nil {
+		return tuiAIDialogWorkerRuntimeStatus{}, err
+	}
+	summary.DispatchResults = len(results)
+	for _, result := range results {
+		switch strings.TrimSpace(result.Status) {
+		case "completed":
+			summary.DispatchResultsCompleted++
+		case "failed":
+			summary.DispatchResultsFailed++
+		}
+	}
+
+	leases, err := ListWorkerLeasesWithStaleness(root, now, DefaultWorkerLeaseStaleAfter)
+	if err != nil {
+		return tuiAIDialogWorkerRuntimeStatus{}, err
+	}
+	summary.Leases = len(leases)
+	for _, lease := range leases {
+		if lease.Stale {
+			summary.StaleLeases++
+			continue
+		}
+		switch strings.TrimSpace(lease.Status) {
+		case "active":
+			summary.ActiveLeases++
+		case "completed":
+			summary.CompletedLeases++
+		case "failed":
+			summary.FailedLeases++
+		case "reclaimed":
+			summary.ReclaimedLeases++
+		}
+	}
+
+	return summary, nil
+}
+
+func tuiAIDialogSanitizedWorkflowCommand(root string, command string) string {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return "none"
+	}
+	workspace := strings.TrimSpace(root)
+	if workspace != "" {
+		replacements := []string{workspace}
+		if cleaned := filepath.Clean(workspace); cleaned != workspace {
+			replacements = append(replacements, cleaned)
+		}
+		for _, replacement := range replacements {
+			command = strings.ReplaceAll(command, replacement, "<workspace>")
+		}
+	}
+	return strings.Join(strings.Fields(command), " ")
+}
+
+func providerGenerationMessagesForAIDialog(request tui.AIDialogRequest) []ProviderGenerationMessage {
+	messages := []ProviderGenerationMessage{}
+	for _, history := range request.History {
+		role := strings.ToLower(strings.TrimSpace(history.Role))
+		content := strings.TrimSpace(history.Text)
+		if content == "" {
+			continue
+		}
+		if role != "user" && role != "assistant" {
+			continue
+		}
+		messages = append(messages, ProviderGenerationMessage{Role: role, Content: content})
+	}
+	if prompt := strings.TrimSpace(request.Prompt); prompt != "" {
+		messages = append(messages, ProviderGenerationMessage{Role: "user", Content: prompt})
+	}
+	return messages
+}
+
+type aiProviderSetupGuidance struct {
+	Status    string
+	Reason    string
+	Provider  string
+	Model     string
+	APIKeyEnv string
+	Command   string
+	EnvHint   string
+}
+
+func tuiModelWithAIProviderSetupRows(root string, model tui.Model) tui.Model {
+	guidance := aiProviderSetupGuidanceForWorkspace(root)
+	if strings.TrimSpace(guidance.Status) == "" {
+		return model
+	}
+	message := aiProviderSetupConversationMessage(guidance)
+	if message != "" {
+		model = model.AppendMissionEvents([]tui.MissionEvent{{
+			Kind:    "AI setup",
+			Message: message,
+		}})
+	}
+	return model.PrependRuntimeRows(tui.RuntimeTabModelRuntime, []string{aiProviderSetupRuntimeRow(guidance)})
+}
+
+func aiProviderSetupGuidanceForWorkspace(root string) aiProviderSetupGuidance {
+	command := aiProviderSetupConfigureCommand(root)
+	config, err := LoadProviderConfig(filepath.Join(root, "providers.yaml"))
+	if err != nil {
+		return aiProviderSetupGuidance{
+			Status:  "blocked",
+			Reason:  "load-provider-config",
+			Command: command,
+		}
+	}
+	if err := ValidateProviderConfig(config); err != nil {
+		return aiProviderSetupGuidance{
+			Status:  "blocked",
+			Reason:  "invalid-provider-config",
+			Command: command,
+		}
+	}
+	providers := EnabledProviders(config)
+	if len(providers) == 0 {
+		return aiProviderSetupGuidance{
+			Status:  "needs-provider",
+			Reason:  "no-enabled-provider",
+			Command: command,
+		}
+	}
+	provider := providers[0]
+	providerType := strings.TrimSpace(provider.Type)
+	if providerType == "offline" {
+		return aiProviderSetupGuidance{
+			Status:   "needs-provider",
+			Reason:   "enabled-provider-offline",
+			Provider: strings.TrimSpace(provider.Name),
+			Model:    strings.TrimSpace(provider.Model),
+			Command:  command,
+		}
+	}
+	if providerType != providerTypeOpenAICompatible {
+		return aiProviderSetupGuidance{
+			Status:   "blocked",
+			Reason:   "unsupported-provider-type",
+			Provider: strings.TrimSpace(provider.Name),
+			Model:    strings.TrimSpace(provider.Model),
+			Command:  command,
+		}
+	}
+	apiKeyEnv := strings.TrimSpace(provider.APIKeyEnv)
+	if !validProviderAPIKeyEnvName(apiKeyEnv) {
+		return aiProviderSetupGuidance{
+			Status:   "needs-api-key",
+			Reason:   "missing-api-key-env-name",
+			Provider: strings.TrimSpace(provider.Name),
+			Model:    strings.TrimSpace(provider.Model),
+			Command:  command,
+			EnvHint:  "set --api-key-env to an environment variable name",
+		}
+	}
+	if _, ok := os.LookupEnv(apiKeyEnv); !ok {
+		return aiProviderSetupGuidance{
+			Status:    "needs-api-key",
+			Reason:    "api-key-env-not-set",
+			Provider:  strings.TrimSpace(provider.Name),
+			Model:     strings.TrimSpace(provider.Model),
+			APIKeyEnv: apiKeyEnv,
+			Command:   command,
+			EnvHint:   "export " + apiKeyEnv + "=<your-provider-key>",
+		}
+	}
+	return aiProviderSetupGuidance{
+		Status:    "ready",
+		Reason:    "openai-compatible-ready",
+		Provider:  strings.TrimSpace(provider.Name),
+		Model:     strings.TrimSpace(provider.Model),
+		APIKeyEnv: apiKeyEnv,
+		Command:   command,
+	}
+}
+
+func aiProviderSetupConfigureCommand(root string) string {
+	return strings.Join([]string{
+		"ouro",
+		"provider",
+		"configure-openai-compatible",
+		strings.TrimSpace(root),
+		"--name",
+		"<provider-name>",
+		"--base-url",
+		"<https://provider.example/v1>",
+		"--model",
+		"<model>",
+		"--api-key-env",
+		"<ENV_VAR>",
+		"--capability",
+		"chat",
+		"--capability",
+		"tool_planning",
+		"--enable",
+	}, " ")
+}
+
+func aiProviderSetupConversationMessage(guidance aiProviderSetupGuidance) string {
+	parts := []string{
+		"status=" + workflowStatusRowValue(guidance.Status, "unknown"),
+		"reason=" + workflowStatusRowValue(guidance.Reason, "unknown"),
+	}
+	if provider := strings.TrimSpace(guidance.Provider); provider != "" {
+		parts = append(parts, "provider="+workflowStatusRowValue(provider, "unknown"))
+	}
+	if model := strings.TrimSpace(guidance.Model); model != "" {
+		parts = append(parts, "model="+workflowStatusRowValue(model, "unknown"))
+	}
+	if strings.TrimSpace(guidance.Status) == "ready" {
+		parts = append(parts, "api_key_value_stored=false")
+		return strings.Join(parts, " ")
+	}
+	if envHint := strings.TrimSpace(guidance.EnvHint); envHint != "" {
+		parts = append(parts, "hint="+envHint)
+	}
+	if command := strings.TrimSpace(guidance.Command); command != "" {
+		parts = append(parts, "configure: "+command)
+	}
+	parts = append(parts, "api_key_value_stored=false")
+	return strings.Join(parts, " ")
+}
+
+func aiProviderSetupRuntimeRow(guidance aiProviderSetupGuidance) string {
+	fields := []string{
+		"AI setup: status=" + workflowStatusRowValue(guidance.Status, "unknown"),
+		"reason=" + workflowStatusRowValue(guidance.Reason, "unknown"),
+		"mode=read-only",
+	}
+	if provider := strings.TrimSpace(guidance.Provider); provider != "" {
+		fields = append(fields, "provider="+workflowStatusRowValue(provider, "unknown"))
+	}
+	if model := strings.TrimSpace(guidance.Model); model != "" {
+		fields = append(fields, "model="+workflowStatusRowValue(model, "unknown"))
+	}
+	if apiKeyEnv := strings.TrimSpace(guidance.APIKeyEnv); apiKeyEnv != "" {
+		fields = append(fields, "api_key_env="+workflowStatusRowValue(apiKeyEnv, "unknown"))
+	}
+	fields = append(fields, "api_key_value_stored=false")
+	if envHint := strings.TrimSpace(guidance.EnvHint); envHint != "" {
+		fields = append(fields, "hint="+compactRuntimeRowValue(envHint), "hint_b64="+runtimeRowValueB64(envHint))
+	}
+	if command := strings.TrimSpace(guidance.Command); command != "" && strings.TrimSpace(guidance.Status) != "ready" {
+		fields = append(fields, "command="+command, "command_b64="+runtimeRowValueB64(command))
+	}
+	return strings.Join(fields, " ")
+}
+
+func aiProviderSetupFailureHint(root string) string {
+	guidance := aiProviderSetupGuidanceForWorkspace(root)
+	command := strings.TrimSpace(guidance.Command)
+	if command == "" {
+		command = aiProviderSetupConfigureCommand(root)
+	}
+	if envHint := strings.TrimSpace(guidance.EnvHint); envHint != "" {
+		return "AI setup: " + envHint + "; configure provider with: " + command
+	}
+	return "AI setup: configure provider with: " + command
 }
 
 func tuiModelWithWorkspaceRuntimeRows(root string, model tui.Model) tui.Model {
+	model = tuiModelWithAIProviderSetupRows(root, model)
 	model = tuiModelWithProviderUsageSummaryRows(root, model)
+	model = tuiModelWithModelGenerationArtifactRows(root, model)
+	model = tuiModelWithModelToolPlanPreviewArtifactRows(root, model)
+	model = tuiModelWithModelToolPlanPreviewAcceptanceRows(root, model)
+	model = tuiModelWithWorkspaceWorkflowStatusRows(root, model)
+	model = tuiModelWithManagedBundleRows(root, model)
+	model = tuiModelWithReleaseManagedStatusRows(root, model)
+	model = tuiModelWithManagedUpdateRequestRows(root, model)
+	model = tuiModelWithManagedUpdateDownloadPlanRows(root, model)
+	model = tuiModelWithManagedUpdateDownloadExecutionRows(root, model)
+	model = tuiModelWithManagedUpdateApplyExecutionRows(root, model)
 	model = tuiModelWithInstallRequestRows(root, model)
 	model = tuiModelWithToolchainContractRows(root, model)
 	model = tuiModelWithCompilePreviewSignalRows(root, model)
 	model = tuiModelWithCompilePreviewReviewRows(root, model)
+	model = tuiModelWithCompilePreviewReviewExecutionDispatchRows(root, model)
 	model = tuiModelWithCompilePreviewReviewExecutionRows(root, model)
 	model = tuiModelWithCompilePreviewRows(root, model)
 	model = tuiModelWithReplayWorkbenchCollaborationNoteRows(root, model)
@@ -1120,6 +3313,83 @@ func tuiModelWithWorkspaceRuntimeRows(root string, model tui.Model) tui.Model {
 	return model
 }
 
+func tuiModelWithWorkspaceWorkflowStatusRows(root string, model tui.Model) tui.Model {
+	status, err := SummarizeWorkspaceWorkflow(root)
+	if err != nil {
+		return model.PrependRuntimeRows(tui.RuntimeTabModelRuntime, []string{
+			"workflow status error: mode=read-only error=" + workflowStatusRowValue(err.Error(), "unknown"),
+		})
+	}
+	row := strings.Join([]string{
+		"workflow status:",
+		"mode=" + workflowStatusRowValue(status.Mode, "read-only"),
+		"status=" + workflowStatusRowValue(status.Status, "unknown"),
+		"stage=" + workflowStatusRowValue(status.Stage, "unknown"),
+		"next_gate=" + workflowStatusRowValue(status.NextGate, "none"),
+		"reason=" + workflowStatusRowValue(status.Reason, "none"),
+		fmt.Sprintf("safety_errors=%d", status.SafetyErrorCount),
+		"action=" + workflowStatusRowValue(string(status.Action), "none"),
+		"command=" + workflowStatusCommandRowValue(status.Command),
+		workflowStatusPathRowField("preview", status.PreviewPath, "-"),
+		workflowStatusPathRowField("acceptance", status.AcceptancePath, "-"),
+		workflowStatusPathRowField("review", status.ReviewPath, "-"),
+		workflowStatusPathRowField("selection", status.SelectionPath, "-"),
+		workflowStatusPathRowField("dispatch", status.DispatchPath, "-"),
+		workflowStatusPathRowField("execution", status.ExecutionPath, "-"),
+		workflowStatusPathRowField("report_dispatch", status.ReportDispatchPath, "-"),
+		workflowStatusPathRowField("report_execution", status.ReportExecutionPath, "-"),
+		workflowStatusPathRowField("report_selection", status.ReportSelectionPath, "-"),
+		"report_run=" + workflowStatusRowValue(status.ReportRunID, "-"),
+		workflowStatusPathRowField("report", status.ReportPath, "-"),
+	}, " ")
+	links := fmt.Sprintf(
+		"workflow status links: preview=%s acceptance=%s review=%s selection=%s dispatch=%s execution=%s report_dispatch=%s report_execution=%s report_selection=%s report_run=%s report=%s",
+		workflowStatusRowValue(status.PreviewPath, "-"),
+		workflowStatusRowValue(status.AcceptancePath, "-"),
+		workflowStatusRowValue(status.ReviewPath, "-"),
+		workflowStatusRowValue(status.SelectionPath, "-"),
+		workflowStatusRowValue(status.DispatchPath, "-"),
+		workflowStatusRowValue(status.ExecutionPath, "-"),
+		workflowStatusRowValue(status.ReportDispatchPath, "-"),
+		workflowStatusRowValue(status.ReportExecutionPath, "-"),
+		workflowStatusRowValue(status.ReportSelectionPath, "-"),
+		workflowStatusRowValue(status.ReportRunID, "-"),
+		workflowStatusRowValue(status.ReportPath, "-"),
+	)
+	return model.PrependRuntimeRows(tui.RuntimeTabModelRuntime, []string{row, links})
+}
+
+func workflowStatusPathRowField(key string, value string, fallback string) string {
+	visible := workflowStatusRowValue(value, fallback)
+	raw := strings.TrimSpace(value)
+	if raw == "" || raw == "-" || strings.EqualFold(raw, "none") || visible == "-" || strings.EqualFold(visible, "none") {
+		return key + "=" + visible
+	}
+	return key + "=" + visible + " " + key + "_b64=" + runtimeRowValueB64(raw)
+}
+
+func workflowStatusRowValue(value string, fallback string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fallback
+	}
+	return strings.Join(strings.Fields(value), "_")
+}
+
+func workflowStatusCommandRowValue(command string) string {
+	fields := strings.Fields(command)
+	if len(fields) == 0 {
+		return "-"
+	}
+	parts := []string{}
+	for i, field := range fields {
+		if i < 3 || strings.HasPrefix(field, "--") {
+			parts = append(parts, field)
+		}
+	}
+	return strings.Join(parts, "_")
+}
+
 func tuiModelWithProviderUsageSummaryRows(root string, model tui.Model) tui.Model {
 	summary, err := SummarizeProviderUsageRecords(root)
 	if err != nil {
@@ -1128,6 +3398,177 @@ func tuiModelWithProviderUsageSummaryRows(root string, model tui.Model) tui.Mode
 		})
 	}
 	return model.AppendRuntimeRows(tui.RuntimeTabModelRuntime, providerUsageSummaryRuntimeRows(root, summary))
+}
+
+func tuiModelWithModelGenerationArtifactRows(root string, model tui.Model) tui.Model {
+	artifacts, err := ListModelGenerationArtifacts(root)
+	if err != nil {
+		return model.AppendRuntimeRows(tui.RuntimeTabModelRuntime, []string{
+			"model generation artifact error: mode=metadata-only error=" + compactRuntimeRowValue(err.Error()),
+		})
+	}
+	if len(artifacts) == 0 {
+		return model
+	}
+	return model.AppendRuntimeRows(tui.RuntimeTabModelRuntime, modelGenerationArtifactRuntimeRows(artifacts))
+}
+
+func modelGenerationArtifactRuntimeRows(artifacts []ModelGenerationArtifact) []string {
+	rows := make([]string, 0, len(artifacts))
+	for _, artifact := range artifacts {
+		cost := "unavailable"
+		if artifact.EstimatedCostAvailable {
+			cost = fmt.Sprintf("$%.6f", artifact.EstimatedCostUSD)
+		}
+		rows = append(rows, fmt.Sprintf(
+			"model generation artifact: mode=metadata-only status=%s run=%s source=%s provider=%s model=%s tokens=%d/%d/%d cost=%s budget=%s ledger_write=%t assistant_text_persisted=%t%s path=%s artifact=%s digest=%s preview=%s preview_b64=%s",
+			installRequestDisplayValue(artifact.Status, "unknown"),
+			installRequestDisplayValue(artifact.RunID, "unknown"),
+			installRequestDisplayValue(artifact.Source, "model-generation"),
+			compactRuntimeRowValue(artifact.ProviderName),
+			compactRuntimeRowValue(artifact.Model),
+			artifact.InputTokens,
+			artifact.OutputTokens,
+			artifact.TotalTokens,
+			cost,
+			installRequestDisplayValue(artifact.BudgetStatus, "not_enforced"),
+			artifact.LedgerWrite,
+			artifact.AssistantTextPersisted,
+			modelGenerationArtifactStreamingRowSuffix(artifact),
+			artifact.Path,
+			artifact.ArtifactID,
+			installRequestDisplayValue(artifact.TextDigest, "none"),
+			compactRuntimeRowValue(artifact.TextPreview),
+			runtimeRowValueB64(artifact.TextPreview),
+		))
+		rows = append(rows, fmt.Sprintf(
+			"model generation route: mode=metadata-only routing=%s attempts=%d failover=%t selected=%s failed=%s artifact=%s",
+			installRequestDisplayValue(artifact.RoutingStrategy, providerRoutingFirstEnabled),
+			modelGenerationArtifactAttemptCount(artifact),
+			artifact.ProviderFailover,
+			installRequestDisplayValue(artifact.SelectedProviderName, artifact.ProviderName),
+			providerUsageSummaryRowList(artifact.FailedProviderNames),
+			artifact.ArtifactID,
+		))
+		if len(artifact.RequiredCapabilities) > 0 || len(artifact.SkippedProviders) > 0 {
+			rows = append(rows, fmt.Sprintf(
+				"model generation capability route: mode=metadata-only required_capabilities=%s capability_match=%t skipped_providers=%s artifact=%s",
+				providerCapabilityList(artifact.RequiredCapabilities),
+				artifact.CapabilityMatch,
+				providerSkippedProvidersSummary(artifact.SkippedProviders),
+				artifact.ArtifactID,
+			))
+		}
+	}
+	return rows
+}
+
+func tuiModelWithModelToolPlanPreviewArtifactRows(root string, model tui.Model) tui.Model {
+	artifacts, err := ListModelToolPlanPreviewArtifacts(root)
+	if err != nil {
+		return model.AppendRuntimeRows(tui.RuntimeTabModelRuntime, []string{
+			"model tool plan preview error: mode=metadata-only error=" + compactRuntimeRowValue(err.Error()),
+		})
+	}
+	if len(artifacts) == 0 {
+		return model
+	}
+	return model.AppendRuntimeRows(tui.RuntimeTabModelRuntime, modelToolPlanPreviewArtifactRuntimeRows(artifacts))
+}
+
+func modelToolPlanPreviewArtifactRuntimeRows(artifacts []ModelToolPlanPreviewArtifact) []string {
+	rows := make([]string, 0, len(artifacts))
+	for _, artifact := range artifacts {
+		validity := "invalid"
+		if artifact.Valid {
+			validity = "valid"
+		}
+		rows = append(rows, fmt.Sprintf(
+			"model tool plan preview: source=%s agent=%s role=%s provider=%s model=%s action=%s validity=%s mode=%s digest=%s preview=%s preview_b64=%s path=%s path_b64=%s",
+			installRequestDisplayValue(artifact.Source, closedLoopPlannerGenerationStageID),
+			installRequestDisplayValue(artifact.AgentID, "closed-loop-planner"),
+			installRequestDisplayValue(artifact.Role, "planner"),
+			compactRuntimeRowValue(artifact.ProviderName),
+			compactRuntimeRowValue(artifact.Model),
+			installRequestDisplayValue(string(artifact.Action), "unknown"),
+			validity,
+			installRequestDisplayValue(artifact.ExecutionMode, "metadata-only"),
+			installRequestDisplayValue(artifact.ArtifactDigest, "none"),
+			compactRuntimeRowValue(artifact.MarkerPreview),
+			runtimeRowValueB64(artifact.MarkerPreview),
+			compactRuntimeRowValue(artifact.Path),
+			runtimeRowValueB64(artifact.Path),
+		))
+	}
+	return rows
+}
+
+func tuiModelWithModelToolPlanPreviewAcceptanceRows(root string, model tui.Model) tui.Model {
+	acceptances, err := ListModelToolPlanPreviewAcceptances(root)
+	if err != nil {
+		return model.AppendRuntimeRows(tui.RuntimeTabModelRuntime, []string{
+			"model tool plan preview acceptance error: mode=metadata-only error=" + compactRuntimeRowValue(err.Error()),
+		})
+	}
+	if len(acceptances) == 0 {
+		return model
+	}
+	return model.AppendRuntimeRows(tui.RuntimeTabModelRuntime, modelToolPlanPreviewAcceptanceRuntimeRows(acceptances))
+}
+
+func modelToolPlanPreviewAcceptanceRuntimeRows(acceptances []ModelToolPlanPreviewAcceptance) []string {
+	rows := []string{fmt.Sprintf("model tool plan preview acceptances: total=%d", len(acceptances))}
+	for _, acceptance := range acceptances {
+		rows = append(rows, fmt.Sprintf(
+			"model tool plan preview acceptance artifact: status=%s mode=%s accepted_by=%s accepted_by_b64=%s accepted_at=%s reason=%s reason_b64=%s action=%s nodes=%d warnings=%d assistant_text_persisted=%t executed_tools=%d worker_dispatch=%t target_contact=%t execution_dispatch_created=%t preview=%s preview_b64=%s review=%s review_b64=%s selection=%s selection_b64=%s path=%s path_b64=%s digest=%s",
+			installRequestDisplayValue(acceptance.Status, "accepted"),
+			installRequestDisplayValue(acceptance.ExecutionMode, "metadata-only"),
+			compactRuntimeRowValue(acceptance.AcceptedBy),
+			runtimeRowValueB64(acceptance.AcceptedBy),
+			installRequestDisplayValue(acceptance.AcceptedAt, "unknown"),
+			compactRuntimeRowValue(acceptance.Reason),
+			runtimeRowValueB64(acceptance.Reason),
+			installRequestDisplayValue(string(acceptance.Action), "unknown"),
+			acceptance.ReviewNodes,
+			acceptance.ReviewWarnings,
+			acceptance.AssistantTextPersisted,
+			acceptance.ExecutedTools,
+			acceptance.WorkerDispatch,
+			acceptance.TargetContact,
+			acceptance.ExecutionDispatchCreated,
+			compactRuntimeRowValue(acceptance.PreviewArtifactPath),
+			runtimeRowValueB64(acceptance.PreviewArtifactPath),
+			compactRuntimeRowValue(acceptance.ReviewPath),
+			runtimeRowValueB64(acceptance.ReviewPath),
+			compactRuntimeRowValue(acceptance.SelectionPath),
+			runtimeRowValueB64(acceptance.SelectionPath),
+			compactRuntimeRowValue(acceptance.Path),
+			runtimeRowValueB64(acceptance.Path),
+			installRequestDisplayValue(acceptance.AcceptanceDigest, "none"),
+		))
+	}
+	return rows
+}
+
+func modelGenerationArtifactStreamingRowSuffix(artifact ModelGenerationArtifact) string {
+	if !artifact.Streaming {
+		return ""
+	}
+	return fmt.Sprintf(
+		" streaming=true stream_completed=%t stream_chunk_count=%d stream_digest=%s stream_preview=%s stream_preview_b64=%s",
+		artifact.StreamCompleted,
+		artifact.StreamChunkCount,
+		installRequestDisplayValue(artifact.StreamDigest, "none"),
+		compactRuntimeRowValue(artifact.StreamPreview),
+		runtimeRowValueB64(artifact.StreamPreview),
+	)
+}
+
+func modelGenerationArtifactAttemptCount(artifact ModelGenerationArtifact) int {
+	if artifact.ProviderAttemptCount > 0 {
+		return artifact.ProviderAttemptCount
+	}
+	return 1
 }
 
 func providerUsageSummaryRuntimeRows(root string, summary ProviderUsageSummary) []string {
@@ -1246,11 +3687,12 @@ func replayWorkbenchSessionRuntimeRowsWithSelection(sessions []ReplayWorkbenchSe
 		}
 		reason := installRequestDisplayValue(strings.TrimSpace(selection.Reason), "none")
 		rows = append(rows, fmt.Sprintf(
-			"replay workbench session selection: status=%s mode=%s %s reason=%s primary=%s selected=%s runs=%d filters=%d endpoints=%d superseded=%d session=%s",
+			"replay workbench session selection: status=%s mode=%s %s reason=%s reason_b64=%s primary=%s selected=%s runs=%d filters=%d endpoints=%d superseded=%d session=%s",
 			installRequestDisplayValue(selection.Status, "current"),
 			installRequestDisplayValue(selection.Mode, "metadata-only"),
 			actorFields,
 			reason,
+			runtimeRowValueB64(strings.TrimSpace(selection.Reason)),
 			installRequestDisplayValue(selection.PrimaryRunID, "unknown"),
 			installRequestDisplayValue(selection.SelectedRunID, "unknown"),
 			selection.RunIDs,
@@ -1285,7 +3727,7 @@ func replayWorkbenchSessionRuntimeRowsWithSelection(sessions []ReplayWorkbenchSe
 			current = "true"
 		}
 		rows = append(rows, fmt.Sprintf(
-			"replay workbench session artifact: status=%s mode=%s primary=%s selected=%s runs=%d filters=%d endpoints=%d created_by=%s created_at=%s reason=%s decision=%s reviewer=%s reviewed_at=%s review_reason=%s current=%s path=%s",
+			"replay workbench session artifact: status=%s mode=%s primary=%s selected=%s runs=%d filters=%d endpoints=%d created_by=%s created_at=%s reason=%s reason_b64=%s decision=%s reviewer=%s reviewed_at=%s review_reason=%s review_reason_b64=%s current=%s path=%s",
 			installRequestDisplayValue(session.Status, "unknown"),
 			installRequestDisplayValue(session.Mode, "metadata-only"),
 			installRequestDisplayValue(session.PrimaryRunID, "unknown"),
@@ -1296,10 +3738,12 @@ func replayWorkbenchSessionRuntimeRowsWithSelection(sessions []ReplayWorkbenchSe
 			installRequestDisplayValue(session.CreatedBy, "unknown"),
 			installRequestDisplayValue(session.CreatedAt, "unknown"),
 			installRequestDisplayValue(strings.TrimSpace(session.Reason), "none"),
+			runtimeRowValueB64(strings.TrimSpace(session.Reason)),
 			decision,
 			reviewer,
 			reviewedAt,
 			reviewReason,
+			runtimeRowValueB64(reviewReason),
 			current,
 			installRequestDisplayValue(session.Path, "unknown"),
 		))
@@ -1356,16 +3800,21 @@ func reportProjectionDispatchRuntimeRows(dispatches []ReportProjectionDispatch) 
 		actor := reportProjectionDispatchRowValue(dispatch.Actor, "operator")
 		reason := reportProjectionDispatchRowValue(dispatch.Reason, "none")
 		rows = append(rows, fmt.Sprintf(
-			"report projection dispatch artifact: %s status=%s mode=%s run=%s events=%d planned_report=%s actor=%s created_at=%s reason=%s",
+			"report projection dispatch artifact: %s artifact_b64=%s status=%s mode=%s run=%s events=%d planned_report=%s planned_report_b64=%s actor=%s actor_b64=%s created_at=%s created_at_b64=%s reason=%s reason_b64=%s",
 			dispatch.Path,
+			runtimeRowValueB64(dispatch.Path),
 			status,
 			mode,
 			reportProjectionDispatchRowValue(dispatch.RunID, "unknown"),
 			dispatch.EventCount,
 			reportProjectionDispatchRowValue(dispatch.ReportPath, "not-generated"),
+			runtimeRowValueB64(dispatch.ReportPath),
 			actor,
+			runtimeRowValueB64(dispatch.Actor),
 			reportProjectionDispatchRowValue(dispatch.CreatedAt, "unknown"),
+			runtimeRowValueB64(dispatch.CreatedAt),
 			reason,
+			runtimeRowValueB64(dispatch.Reason),
 		))
 		rows = append(rows, fmt.Sprintf(
 			"report projection dispatch compact: status=%s mode=%s run=%s events=%d actor=%s reason=%s",
@@ -1420,34 +3869,56 @@ func reportProjectionDispatchExecutionRuntimeRowsWithSelection(executions []Repo
 	}
 	rows := []string{fmt.Sprintf("report projection dispatch executions: total=%d annotated=%d current=%d", len(executions), annotated, current)}
 	if selectionFound {
+		selectionActor := reportProjectionDispatchRowValue(selection.SelectedBy, "unknown")
+		selectionAt := reportProjectionDispatchRowValue(selection.SelectedAt, "unknown")
 		actorFields := fmt.Sprintf(
-			"selected_by=%s selected_at=%s",
-			reportProjectionDispatchRowValue(selection.SelectedBy, "unknown"),
-			reportProjectionDispatchRowValue(selection.SelectedAt, "unknown"),
+			"selected_by=%s selected_by_b64=%s selected_at=%s selected_at_b64=%s",
+			selectionActor,
+			runtimeRowValueB64(selection.SelectedBy),
+			selectionAt,
+			runtimeRowValueB64(selection.SelectedAt),
 		)
 		if strings.TrimSpace(selection.Status) == "cleared" {
+			selectionActor = reportProjectionDispatchRowValue(selection.ClearedBy, "unknown")
+			selectionAt = reportProjectionDispatchRowValue(selection.ClearedAt, "unknown")
 			actorFields = fmt.Sprintf(
-				"cleared_by=%s cleared_at=%s",
-				reportProjectionDispatchRowValue(selection.ClearedBy, "unknown"),
-				reportProjectionDispatchRowValue(selection.ClearedAt, "unknown"),
+				"cleared_by=%s cleared_by_b64=%s cleared_at=%s cleared_at_b64=%s",
+				selectionActor,
+				runtimeRowValueB64(selection.ClearedBy),
+				selectionAt,
+				runtimeRowValueB64(selection.ClearedAt),
 			)
 		}
+		selectionStatus := reportProjectionDispatchRowValue(selection.Status, "unknown")
 		isCurrent := strings.TrimSpace(selection.Status) == "current"
 		rows = append(rows, fmt.Sprintf(
-			"report projection execution selection: status=%s mode=%s current=%t %s reason=%s execution=%s selection=%s dispatch=%s run=%s report=%s written=%t events=%d superseded=%d",
-			reportProjectionDispatchRowValue(selection.Status, "unknown"),
+			"report projection execution selection: status=%s mode=%s current=%t %s reason=%s reason_b64=%s execution=%s execution_b64=%s selection=%s selection_b64=%s dispatch=%s dispatch_b64=%s run=%s report=%s report_b64=%s written=%t events=%d superseded=%d",
+			selectionStatus,
 			reportProjectionDispatchRowValue(selection.Mode, "metadata-only"),
 			isCurrent,
 			actorFields,
 			reportProjectionDispatchRowValue(selection.Reason, "none"),
+			runtimeRowValueB64(selection.Reason),
 			reportProjectionDispatchRowValue(selection.ExecutionPath, "unknown"),
+			runtimeRowValueB64(selection.ExecutionPath),
 			reportProjectionDispatchRowValue(selection.Path, "unknown"),
+			runtimeRowValueB64(selection.Path),
 			reportProjectionDispatchRowValue(selection.DispatchPath, "unknown"),
+			runtimeRowValueB64(selection.DispatchPath),
 			reportProjectionDispatchRowValue(selection.RunID, "unknown"),
 			reportProjectionDispatchRowValue(selection.ReportPath, "not-generated"),
+			runtimeRowValueB64(selection.ReportPath),
 			selection.Written,
 			selection.EventCount,
 			len(selection.SupersededPaths),
+		))
+		rows = append(rows, fmt.Sprintf(
+			"report projection selection compact: status=%s actor=%s current=%t at=%s reason=%s",
+			selectionStatus,
+			selectionActor,
+			isCurrent,
+			selectionAt,
+			reportProjectionDispatchRowValue(selection.Reason, "none"),
 		))
 		for _, path := range selection.SupersededPaths {
 			if trimmed := strings.TrimSpace(path); trimmed != "" {
@@ -1465,33 +3936,48 @@ func reportProjectionDispatchExecutionRuntimeRowsWithSelection(executions []Repo
 		reviewer := "unknown"
 		reviewedAt := "unknown"
 		reviewReason := "none"
+		reviewerRaw := ""
+		reviewedAtRaw := ""
+		reviewReasonRaw := ""
 		if execution.Annotation != nil {
 			decision = reportProjectionDispatchRowValue(execution.Annotation.Decision, "unreviewed")
 			reviewer = reportProjectionDispatchRowValue(execution.Annotation.Reviewer, "unknown")
 			reviewedAt = reportProjectionDispatchRowValue(execution.Annotation.ReviewedAt, "unknown")
 			reviewReason = reportProjectionDispatchRowValue(execution.Annotation.Reason, "none")
+			reviewerRaw = execution.Annotation.Reviewer
+			reviewedAtRaw = execution.Annotation.ReviewedAt
+			reviewReasonRaw = execution.Annotation.Reason
 		}
 		currentValue := "false"
 		if selectionFound && strings.TrimSpace(selection.Status) == "current" && strings.TrimSpace(selection.ExecutionPath) == strings.TrimSpace(execution.Path) {
 			currentValue = "true"
 		}
 		rows = append(rows, fmt.Sprintf(
-			"report projection dispatch execution artifact: %s status=%s mode=%s dispatch=%s run=%s events=%d report=%s written=%t actor=%s executed_at=%s reason=%s decision=%s reviewer=%s reviewed_at=%s review_reason=%s current=%s",
+			"report projection dispatch execution artifact: %s artifact_b64=%s status=%s mode=%s dispatch=%s dispatch_b64=%s run=%s events=%d report=%s report_b64=%s written=%t actor=%s actor_b64=%s executed_at=%s executed_at_b64=%s reason=%s reason_b64=%s decision=%s reviewer=%s reviewer_b64=%s reviewed_at=%s reviewed_at_b64=%s review_reason=%s review_reason_b64=%s current=%s",
 			execution.Path,
+			runtimeRowValueB64(execution.Path),
 			status,
 			mode,
 			reportProjectionDispatchRowValue(execution.DispatchPath, "unknown"),
+			runtimeRowValueB64(execution.DispatchPath),
 			reportProjectionDispatchRowValue(execution.RunID, "unknown"),
 			execution.EventCount,
 			reportProjectionDispatchRowValue(execution.ReportPath, "not-generated"),
+			runtimeRowValueB64(execution.ReportPath),
 			execution.Written,
 			actor,
+			runtimeRowValueB64(execution.Actor),
 			executedAt,
+			runtimeRowValueB64(execution.ExecutedAt),
 			reason,
+			runtimeRowValueB64(execution.Reason),
 			decision,
 			reviewer,
+			runtimeRowValueB64(reviewerRaw),
 			reviewedAt,
+			runtimeRowValueB64(reviewedAtRaw),
 			reviewReason,
+			runtimeRowValueB64(reviewReasonRaw),
 			currentValue,
 		))
 		rows = append(rows, fmt.Sprintf(
@@ -1507,23 +3993,38 @@ func reportProjectionDispatchExecutionRuntimeRowsWithSelection(executions []Repo
 		))
 		if execution.Annotation != nil {
 			rows = append(rows, fmt.Sprintf(
-				"report projection execution review: mode=metadata-only decision=%s reviewer=%s reviewed_at=%s review_reason=%s execution=%s dispatch=%s run=%s report=%s review=%s",
+				"report projection execution review: mode=metadata-only decision=%s reviewer=%s reviewer_b64=%s reviewed_at=%s reviewed_at_b64=%s review_reason=%s review_reason_b64=%s execution=%s execution_b64=%s dispatch=%s dispatch_b64=%s run=%s report=%s report_b64=%s review=%s review_b64=%s",
 				decision,
 				reviewer,
+				runtimeRowValueB64(reviewerRaw),
 				reviewedAt,
+				runtimeRowValueB64(reviewedAtRaw),
 				reviewReason,
+				runtimeRowValueB64(reviewReasonRaw),
 				reportProjectionDispatchRowValue(execution.Path, "unknown"),
+				runtimeRowValueB64(execution.Path),
 				reportProjectionDispatchRowValue(execution.DispatchPath, "unknown"),
+				runtimeRowValueB64(execution.DispatchPath),
 				reportProjectionDispatchRowValue(execution.RunID, "unknown"),
 				reportProjectionDispatchRowValue(execution.ReportPath, "not-generated"),
+				runtimeRowValueB64(execution.ReportPath),
 				reportProjectionDispatchRowValue(execution.Path, "unknown"),
+				runtimeRowValueB64(execution.Path),
 			))
 			rows = append(rows, fmt.Sprintf(
-				"report projection dispatch execution annotation: decision=%s reviewer=%s reviewed_at=%s reason=%s",
+				"report projection review compact: decision=%s reviewer=%s reviewed_at=%s reason=%s",
 				decision,
 				reviewer,
 				reviewedAt,
 				reviewReason,
+			))
+			rows = append(rows, fmt.Sprintf(
+				"report projection dispatch execution annotation: decision=%s reviewer=%s reviewed_at=%s reason=%s reason_b64=%s",
+				decision,
+				reviewer,
+				reviewedAt,
+				reviewReason,
+				runtimeRowValueB64(execution.Annotation.Reason),
 			))
 		}
 		if execution.Path != "" {
@@ -1537,10 +4038,12 @@ func reportProjectionDispatchExecutionRuntimeRowPrefixes() []string {
 	return []string{
 		"report projection dispatch executions:",
 		"report projection execution selection:",
+		"report projection selection compact:",
 		"report projection execution superseded:",
 		"report projection dispatch execution artifact:",
 		"report projection dispatch execution compact:",
 		"report projection execution review:",
+		"report projection review compact:",
 		"report projection dispatch execution annotation:",
 		"report projection dispatch execution path:",
 	}
@@ -1583,7 +4086,7 @@ func replayWorkbenchCollaborationRuntimeRowsWithSelection(collaborations []Repla
 			actorFields = fmt.Sprintf("cleared_by=%s cleared_at=%s", selection.ClearedBy, selection.ClearedAt)
 		}
 		rows = append(rows, fmt.Sprintf(
-			"replay workbench collaboration selection: status=%s mode=%s collaboration=%s session=%s primary=%s selected=%s runs=%d filters=%d endpoints=%d participants=%d superseded=%d %s reason=%s",
+			"replay workbench collaboration selection: status=%s mode=%s collaboration=%s session=%s primary=%s selected=%s runs=%d filters=%d endpoints=%d participants=%d superseded=%d %s reason=%s reason_b64=%s",
 			installRequestDisplayValue(selection.Status, "unknown"),
 			installRequestDisplayValue(selection.Mode, "metadata-only"),
 			installRequestDisplayValue(selection.CollaborationPath, "unknown"),
@@ -1597,6 +4100,7 @@ func replayWorkbenchCollaborationRuntimeRowsWithSelection(collaborations []Repla
 			len(selection.SupersededPaths),
 			actorFields,
 			installRequestDisplayValue(strings.TrimSpace(selection.Reason), "none"),
+			runtimeRowValueB64(strings.TrimSpace(selection.Reason)),
 		))
 		if selection.Status == "current" {
 			currentPath = selection.CollaborationPath
@@ -1639,7 +4143,7 @@ func replayWorkbenchCollaborationRuntimeRowsWithSelection(collaborations []Repla
 			reviewReason = installRequestDisplayValue(strings.TrimSpace(collaboration.Annotation.Reason), "none")
 		}
 		rows = append(rows, fmt.Sprintf(
-			"replay workbench collaboration artifact: status=%s mode=%s primary=%s selected=%s runs=%d filters=%d endpoints=%d participants=%d created_by=%s created_at=%s reason=%s decision=%s reviewer=%s reviewed_at=%s review_reason=%s current=%s path=%s session_path=%s",
+			"replay workbench collaboration artifact: status=%s mode=%s primary=%s selected=%s runs=%d filters=%d endpoints=%d participants=%d created_by=%s created_at=%s reason=%s reason_b64=%s decision=%s reviewer=%s reviewed_at=%s review_reason=%s review_reason_b64=%s current=%s path=%s session_path=%s",
 			installRequestDisplayValue(collaboration.Status, "unknown"),
 			installRequestDisplayValue(collaboration.Mode, "metadata-only"),
 			installRequestDisplayValue(collaboration.PrimaryRunID, "unknown"),
@@ -1651,10 +4155,12 @@ func replayWorkbenchCollaborationRuntimeRowsWithSelection(collaborations []Repla
 			installRequestDisplayValue(collaboration.CreatedBy, "unknown"),
 			installRequestDisplayValue(collaboration.CreatedAt, "unknown"),
 			installRequestDisplayValue(strings.TrimSpace(collaboration.Reason), "none"),
+			runtimeRowValueB64(strings.TrimSpace(collaboration.Reason)),
 			decision,
 			reviewer,
 			reviewedAt,
 			reviewReason,
+			runtimeRowValueB64(reviewReason),
 			current,
 			installRequestDisplayValue(collaboration.Path, "unknown"),
 			installRequestDisplayValue(collaboration.SessionPath, "unknown"),
@@ -1723,7 +4229,7 @@ func replayWorkbenchCollaborationPresenceRuntimeRows(presence []ReplayWorkbenchC
 		seenAt := installRequestDisplayValue(item.SeenAt, "unknown")
 		reason := installRequestDisplayValue(strings.TrimSpace(item.Reason), "none")
 		rows = append(rows, fmt.Sprintf(
-			"replay workbench collaboration presence artifact: status=%s mode=%s primary=%s selected=%s participant=%s seen_by=%s seen_at=%s reason=%s path=%s collaboration=%s session_path=%s",
+			"replay workbench collaboration presence artifact: status=%s mode=%s primary=%s selected=%s participant=%s seen_by=%s seen_at=%s reason=%s reason_b64=%s path=%s collaboration=%s session_path=%s",
 			status,
 			installRequestDisplayValue(item.Mode, "metadata-only"),
 			installRequestDisplayValue(item.PrimaryRunID, "unknown"),
@@ -1732,6 +4238,7 @@ func replayWorkbenchCollaborationPresenceRuntimeRows(presence []ReplayWorkbenchC
 			seenBy,
 			seenAt,
 			reason,
+			runtimeRowValueB64(strings.TrimSpace(item.Reason)),
 			installRequestDisplayValue(item.Path, "unknown"),
 			installRequestDisplayValue(item.CollaborationPath, "unknown"),
 			installRequestDisplayValue(item.SessionPath, "unknown"),
@@ -1790,7 +4297,7 @@ func replayWorkbenchCollaborationNoteRuntimeRowsWithSelection(notes []ReplayWork
 			actorFields = fmt.Sprintf("cleared_by=%s cleared_at=%s", selection.ClearedBy, selection.ClearedAt)
 		}
 		rows = append(rows, fmt.Sprintf(
-			"replay workbench collaboration note selection: status=%s mode=%s note=%s collaboration=%s session=%s primary=%s selected=%s author=%s target=%s target_kind=%s target_id=%s superseded=%d %s reason=%s",
+			"replay workbench collaboration note selection: status=%s mode=%s note=%s collaboration=%s session=%s primary=%s selected=%s author=%s target=%s target_kind=%s target_id=%s superseded=%d %s reason=%s reason_b64=%s",
 			installRequestDisplayValue(selection.Status, "unknown"),
 			installRequestDisplayValue(selection.Mode, "metadata-only"),
 			installRequestDisplayValue(selection.NotePath, "unknown"),
@@ -1805,6 +4312,7 @@ func replayWorkbenchCollaborationNoteRuntimeRowsWithSelection(notes []ReplayWork
 			len(selection.SupersededPaths),
 			actorFields,
 			installRequestDisplayValue(strings.TrimSpace(selection.Reason), "none"),
+			runtimeRowValueB64(strings.TrimSpace(selection.Reason)),
 		))
 		if selection.Status == "current" {
 			currentPath = selection.NotePath
@@ -1840,7 +4348,7 @@ func replayWorkbenchCollaborationNoteRuntimeRowsWithSelection(notes []ReplayWork
 			current = "true"
 		}
 		rows = append(rows, fmt.Sprintf(
-			"replay workbench collaboration note artifact: status=%s mode=%s primary=%s selected=%s author=%s target=%s target_kind=%s target_id=%s created_at=%s reason=%s body=%s decision=%s reviewer=%s reviewed_at=%s review_reason=%s current=%s path=%s collaboration=%s session_path=%s",
+			"replay workbench collaboration note artifact: status=%s mode=%s primary=%s selected=%s author=%s target=%s target_kind=%s target_id=%s created_at=%s reason=%s reason_b64=%s body=%s body_b64=%s decision=%s reviewer=%s reviewed_at=%s review_reason=%s review_reason_b64=%s current=%s path=%s collaboration=%s session_path=%s",
 			installRequestDisplayValue(note.Status, "unknown"),
 			installRequestDisplayValue(note.Mode, "metadata-only"),
 			installRequestDisplayValue(note.PrimaryRunID, "unknown"),
@@ -1851,11 +4359,14 @@ func replayWorkbenchCollaborationNoteRuntimeRowsWithSelection(notes []ReplayWork
 			installRequestDisplayValue(note.TargetID, "none"),
 			installRequestDisplayValue(note.CreatedAt, "unknown"),
 			reason,
+			runtimeRowValueB64(strings.TrimSpace(note.Reason)),
 			installRequestDisplayValue(strings.TrimSpace(note.Body), "none"),
+			runtimeRowValueB64(strings.TrimSpace(note.Body)),
 			decision,
 			reviewer,
 			reviewedAt,
 			reviewReason,
+			runtimeRowValueB64(reviewReason),
 			current,
 			installRequestDisplayValue(note.Path, "unknown"),
 			installRequestDisplayValue(note.CollaborationPath, "unknown"),
@@ -1959,6 +4470,14 @@ func tuiModelWithCompilePreviewReviewExecutionRows(root string, model tui.Model)
 	return model.AppendRuntimeRows(tui.RuntimeTabToolchainHealth, compilePreviewReviewExecutionRuntimeRows(executions))
 }
 
+func tuiModelWithCompilePreviewReviewExecutionDispatchRows(root string, model tui.Model) tui.Model {
+	dispatches, err := ListToolCompilePreviewReviewExecutionDispatches(root)
+	if err != nil || len(dispatches) == 0 {
+		return model
+	}
+	return model.AppendRuntimeRows(tui.RuntimeTabToolchainHealth, compilePreviewReviewExecutionDispatchRuntimeRows(dispatches))
+}
+
 func tuiModelWithCompilePreviewRows(root string, model tui.Model) tui.Model {
 	if hasToolchainReviewRows(root) {
 		return model
@@ -1992,7 +4511,13 @@ func hasToolchainReviewRows(root string) bool {
 	if reviews, err := ListToolCompilePreviewReviews(root); err == nil && len(reviews) > 0 {
 		return true
 	}
+	if dispatches, err := ListToolCompilePreviewReviewExecutionDispatches(root); err == nil && len(dispatches) > 0 {
+		return true
+	}
 	if executions, err := ListToolCompilePreviewReviewExecutions(root); err == nil && len(executions) > 0 {
+		return true
+	}
+	if requests, err := ListManagedToolBundleUpdateRequests(root); err == nil && len(requests) > 0 {
 		return true
 	}
 	return false
@@ -2067,17 +4592,44 @@ func compilePreviewReviewExecutionRuntimeRows(executions []ToolCompilePreviewRev
 			fmt.Sprintf("actor=%s", installRequestDisplayValue(execution.Actor, "operator")),
 			fmt.Sprintf("executed_at=%s", installRequestDisplayValue(execution.ExecutedAt, "unknown")),
 			fmt.Sprintf("run=%s", installRequestDisplayValue(execution.RunID, "unknown")),
+			fmt.Sprintf("dispatch=%s", installRequestDisplayValue(execution.DispatchPath, "none")),
 			fmt.Sprintf("review=%s", installRequestDisplayValue(execution.ReviewPath, "unknown")),
 			fmt.Sprintf("selection=%s", installRequestDisplayValue(execution.SelectionPath, "none")),
 			fmt.Sprintf("path=%s", installRequestDisplayValue(execution.Path, "unknown")),
 		}
 		if reason := strings.TrimSpace(execution.Reason); reason != "" {
-			fields = append(fields, "reason="+reason)
+			fields = append(fields, "reason="+compactRuntimeRowValue(reason))
+			fields = append(fields, "reason_b64="+runtimeRowValueB64(reason))
 		}
 		if executionError := strings.TrimSpace(execution.Error); executionError != "" {
-			fields = append(fields, "error="+executionError)
+			fields = append(fields, "error="+compactRuntimeRowValue(executionError))
+			fields = append(fields, "error_b64="+runtimeRowValueB64(executionError))
 		}
 		rows = append(rows, "compile-preview review execution artifact: "+strings.Join(fields, " "))
+	}
+	return rows
+}
+
+func compilePreviewReviewExecutionDispatchRuntimeRows(dispatches []ToolCompilePreviewReviewExecutionDispatch) []string {
+	rows := []string{fmt.Sprintf("compile-preview review execution dispatches: total=%d", len(dispatches))}
+	for _, dispatch := range dispatches {
+		fields := []string{
+			fmt.Sprintf("status=%s", installRequestDisplayValue(dispatch.Status, "unknown")),
+			fmt.Sprintf("mode=%s", installRequestDisplayValue(dispatch.Mode, "metadata-only")),
+			fmt.Sprintf("action=%s", installRequestDisplayValue(string(dispatch.Action), "unknown")),
+			fmt.Sprintf("nodes=%d", dispatch.ReviewNodes),
+			fmt.Sprintf("warnings=%d", dispatch.ReviewWarnings),
+			fmt.Sprintf("actor=%s", installRequestDisplayValue(dispatch.Actor, "operator")),
+			fmt.Sprintf("created_at=%s", installRequestDisplayValue(dispatch.CreatedAt, "unknown")),
+			fmt.Sprintf("review=%s", installRequestDisplayValue(dispatch.ReviewPath, "unknown")),
+			fmt.Sprintf("selection=%s", installRequestDisplayValue(dispatch.SelectionPath, "none")),
+			fmt.Sprintf("path=%s", installRequestDisplayValue(dispatch.Path, "unknown")),
+		}
+		if reason := strings.TrimSpace(dispatch.Reason); reason != "" {
+			fields = append(fields, "reason="+compactRuntimeRowValue(reason))
+			fields = append(fields, "reason_b64="+runtimeRowValueB64(reason))
+		}
+		rows = append(rows, "compile-preview review execution dispatch artifact: "+strings.Join(fields, " "))
 	}
 	return rows
 }
@@ -2085,27 +4637,39 @@ func compilePreviewReviewExecutionRuntimeRows(executions []ToolCompilePreviewRev
 func compilePreviewReviewRuntimeRowsWithSelection(reviews []ToolCompilePreviewReview, selection ToolCompilePreviewReviewSelection, selectionFound bool) []string {
 	rows := []string{fmt.Sprintf("compile-preview reviews: total=%d", len(reviews))}
 	if selectionFound {
+		selectedBy := strings.TrimSpace(selection.SelectedBy)
+		selectedAt := strings.TrimSpace(selection.SelectedAt)
+		clearedBy := strings.TrimSpace(selection.ClearedBy)
+		clearedAt := strings.TrimSpace(selection.ClearedAt)
 		actorFields := fmt.Sprintf(
-			"selected_by=%s selected_at=%s",
-			installRequestDisplayValue(selection.SelectedBy, "unknown"),
-			installRequestDisplayValue(selection.SelectedAt, "unknown"),
+			"selected_by=%s selected_by_b64=%s selected_at=%s selected_at_b64=%s",
+			installRequestDisplayValue(compactRuntimeRowValue(selectedBy), "unknown"),
+			runtimeRowValueB64(selectedBy),
+			installRequestDisplayValue(compactRuntimeRowValue(selectedAt), "unknown"),
+			runtimeRowValueB64(selectedAt),
 		)
 		if toolCompilePreviewReviewSelectionIsCleared(selection) {
 			actorFields = fmt.Sprintf(
-				"cleared_by=%s cleared_at=%s",
-				installRequestDisplayValue(selection.ClearedBy, "unknown"),
-				installRequestDisplayValue(selection.ClearedAt, "unknown"),
+				"cleared_by=%s cleared_by_b64=%s cleared_at=%s cleared_at_b64=%s",
+				installRequestDisplayValue(compactRuntimeRowValue(clearedBy), "unknown"),
+				runtimeRowValueB64(clearedBy),
+				installRequestDisplayValue(compactRuntimeRowValue(clearedAt), "unknown"),
+				runtimeRowValueB64(clearedAt),
 			)
 		}
+		reason := strings.TrimSpace(selection.Reason)
+		reviewPath := strings.TrimSpace(selection.ReviewPath)
 		rows = append(rows, fmt.Sprintf(
-			"compile-preview review selection: status=%s mode=%s action=%s superseded=%d %s reason=%s review=%s",
+			"compile-preview review selection: status=%s mode=%s action=%s superseded=%d %s reason=%s reason_b64=%s review=%s review_b64=%s",
 			installRequestDisplayValue(selection.Status, "current"),
 			installRequestDisplayValue(selection.Mode, "metadata-only"),
 			installRequestDisplayValue(string(selection.Action), "unknown"),
 			len(selection.SupersededPaths),
 			actorFields,
-			installRequestDisplayValue(strings.TrimSpace(selection.Reason), "none"),
-			installRequestDisplayValue(selection.ReviewPath, "unknown"),
+			installRequestDisplayValue(compactRuntimeRowValue(reason), "none"),
+			runtimeRowValueB64(reason),
+			installRequestDisplayValue(compactRuntimeRowValue(reviewPath), "unknown"),
+			runtimeRowValueB64(reviewPath),
 		))
 		for _, path := range selection.SupersededPaths {
 			if trimmed := strings.TrimSpace(path); trimmed != "" {
@@ -2120,16 +4684,20 @@ func compilePreviewReviewRuntimeRowsWithSelection(reviews []ToolCompilePreviewRe
 		reason := ""
 		if review.Annotation != nil {
 			decision = installRequestDisplayValue(review.Annotation.Decision, "unreviewed")
-			reviewer = installRequestDisplayValue(review.Annotation.Reviewer, "unknown")
-			reviewedAt = installRequestDisplayValue(review.Annotation.ReviewedAt, "unknown")
+			reviewer = strings.TrimSpace(review.Annotation.Reviewer)
+			reviewedAt = strings.TrimSpace(review.Annotation.ReviewedAt)
 			reason = strings.TrimSpace(review.Annotation.Reason)
 		}
 		current := "false"
 		if selectionFound && toolCompilePreviewReviewSelectionIsCurrent(selection) && strings.TrimSpace(selection.ReviewPath) == strings.TrimSpace(review.Path) {
 			current = "true"
 		}
+		reviewerReadable := installRequestDisplayValue(compactRuntimeRowValue(reviewer), "unknown")
+		reviewedAtReadable := installRequestDisplayValue(compactRuntimeRowValue(reviewedAt), "unknown")
+		reasonReadable := installRequestDisplayValue(compactRuntimeRowValue(reason), "none")
+		pathReadable := installRequestDisplayValue(compactRuntimeRowValue(review.Path), "unknown")
 		rows = append(rows, fmt.Sprintf(
-			"compile-preview review artifact: status=%s mode=%s action=%s nodes=%d warnings=%d current=%s decision=%s reviewer=%s reason=%s reviewed_at=%s path=%s",
+			"compile-preview review artifact: status=%s mode=%s action=%s nodes=%d warnings=%d current=%s decision=%s reviewer=%s reviewer_b64=%s reason=%s reason_b64=%s reviewed_at=%s reviewed_at_b64=%s path=%s path_b64=%s",
 			installRequestDisplayValue(review.Status, "unknown"),
 			installRequestDisplayValue(review.Mode, "metadata-only"),
 			installRequestDisplayValue(string(review.Preview.Action), "unknown"),
@@ -2137,10 +4705,14 @@ func compilePreviewReviewRuntimeRowsWithSelection(reviews []ToolCompilePreviewRe
 			len(review.Preview.Warnings),
 			current,
 			decision,
-			reviewer,
-			installRequestDisplayValue(reason, "none"),
-			reviewedAt,
-			installRequestDisplayValue(review.Path, "unknown"),
+			reviewerReadable,
+			runtimeRowValueB64(reviewer),
+			reasonReadable,
+			runtimeRowValueB64(reason),
+			reviewedAtReadable,
+			runtimeRowValueB64(reviewedAt),
+			pathReadable,
+			runtimeRowValueB64(review.Path),
 		))
 		for _, warning := range review.Preview.Warnings {
 			if trimmed := strings.TrimSpace(warning); trimmed != "" {
@@ -2172,8 +4744,10 @@ func compilePreviewReviewRuntimeRowsWithSelection(reviews []ToolCompilePreviewRe
 }
 
 func compilePreviewReviewComparisonRuntimeRows(comparison ToolCompilePreviewReviewComparison) []string {
+	basePath := strings.TrimSpace(comparison.Base.Path)
+	candidatePath := strings.TrimSpace(comparison.Candidate.Path)
 	rows := []string{fmt.Sprintf(
-		"compile-preview review comparison: mode=%s action=%s node_delta=%d warning_delta=%d added=%d removed=%d changed=%d reordered=%d score_changed=%d signal_changed=%d base=%s candidate=%s",
+		"compile-preview review comparison: mode=%s action=%s node_delta=%d warning_delta=%d added=%d removed=%d changed=%d reordered=%d score_changed=%d signal_changed=%d base=%s base_b64=%s candidate=%s candidate_b64=%s",
 		installRequestDisplayValue(comparison.Mode, "metadata-only"),
 		installRequestDisplayValue(string(comparison.Candidate.Action), "unknown"),
 		comparison.Summary.NodeDelta,
@@ -2184,8 +4758,10 @@ func compilePreviewReviewComparisonRuntimeRows(comparison ToolCompilePreviewRevi
 		comparison.Summary.ReorderedNodes,
 		comparison.Summary.ScoreChangedNodes,
 		comparison.Summary.SignalChangedNodes,
-		installRequestDisplayValue(comparison.Base.Path, "unknown"),
-		installRequestDisplayValue(comparison.Candidate.Path, "unknown"),
+		installRequestDisplayValue(compactRuntimeRowValue(basePath), "unknown"),
+		runtimeRowValueB64(basePath),
+		installRequestDisplayValue(compactRuntimeRowValue(candidatePath), "unknown"),
+		runtimeRowValueB64(candidatePath),
 	)}
 	for _, diff := range comparison.NodeDiffs {
 		rows = append(rows, fmt.Sprintf(
@@ -2316,8 +4892,9 @@ func runtimeWorkerOrchestrationRows(orchestrations []RuntimeWorkerOrchestration)
 			orchestration.DispatchFailed,
 		))
 		rows = append(rows, fmt.Sprintf(
-			"worker orchestration artifact: %s status=%s mode=%s transport=%s placement_ready=%d placement_skipped=%d claimed=%d dispatch_ready=%d dispatch_skipped=%d dispatched=%d failed=%d retry_dispatch_executions_created=%d retry_dispatch_claims_created=%d placement_plan=%s placement_dispatch=%s placement_batch=%s lifecycle_maintenance=%s lifecycle_audit=%s",
+			"worker orchestration artifact: %s artifact_b64=%s status=%s mode=%s transport=%s placement_ready=%d placement_skipped=%d claimed=%d dispatch_ready=%d dispatch_skipped=%d dispatched=%d failed=%d retry_dispatch_executions_created=%d retry_dispatch_claims_created=%d placement_plan=%s placement_plan_b64=%s placement_dispatch=%s placement_dispatch_b64=%s placement_batch=%s placement_batch_b64=%s lifecycle_maintenance=%s lifecycle_maintenance_b64=%s lifecycle_audit=%s lifecycle_audit_b64=%s",
 			orchestration.Path,
+			runtimeRowValueB64(orchestration.Path),
 			installRequestDisplayValue(orchestration.Status, "unknown"),
 			installRequestDisplayValue(orchestration.Mode, "unknown"),
 			installRequestDisplayValue(orchestration.TransportMode, "metadata-only"),
@@ -2331,10 +4908,15 @@ func runtimeWorkerOrchestrationRows(orchestrations []RuntimeWorkerOrchestration)
 			orchestration.RetryDispatchExecutionsCreated,
 			orchestration.RetryDispatchClaimsCreated,
 			installRequestDisplayValue(orchestration.PlacementPlanPath, "none"),
+			runtimeRowValueB64(installRequestDisplayValue(orchestration.PlacementPlanPath, "none")),
 			installRequestDisplayValue(orchestration.PlacementDispatchPlanPath, "none"),
+			runtimeRowValueB64(installRequestDisplayValue(orchestration.PlacementDispatchPlanPath, "none")),
 			installRequestDisplayValue(orchestration.PlacementDispatchBatchPath, "none"),
+			runtimeRowValueB64(installRequestDisplayValue(orchestration.PlacementDispatchBatchPath, "none")),
 			installRequestDisplayValue(orchestration.LifecycleMaintenancePath, "none"),
+			runtimeRowValueB64(installRequestDisplayValue(orchestration.LifecycleMaintenancePath, "none")),
 			installRequestDisplayValue(orchestration.LifecycleAuditPath, "none"),
+			runtimeRowValueB64(installRequestDisplayValue(orchestration.LifecycleAuditPath, "none")),
 		))
 		if orchestration.RetryDispatchExecutionsCreated > 0 || orchestration.RetryDispatchClaimsCreated > 0 {
 			rows = append(rows, fmt.Sprintf(
@@ -2411,8 +4993,9 @@ func runtimeWorkerOrchestrationSupervisorRows(supervisors []RuntimeWorkerOrchest
 			)
 		}
 		rows = append(rows, fmt.Sprintf(
-			"worker orchestration supervisor artifact: %s status=%s mode=%s transport=%s runs=%d max_runs=%d orchestrations_created=%d lifecycle_maintenance=%d lifecycle_audit=%d%s claimed=%d dispatched=%d skipped=%d failed=%d orchestration_path=%s",
+			"worker orchestration supervisor artifact: %s artifact_b64=%s status=%s mode=%s transport=%s runs=%d max_runs=%d orchestrations_created=%d lifecycle_maintenance=%d lifecycle_audit=%d%s claimed=%d dispatched=%d skipped=%d failed=%d orchestration_path=%s orchestration_path_b64=%s",
 			supervisor.Path,
+			runtimeRowValueB64(supervisor.Path),
 			installRequestDisplayValue(supervisor.Status, "unknown"),
 			installRequestDisplayValue(supervisor.Mode, "unknown"),
 			installRequestDisplayValue(supervisor.TransportMode, "metadata-only"),
@@ -2427,6 +5010,7 @@ func runtimeWorkerOrchestrationSupervisorRows(supervisors []RuntimeWorkerOrchest
 			summary.SkippedCount,
 			summary.FailedCount,
 			installRequestDisplayValue(orchestrationPath, "none"),
+			runtimeRowValueB64(installRequestDisplayValue(orchestrationPath, "none")),
 		))
 		rows = append(rows, fmt.Sprintf(
 			"worker orchestration supervisor state: %s mode=%s runs=%d max_runs=%d transport=%s",
@@ -2626,8 +5210,9 @@ func runtimeWorkerPlacementArtifactRows(plans []RuntimeWorkerPlacementPlan) []st
 	rows := []string{fmt.Sprintf("worker placement artifacts: total=%d", len(plans))}
 	for _, plan := range plans {
 		rows = append(rows, fmt.Sprintf(
-			"worker placement artifact: %s status=%s mode=%s ready=%d skipped=%d run=%s",
+			"worker placement artifact: %s artifact_b64=%s status=%s mode=%s ready=%d skipped=%d run=%s",
 			plan.Path,
+			runtimeRowValueB64(plan.Path),
 			installRequestDisplayValue(plan.Status, "unknown"),
 			installRequestDisplayValue(plan.Mode, "unknown"),
 			plan.ReadyCount,
@@ -2710,8 +5295,9 @@ func runtimeWorkerPlacementDispatchRows(plan RuntimeWorkerPlacementDispatchPlan)
 	)}
 	if strings.TrimSpace(plan.Path) != "" {
 		rows = append(rows, fmt.Sprintf(
-			"worker placement dispatch artifact: %s status=%s mode=%s transport=%s ready=%d skipped=%d",
+			"worker placement dispatch artifact: %s artifact_b64=%s status=%s mode=%s transport=%s ready=%d skipped=%d",
 			plan.Path,
+			runtimeRowValueB64(plan.Path),
 			installRequestDisplayValue(plan.Status, "unknown"),
 			installRequestDisplayValue(plan.Mode, "unknown"),
 			installRequestDisplayValue(plan.TransportMode, "unknown"),
@@ -2938,13 +5524,17 @@ func runtimeWorkerQueueClaimRows(claims []RuntimeWorkerQueueClaim) []string {
 		}
 		if strings.TrimSpace(claim.Path) != "" {
 			rows = append(rows, fmt.Sprintf(
-				"worker queue claim artifact: %s status=%s mode=%s worker=%s run=%s execution=%s",
+				"worker queue claim artifact: %s artifact_b64=%s status=%s mode=%s worker=%s worker_b64=%s run=%s run_b64=%s execution=%s execution_b64=%s",
 				claim.Path,
+				runtimeRowValueB64(claim.Path),
 				installRequestDisplayValue(claim.Status, "unknown"),
 				installRequestDisplayValue(claim.Mode, "unknown"),
 				installRequestDisplayValue(claim.WorkerID, "unknown"),
+				runtimeRowValueB64(claim.WorkerID),
 				installRequestDisplayValue(claim.RunID, "unknown"),
+				runtimeRowValueB64(claim.RunID),
 				installRequestDisplayValue(claim.ExecutionID, "unknown"),
+				runtimeRowValueB64(claim.ExecutionID),
 			))
 			rows = append(rows, "worker queue claim path: "+claim.Path)
 		}
@@ -2976,14 +5566,18 @@ func runtimeWorkerQueueDispatchExecutionRows(executions []RuntimeWorkerQueueDisp
 	}
 	for _, execution := range executions {
 		rows = append(rows, fmt.Sprintf(
-			"worker queue dispatch execution artifact: %s status=%s mode=%s transport=%s claim=%s worker=%s execution=%s",
-			execution.Path,
+			"worker queue dispatch execution artifact: %s artifact_b64=%s status=%s mode=%s transport=%s claim=%s claim_b64=%s worker=%s worker_b64=%s execution=%s execution_b64=%s",
+			compactRuntimeRowValue(execution.Path),
+			runtimeRowValueB64(execution.Path),
 			installRequestDisplayValue(execution.Status, "unknown"),
 			installRequestDisplayValue(execution.Mode, "unknown"),
 			installRequestDisplayValue(execution.TransportMode, "unknown"),
-			installRequestDisplayValue(execution.ClaimPath, "unknown"),
-			installRequestDisplayValue(execution.WorkerID, "unknown"),
-			installRequestDisplayValue(execution.ExecutionID, "unknown"),
+			installRequestDisplayValue(compactRuntimeRowValue(execution.ClaimPath), "unknown"),
+			runtimeRowValueB64(execution.ClaimPath),
+			installRequestDisplayValue(compactRuntimeRowValue(execution.WorkerID), "unknown"),
+			runtimeRowValueB64(execution.WorkerID),
+			installRequestDisplayValue(compactRuntimeRowValue(execution.ExecutionID), "unknown"),
+			runtimeRowValueB64(execution.ExecutionID),
 		))
 		rows = append(rows, fmt.Sprintf(
 			"queue dispatch: %s/%s %s %s %s",
@@ -3051,14 +5645,19 @@ func runtimeWorkerTransportDispatchRequestRows(requests []RuntimeWorkerTransport
 	)}
 	for _, request := range requests {
 		rows = append(rows, fmt.Sprintf(
-			"worker transport request: %s status=%s transport=%s dispatch=%s claim=%s worker=%s execution=%s",
-			request.Path,
+			"worker transport request: %s request_b64=%s status=%s transport=%s dispatch=%s dispatch_b64=%s claim=%s claim_b64=%s worker=%s worker_b64=%s execution=%s execution_b64=%s",
+			compactRuntimeRowValue(request.Path),
+			runtimeRowValueB64(request.Path),
 			installRequestDisplayValue(request.Status, "unknown"),
 			installRequestDisplayValue(request.TransportMode, "unknown"),
-			installRequestDisplayValue(request.DispatchExecutionPath, "unknown"),
-			installRequestDisplayValue(request.ClaimPath, "unknown"),
-			installRequestDisplayValue(request.WorkerID, "unknown"),
-			installRequestDisplayValue(request.ExecutionID, "unknown"),
+			installRequestDisplayValue(compactRuntimeRowValue(request.DispatchExecutionPath), "unknown"),
+			runtimeRowValueB64(request.DispatchExecutionPath),
+			installRequestDisplayValue(compactRuntimeRowValue(request.ClaimPath), "unknown"),
+			runtimeRowValueB64(request.ClaimPath),
+			installRequestDisplayValue(compactRuntimeRowValue(request.WorkerID), "unknown"),
+			runtimeRowValueB64(request.WorkerID),
+			installRequestDisplayValue(compactRuntimeRowValue(request.ExecutionID), "unknown"),
+			runtimeRowValueB64(request.ExecutionID),
 		))
 		rows = append(rows, fmt.Sprintf(
 			"transport request: %s/%s %s %s",
@@ -3302,13 +5901,17 @@ func runtimeWorkerQueueDispatchResultRows(results []RuntimeWorkerQueueDispatchRe
 	)}
 	for _, result := range results {
 		rows = append(rows, fmt.Sprintf(
-			"worker queue dispatch result artifact: %s status=%s mode=%s dispatch=%s worker=%s execution=%s",
-			result.Path,
+			"worker queue dispatch result artifact: %s artifact_b64=%s status=%s mode=%s dispatch=%s dispatch_b64=%s worker=%s worker_b64=%s execution=%s execution_b64=%s",
+			compactRuntimeRowValue(result.Path),
+			runtimeRowValueB64(result.Path),
 			installRequestDisplayValue(result.Status, "unknown"),
 			installRequestDisplayValue(result.Mode, "unknown"),
-			installRequestDisplayValue(result.DispatchExecutionPath, "unknown"),
-			installRequestDisplayValue(result.WorkerID, "unknown"),
-			installRequestDisplayValue(result.ExecutionID, "unknown"),
+			installRequestDisplayValue(compactRuntimeRowValue(result.DispatchExecutionPath), "unknown"),
+			runtimeRowValueB64(result.DispatchExecutionPath),
+			installRequestDisplayValue(compactRuntimeRowValue(result.WorkerID), "unknown"),
+			runtimeRowValueB64(result.WorkerID),
+			installRequestDisplayValue(compactRuntimeRowValue(result.ExecutionID), "unknown"),
+			runtimeRowValueB64(result.ExecutionID),
 		))
 		rows = append(rows, fmt.Sprintf(
 			"queue result: %s/%s %s",
@@ -3478,11 +6081,13 @@ func runtimeWorkerDispatchRetryDispatchExecutionRows(executions []RuntimeWorkerD
 	)}
 	for _, execution := range executions {
 		rows = append(rows, fmt.Sprintf(
-			"worker dispatch retry execution artifact: %s status=%s mode=%s retry_dispatch=%s claimed=%d dispatched=%d skipped=%d failed=%d",
-			execution.Path,
+			"worker dispatch retry execution artifact: %s artifact_b64=%s status=%s mode=%s retry_dispatch=%s retry_dispatch_b64=%s claimed=%d dispatched=%d skipped=%d failed=%d",
+			compactRuntimeRowValue(execution.Path),
+			runtimeRowValueB64(execution.Path),
 			installRequestDisplayValue(execution.Status, "unknown"),
 			installRequestDisplayValue(execution.Mode, "execute"),
-			installRequestDisplayValue(execution.RetryDispatchPath, "none"),
+			installRequestDisplayValue(compactRuntimeRowValue(execution.RetryDispatchPath), "none"),
+			runtimeRowValueB64(execution.RetryDispatchPath),
 			execution.Summary.Claimed,
 			execution.Summary.Dispatched,
 			execution.Summary.Skipped,
@@ -3501,19 +6106,29 @@ func runtimeWorkerDispatchRetryDispatchExecutionRows(executions []RuntimeWorkerD
 		))
 		for _, result := range execution.Results {
 			rows = append(rows, fmt.Sprintf(
-				"worker dispatch retry execution result: source_result=%s source_dispatch=%s source_claim=%s retry_claim=%s queue_dispatch=%s request_path=%s transport=%s worker=%s run=%s execution=%s status=%s reason=%s",
-				installRequestDisplayValue(result.SourceResultPath, "none"),
-				installRequestDisplayValue(result.SourceDispatchPath, "none"),
-				installRequestDisplayValue(result.SourceClaimPath, "none"),
-				installRequestDisplayValue(result.RetryClaimPath, "none"),
-				installRequestDisplayValue(result.RetryQueueDispatchPath, "none"),
-				installRequestDisplayValue(result.RetryTransportRequestPath, "none"),
+				"worker dispatch retry execution result: source_result=%s source_result_b64=%s source_dispatch=%s source_dispatch_b64=%s source_claim=%s source_claim_b64=%s retry_claim=%s retry_claim_b64=%s queue_dispatch=%s queue_dispatch_b64=%s request_path=%s request_path_b64=%s transport=%s worker=%s worker_b64=%s run=%s run_b64=%s execution=%s execution_b64=%s status=%s reason=%s reason_b64=%s",
+				installRequestDisplayValue(compactRuntimeRowValue(result.SourceResultPath), "none"),
+				runtimeRowValueB64(result.SourceResultPath),
+				installRequestDisplayValue(compactRuntimeRowValue(result.SourceDispatchPath), "none"),
+				runtimeRowValueB64(result.SourceDispatchPath),
+				installRequestDisplayValue(compactRuntimeRowValue(result.SourceClaimPath), "none"),
+				runtimeRowValueB64(result.SourceClaimPath),
+				installRequestDisplayValue(compactRuntimeRowValue(result.RetryClaimPath), "none"),
+				runtimeRowValueB64(result.RetryClaimPath),
+				installRequestDisplayValue(compactRuntimeRowValue(result.RetryQueueDispatchPath), "none"),
+				runtimeRowValueB64(result.RetryQueueDispatchPath),
+				installRequestDisplayValue(compactRuntimeRowValue(result.RetryTransportRequestPath), "none"),
+				runtimeRowValueB64(result.RetryTransportRequestPath),
 				installRequestDisplayValue(result.RetryTransportMode, "none"),
-				installRequestDisplayValue(result.WorkerID, "none"),
-				installRequestDisplayValue(result.RunID, "none"),
-				installRequestDisplayValue(result.ExecutionID, "none"),
+				installRequestDisplayValue(compactRuntimeRowValue(result.WorkerID), "none"),
+				runtimeRowValueB64(result.WorkerID),
+				installRequestDisplayValue(compactRuntimeRowValue(result.RunID), "none"),
+				runtimeRowValueB64(result.RunID),
+				installRequestDisplayValue(compactRuntimeRowValue(result.ExecutionID), "none"),
+				runtimeRowValueB64(result.ExecutionID),
 				installRequestDisplayValue(result.Status, "unknown"),
-				installRequestDisplayValue(result.Reason, "none"),
+				installRequestDisplayValue(compactRuntimeRowValue(result.Reason), "none"),
+				runtimeRowValueB64(result.Reason),
 			))
 			if result.RetryClaimPath != "" {
 				rows = append(rows, fmt.Sprintf(
@@ -3578,7 +6193,7 @@ func runtimeWorkerDispatchRetrySchedulerRunRuntimeRows(runs []RuntimeWorkerDispa
 		skipReason := installRequestDisplayValue(compactRuntimeRowValue(run.SkipReason), "none")
 		errorValue := installRequestDisplayValue(compactRuntimeRowValue(run.Error), "none")
 		rows = append(rows, fmt.Sprintf(
-			"worker dispatch retry scheduler run artifact: %s status=%s mode=%s max_runs=%d dispatch_retry_claims=%t retry_transport=%s retry_plans_created=%d retry_dispatches_created=%d retry_dispatch_executions_created=%d retry_dispatch_claims_created=%d retry_dispatch_claims_dispatched=%d retry_dispatch_transport_requests_created=%d skip=%s error=%s",
+			"worker dispatch retry scheduler run artifact: %s status=%s mode=%s max_runs=%d dispatch_retry_claims=%t retry_transport=%s retry_plans_created=%d retry_dispatches_created=%d retry_dispatch_executions_created=%d retry_dispatch_claims_created=%d retry_dispatch_claims_dispatched=%d retry_dispatch_transport_requests_created=%d skip=%s skip_b64=%s error=%s error_b64=%s",
 			run.Path,
 			status,
 			mode,
@@ -3592,7 +6207,9 @@ func runtimeWorkerDispatchRetrySchedulerRunRuntimeRows(runs []RuntimeWorkerDispa
 			run.RetryClaimsDispatched,
 			run.RetryTransportRequestsCreated,
 			skipReason,
+			runtimeRowValueB64(run.SkipReason),
 			errorValue,
+			runtimeRowValueB64(run.Error),
 		))
 		rows = append(rows, fmt.Sprintf(
 			"worker dispatch retry scheduler run compact: status=%s mode=%s max_runs=%d retry_plans_created=%d retry_dispatches_created=%d retry_dispatch_executions_created=%d",
@@ -3915,7 +6532,7 @@ func workerLifecycleAuditArtifactRuntimeRows(audits []WorkerLifecycleAudit) []st
 		rows = append(rows, "worker lifecycle audit artifact path: "+filepath.Base(audit.Path))
 		for _, item := range audit.Items {
 			rows = append(rows, fmt.Sprintf(
-				"worker lifecycle audit item: kind=%s status=%s mode=%s gate=%s worker=%s run=%s execution=%s path=%s linked=%s reason=%s%s",
+				"worker lifecycle audit item: kind=%s status=%s mode=%s gate=%s worker=%s run=%s execution=%s path=%s linked=%s reason=%s reason_b64=%s%s",
 				installRequestDisplayValue(item.Kind, "unknown"),
 				installRequestDisplayValue(item.Status, "unknown"),
 				installRequestDisplayValue(item.Mode, "none"),
@@ -3926,6 +6543,7 @@ func workerLifecycleAuditArtifactRuntimeRows(audits []WorkerLifecycleAudit) []st
 				installRequestDisplayValue(item.ArtifactPath, "none"),
 				installRequestDisplayValue(item.LinkedPath, "none"),
 				installRequestDisplayValue(item.Reason, "none"),
+				runtimeRowValueB64(item.Reason),
 				workerLifecycleAuditItemAggregateRuntimeSuffix(item),
 			))
 			if workerLifecycleAuditItemHasAggregate(item) {
@@ -4286,23 +6904,29 @@ func workerLifecyclePolicyArtifactRuntimeRowsWithSelection(policies []WorkerLife
 		transport := installRequestDisplayValue(selection.TransportMode, "metadata-only")
 		reason := installRequestDisplayValue(strings.TrimSpace(selection.Reason), "none")
 		actorFields := fmt.Sprintf(
-			"selected_by=%s selected_at=%s",
+			"selected_by=%s selected_by_b64=%s selected_at=%s selected_at_b64=%s",
 			installRequestDisplayValue(selection.SelectedBy, "unknown"),
+			runtimeRowValueB64(selection.SelectedBy),
 			installRequestDisplayValue(selection.SelectedAt, "unknown"),
+			runtimeRowValueB64(selection.SelectedAt),
 		)
 		if workerLifecyclePolicySelectionIsCleared(selection) {
 			actorFields = fmt.Sprintf(
-				"cleared_by=%s cleared_at=%s",
+				"cleared_by=%s cleared_by_b64=%s cleared_at=%s cleared_at_b64=%s",
 				installRequestDisplayValue(selection.ClearedBy, "unknown"),
+				runtimeRowValueB64(selection.ClearedBy),
 				installRequestDisplayValue(selection.ClearedAt, "unknown"),
+				runtimeRowValueB64(selection.ClearedAt),
 			)
 		}
 		rows = append(rows, fmt.Sprintf(
-			"worker lifecycle policy selection: status=%s mode=%s policy=%s selection=%s transport=%s poll_interval_ms=%d max_runs=%d stale_after=%d worker_stale_after=%d include_lifecycle_maintenance=%t execute_lifecycle_retries=%t execute_lease_recovery=%t superseded=%d %s reason=%s",
+			"worker lifecycle policy selection: status=%s mode=%s policy=%s policy_b64=%s selection=%s selection_b64=%s transport=%s poll_interval_ms=%d max_runs=%d stale_after=%d worker_stale_after=%d include_lifecycle_maintenance=%t execute_lifecycle_retries=%t execute_lease_recovery=%t superseded=%d %s reason=%s reason_b64=%s",
 			installRequestDisplayValue(selection.Status, "unknown"),
 			installRequestDisplayValue(selection.Mode, "metadata-only"),
 			installRequestDisplayValue(selection.PolicyPath, "none"),
+			runtimeRowValueB64(selection.PolicyPath),
 			installRequestDisplayValue(selection.Path, "none"),
+			runtimeRowValueB64(selection.Path),
 			transport,
 			selection.PollIntervalMilliseconds,
 			selection.MaxSupervisorRuns,
@@ -4314,6 +6938,7 @@ func workerLifecyclePolicyArtifactRuntimeRowsWithSelection(policies []WorkerLife
 			len(selection.SupersededPolicyPaths),
 			actorFields,
 			reason,
+			runtimeRowValueB64(strings.TrimSpace(selection.Reason)),
 		))
 		rows = append(rows, fmt.Sprintf(
 			"worker lifecycle policy selection cadence: transport=%s poll_interval_ms=%d max_runs=%d",
@@ -4365,8 +6990,9 @@ func workerLifecyclePolicyArtifactRuntimeRowsWithSelection(policies []WorkerLife
 			current = "true"
 		}
 		rows = append(rows, fmt.Sprintf(
-			"worker lifecycle policy artifact: %s status=%s mode=%s transport=%s stale_after=%d worker_stale_after=%d poll_interval_ms=%d max_runs=%d lifecycle_maintenance=%t lifecycle_retries=%t lease_recovery=%t current=%s workers=%d stale_workers=%d stale_leases=%d",
+			"worker lifecycle policy artifact: %s artifact_b64=%s status=%s mode=%s transport=%s stale_after=%d worker_stale_after=%d poll_interval_ms=%d max_runs=%d lifecycle_maintenance=%t lifecycle_retries=%t lease_recovery=%t current=%s workers=%d stale_workers=%d stale_leases=%d",
 			policy.Path,
+			runtimeRowValueB64(policy.Path),
 			status,
 			mode,
 			transport,
@@ -4451,12 +7077,15 @@ func workerLifecyclePolicyRunRuntimeRows(runs []WorkerLifecyclePolicyRun) []stri
 			supervisorRef = filepath.Base(run.SupervisorPath)
 		}
 		rows = append(rows, fmt.Sprintf(
-			"worker lifecycle policy run artifact: %s status=%s mode=%s policy=%s selection=%s max_runs=%d poll_interval_ms=%d transport=%s include_lifecycle_maintenance=%t execute_lifecycle_retries=%t execute_lease_recovery=%t supervisor_created=%d skip=%s",
+			"worker lifecycle policy run artifact: %s artifact_b64=%s status=%s mode=%s policy=%s policy_b64=%s selection=%s selection_b64=%s max_runs=%d poll_interval_ms=%d transport=%s include_lifecycle_maintenance=%t execute_lifecycle_retries=%t execute_lease_recovery=%t supervisor_created=%d skip=%s skip_b64=%s",
 			run.Path,
+			runtimeRowValueB64(run.Path),
 			status,
 			mode,
 			policyPath,
+			runtimeRowValueB64(run.PolicyPath),
 			selectionPath,
+			runtimeRowValueB64(run.SelectionPath),
 			run.MaxRuns,
 			run.PollIntervalMilliseconds,
 			transport,
@@ -4465,6 +7094,7 @@ func workerLifecyclePolicyRunRuntimeRows(runs []WorkerLifecyclePolicyRun) []stri
 			run.ExecuteLeaseRecovery,
 			supervisorCreated,
 			skipReason,
+			runtimeRowValueB64(run.SkipReason),
 		))
 		rows = append(rows, fmt.Sprintf(
 			"worker lifecycle policy run cadence: max_runs=%d poll_interval_ms=%d transport=%s",
@@ -4542,17 +7172,24 @@ func workerLifecyclePolicySchedulerRunRuntimeRows(runs []WorkerLifecyclePolicySc
 			policyRunsCreated = workerLifecyclePolicySchedulerRunArrayLen(payload, "policy_run_paths")
 		}
 		supervisorCreated := installRequestDisplayValue(workerLifecyclePolicySchedulerRunValue(payload, "supervisor_created", "supervisors_created"), "0")
-		skipReason := installRequestDisplayValue(compactRuntimeRowValue(workerLifecyclePolicySchedulerRunValue(payload, "skip_reason", "skip")), "none")
-		errorValue := installRequestDisplayValue(compactRuntimeRowValue(workerLifecyclePolicySchedulerRunValue(payload, "error")), "none")
+		skipRaw := workerLifecyclePolicySchedulerRunValue(payload, "skip_reason", "skip")
+		errorRaw := workerLifecyclePolicySchedulerRunValue(payload, "error")
+		skipReason := installRequestDisplayValue(compactRuntimeRowValue(skipRaw), "none")
+		errorValue := installRequestDisplayValue(compactRuntimeRowValue(errorRaw), "none")
 		rows = append(rows, fmt.Sprintf(
-			"worker lifecycle policy scheduler run artifact: %s status=%s mode=%s policy=%s selection=%s policy_basename=%s selection_basename=%s max_runs=%d poll_interval_ms=%d transport=%s include_lifecycle_maintenance=%s execute_lifecycle_retries=%s execute_lease_recovery=%s policy_runs_created=%d supervisor_created=%s skip=%s error=%s",
+			"worker lifecycle policy scheduler run artifact: %s artifact_b64=%s status=%s mode=%s policy=%s policy_b64=%s selection=%s selection_b64=%s policy_basename=%s policy_basename_b64=%s selection_basename=%s selection_basename_b64=%s max_runs=%d poll_interval_ms=%d transport=%s include_lifecycle_maintenance=%s execute_lifecycle_retries=%s execute_lease_recovery=%s policy_runs_created=%d supervisor_created=%s skip=%s skip_b64=%s error=%s error_b64=%s",
 			path,
+			runtimeRowValueB64(path),
 			status,
 			mode,
 			policyPath,
+			runtimeRowValueB64(policyPath),
 			selectionPath,
+			runtimeRowValueB64(selectionPath),
 			policyBase,
+			runtimeRowValueB64(policyBase),
 			selectionBase,
+			runtimeRowValueB64(selectionBase),
 			maxRuns,
 			pollInterval,
 			transport,
@@ -4562,7 +7199,9 @@ func workerLifecyclePolicySchedulerRunRuntimeRows(runs []WorkerLifecyclePolicySc
 			policyRunsCreated,
 			supervisorCreated,
 			skipReason,
+			runtimeRowValueB64(skipRaw),
 			errorValue,
+			runtimeRowValueB64(errorRaw),
 		))
 		rows = append(rows, fmt.Sprintf(
 			"worker lifecycle policy scheduler run compact: status=%s mode=%s max_runs=%d poll_interval_ms=%d policy=%s selection=%s policy_runs_created=%d supervisor_created=%s",
@@ -5009,29 +7648,37 @@ func workerLifecycleActionPlanArtifactRuntimeRowsWithSelection(plans []WorkerLif
 	rows := []string{fmt.Sprintf("worker lifecycle action plan artifacts: total=%d annotated=%d current=%d", len(plans), annotated, current)}
 	if selectionFound {
 		actorFields := fmt.Sprintf(
-			"selected_by=%s selected_at=%s",
+			"selected_by=%s selected_by_b64=%s selected_at=%s selected_at_b64=%s",
 			reportProjectionDispatchRowValue(selection.SelectedBy, "unknown"),
+			runtimeRowValueB64(selection.SelectedBy),
 			reportProjectionDispatchRowValue(selection.SelectedAt, "unknown"),
+			runtimeRowValueB64(selection.SelectedAt),
 		)
 		if strings.TrimSpace(selection.Status) == "cleared" {
 			actorFields = fmt.Sprintf(
-				"cleared_by=%s cleared_at=%s",
+				"cleared_by=%s cleared_by_b64=%s cleared_at=%s cleared_at_b64=%s",
 				reportProjectionDispatchRowValue(selection.ClearedBy, "unknown"),
+				runtimeRowValueB64(selection.ClearedBy),
 				reportProjectionDispatchRowValue(selection.ClearedAt, "unknown"),
+				runtimeRowValueB64(selection.ClearedAt),
 			)
 		}
 		isCurrent := strings.TrimSpace(selection.Status) == "current"
 		summary := selection.Summary
 		rows = append(rows, fmt.Sprintf(
-			"worker lifecycle action plan selection: status=%s mode=%s current=%t %s reason=%s plan=%s selection=%s review=%s actions=%d ack=%d run=%d daemon_control=%d retry_dispatch_execute=%d reclaim=%d reconcile=%d superseded=%d",
+			"worker lifecycle action plan selection: status=%s mode=%s current=%t %s reason=%s reason_b64=%s plan=%s plan_b64=%s selection=%s selection_b64=%s review=%s review_b64=%s actions=%d ack=%d run=%d daemon_control=%d retry_dispatch_execute=%d reclaim=%d reconcile=%d superseded=%d",
 			reportProjectionDispatchRowValue(selection.Status, "unknown"),
 			reportProjectionDispatchRowValue(selection.Mode, "metadata-only"),
 			isCurrent,
 			actorFields,
 			reportProjectionDispatchRowValue(selection.Reason, "none"),
+			runtimeRowValueB64(selection.Reason),
 			reportProjectionDispatchRowValue(selection.PlanPath, "unknown"),
+			runtimeRowValueB64(selection.PlanPath),
 			reportProjectionDispatchRowValue(selection.Path, "unknown"),
+			runtimeRowValueB64(selection.Path),
 			reportProjectionDispatchRowValue(selection.ReviewPath, "none"),
+			runtimeRowValueB64(selection.ReviewPath),
 			summary.Total,
 			summary.AckPendingTransport,
 			summary.RunAcknowledgedTransport,
@@ -5052,13 +7699,19 @@ func workerLifecycleActionPlanArtifactRuntimeRowsWithSelection(plans []WorkerLif
 		reviewPath := installRequestDisplayValue(plan.ReviewPath, "none")
 		decision := "unreviewed"
 		reviewer := "unknown"
+		reviewerRaw := ""
 		reviewedAt := "unknown"
+		reviewedAtRaw := ""
 		reviewReason := "none"
+		reviewReasonRaw := ""
 		if plan.Annotation != nil {
 			decision = reportProjectionDispatchRowValue(plan.Annotation.Decision, "unreviewed")
 			reviewer = reportProjectionDispatchRowValue(plan.Annotation.Reviewer, "unknown")
+			reviewerRaw = plan.Annotation.Reviewer
 			reviewedAt = reportProjectionDispatchRowValue(plan.Annotation.ReviewedAt, "unknown")
+			reviewedAtRaw = plan.Annotation.ReviewedAt
 			reviewReason = reportProjectionDispatchRowValue(plan.Annotation.Reason, "none")
+			reviewReasonRaw = plan.Annotation.Reason
 		}
 		currentValue := "false"
 		if selectionFound && strings.TrimSpace(selection.Status) == "current" && strings.TrimSpace(selection.PlanPath) == strings.TrimSpace(plan.Path) {
@@ -5070,8 +7723,9 @@ func workerLifecycleActionPlanArtifactRuntimeRowsWithSelection(plans []WorkerLif
 			installRequestDisplayValue(plan.Mode, "unknown"),
 		))
 		rows = append(rows, fmt.Sprintf(
-			"worker lifecycle action plan artifact: %s status=%s mode=%s actions=%d ack=%d run=%d reclaim=%d reconcile=%d daemon_control=%d retry_dispatch_execute=%d review=%s decision=%s reviewer=%s reviewed_at=%s review_reason=%s current=%s",
+			"worker lifecycle action plan artifact: %s artifact_b64=%s status=%s mode=%s actions=%d ack=%d run=%d reclaim=%d reconcile=%d daemon_control=%d retry_dispatch_execute=%d review=%s review_b64=%s decision=%s reviewer=%s reviewer_b64=%s reviewed_at=%s reviewed_at_b64=%s review_reason=%s review_reason_b64=%s current=%s",
 			plan.Path,
+			runtimeRowValueB64(plan.Path),
 			installRequestDisplayValue(plan.Status, "unknown"),
 			installRequestDisplayValue(plan.Mode, "unknown"),
 			summary.Total,
@@ -5082,10 +7736,14 @@ func workerLifecycleActionPlanArtifactRuntimeRowsWithSelection(plans []WorkerLif
 			summary.ApplyDaemonControl,
 			summary.ExecuteDispatchRetryDispatch,
 			reviewPath,
+			runtimeRowValueB64(plan.ReviewPath),
 			decision,
 			reviewer,
+			runtimeRowValueB64(reviewerRaw),
 			reviewedAt,
+			runtimeRowValueB64(reviewedAtRaw),
 			reviewReason,
+			runtimeRowValueB64(reviewReasonRaw),
 			currentValue,
 		))
 		rows = append(rows, fmt.Sprintf(
@@ -5095,12 +7753,13 @@ func workerLifecycleActionPlanArtifactRuntimeRowsWithSelection(plans []WorkerLif
 			summary.Total,
 		))
 		rows = append(rows, fmt.Sprintf(
-			"worker lifecycle action plan artifact review: current=%s decision=%s reviewer=%s reviewed_at=%s review_reason=%s",
+			"worker lifecycle action plan artifact review: current=%s decision=%s reviewer=%s reviewed_at=%s review_reason=%s review_reason_b64=%s",
 			currentValue,
 			decision,
 			reviewer,
 			reviewedAt,
 			reviewReason,
+			runtimeRowValueB64(reviewReasonRaw),
 		))
 		rows = append(rows, fmt.Sprintf(
 			"worker lifecycle action plan artifact counts: ack=%d run=%d reclaim=%d reconcile=%d daemon_control=%d retry_dispatch_execute=%d",
@@ -5119,13 +7778,18 @@ func workerLifecycleActionPlanArtifactRuntimeRowsWithSelection(plans []WorkerLif
 		}
 		if plan.Annotation != nil {
 			rows = append(rows, fmt.Sprintf(
-				"worker lifecycle action plan review: mode=metadata-only decision=%s reviewer=%s reviewed_at=%s review_reason=%s plan=%s review=%s",
+				"worker lifecycle action plan review: mode=metadata-only decision=%s reviewer=%s reviewer_b64=%s reviewed_at=%s reviewed_at_b64=%s review_reason=%s review_reason_b64=%s plan=%s plan_b64=%s review=%s review_b64=%s",
 				decision,
 				reviewer,
+				runtimeRowValueB64(plan.Annotation.Reviewer),
 				reviewedAt,
+				runtimeRowValueB64(plan.Annotation.ReviewedAt),
 				reviewReason,
+				runtimeRowValueB64(reviewReasonRaw),
 				reportProjectionDispatchRowValue(plan.Path, "unknown"),
+				runtimeRowValueB64(plan.Path),
 				reportProjectionDispatchRowValue(plan.Path, "unknown"),
+				runtimeRowValueB64(plan.Path),
 			))
 			rows = append(rows, fmt.Sprintf(
 				"worker lifecycle action plan annotation: decision=%s reviewer=%s reviewed_at=%s reason=%s",
@@ -5138,15 +7802,19 @@ func workerLifecycleActionPlanArtifactRuntimeRowsWithSelection(plans []WorkerLif
 		rows = append(rows, "worker lifecycle action plan artifact path: "+filepath.Base(plan.Path))
 		for _, action := range plan.Actions {
 			rows = append(rows, fmt.Sprintf(
-				"worker lifecycle action: type=%s gate=%s worker=%s run=%s execution=%s status=%s mode=%s reason=%s request_path=%s lease_path=%s result_path=%s dispatch=%s recommended=%s",
+				"worker lifecycle action: type=%s gate=%s worker=%s worker_b64=%s run=%s run_b64=%s execution=%s execution_b64=%s status=%s mode=%s reason=%s reason_b64=%s request_path=%s lease_path=%s result_path=%s dispatch=%s recommended=%s",
 				installRequestDisplayValue(action.Type, "unknown"),
 				installRequestDisplayValue(action.Gate, "unknown"),
 				installRequestDisplayValue(action.WorkerID, "unknown"),
+				runtimeRowValueB64(action.WorkerID),
 				installRequestDisplayValue(action.RunID, "unknown"),
+				runtimeRowValueB64(action.RunID),
 				installRequestDisplayValue(action.ExecutionID, "unknown"),
+				runtimeRowValueB64(action.ExecutionID),
 				installRequestDisplayValue(action.Status, "unknown"),
 				installRequestDisplayValue(action.Mode, "metadata-only"),
 				installRequestDisplayValue(action.Reason, "none"),
+				runtimeRowValueB64(action.Reason),
 				installRequestDisplayValue(action.RequestPath, "none"),
 				installRequestDisplayValue(action.LeasePath, "none"),
 				installRequestDisplayValue(action.ResultPath, "none"),
@@ -5285,8 +7953,9 @@ func workerLeaseResultReconciliationDispatchRuntimeRows(dispatches []WorkerLease
 			len(dispatch.Skipped),
 		))
 		rows = append(rows, fmt.Sprintf(
-			"worker lease result reconciliation artifact: %s status=%s mode=%s ready=%d skipped=%d",
-			dispatch.Path,
+			"worker lease result reconciliation artifact: %s artifact_b64=%s status=%s mode=%s ready=%d skipped=%d",
+			compactRuntimeRowValue(dispatch.Path),
+			runtimeRowValueB64(dispatch.Path),
 			installRequestDisplayValue(dispatch.Status, "unknown"),
 			installRequestDisplayValue(dispatch.Mode, "unknown"),
 			len(dispatch.Ready),
@@ -5318,10 +7987,13 @@ func workerLeaseResultReconciliationExecutionRuntimeRows(executions []WorkerLeas
 			len(execution.Skipped),
 		))
 		rows = append(rows, fmt.Sprintf(
-			"worker lease result reconciliation execution artifact: %s status=%s mode=%s results=%d skipped=%d",
-			execution.Path,
+			"worker lease result reconciliation execution artifact: %s artifact_b64=%s status=%s mode=%s dispatch=%s dispatch_b64=%s results=%d skipped=%d",
+			compactRuntimeRowValue(execution.Path),
+			runtimeRowValueB64(execution.Path),
 			installRequestDisplayValue(execution.Status, "unknown"),
 			installRequestDisplayValue(execution.Mode, "unknown"),
+			compactRuntimeRowValue(execution.DispatchPath),
+			runtimeRowValueB64(execution.DispatchPath),
 			len(execution.Results),
 			len(execution.Skipped),
 		))
@@ -5334,11 +8006,26 @@ func workerLeaseResultReconciliationExecutionRuntimeRows(executions []WorkerLeas
 		))
 		for _, result := range execution.Results {
 			rows = append(rows, fmt.Sprintf(
-				"lease result reconciliation execution result run=%s execution=%s result=%s lease=%s worker=%s",
-				installRequestDisplayValue(result.RunID, "unknown"),
-				installRequestDisplayValue(result.ExecutionID, "unknown"),
+				"lease result reconciliation execution result run=%s run_b64=%s execution=%s execution_b64=%s result=%s lease=%s worker=%s worker_b64=%s lease_path=%s lease_path_b64=%s result_path=%s result_path_b64=%s dispatch=%s dispatch_b64=%s",
+				compactRuntimeRowValue(installRequestDisplayValue(result.RunID, "unknown")),
+				runtimeRowValueB64(result.RunID),
+				compactRuntimeRowValue(installRequestDisplayValue(result.ExecutionID, "unknown")),
+				runtimeRowValueB64(result.ExecutionID),
 				installRequestDisplayValue(result.ResultStatus, "unknown"),
 				installRequestDisplayValue(result.Status, "unknown"),
+				compactRuntimeRowValue(installRequestDisplayValue(result.WorkerID, "unknown")),
+				runtimeRowValueB64(result.WorkerID),
+				compactRuntimeRowValue(result.LeasePath),
+				runtimeRowValueB64(result.LeasePath),
+				compactRuntimeRowValue(result.ResultPath),
+				runtimeRowValueB64(result.ResultPath),
+				compactRuntimeRowValue(result.DispatchPath),
+				runtimeRowValueB64(result.DispatchPath),
+			))
+			rows = append(rows, fmt.Sprintf(
+				"lease result reconciliation execution identity run=%s execution=%s worker=%s",
+				installRequestDisplayValue(result.RunID, "unknown"),
+				installRequestDisplayValue(result.ExecutionID, "unknown"),
 				installRequestDisplayValue(result.WorkerID, "unknown"),
 			))
 			rows = append(rows, "lease result reconciliation execution result="+installRequestDisplayValue(result.ResultStatus, "unknown"))
@@ -5484,8 +8171,9 @@ func workerLeaseReclaimDispatchRuntimeRows(dispatches []WorkerLeaseReclaimDispat
 	rows := []string{fmt.Sprintf("worker lease reclaim artifacts: total=%d", len(dispatches))}
 	for _, dispatch := range dispatches {
 		rows = append(rows, fmt.Sprintf(
-			"worker lease reclaim artifact: %s status=%s mode=%s ready=%d skipped=%d",
-			dispatch.Path,
+			"worker lease reclaim artifact: %s artifact_b64=%s status=%s mode=%s ready=%d skipped=%d",
+			compactRuntimeRowValue(dispatch.Path),
+			runtimeRowValueB64(dispatch.Path),
 			installRequestDisplayValue(dispatch.Status, "unknown"),
 			installRequestDisplayValue(dispatch.Mode, "unknown"),
 			len(dispatch.Ready),
@@ -5516,11 +8204,13 @@ func workerLeaseReclaimExecutionRuntimeRows(executions []WorkerLeaseReclaimExecu
 	rows := []string{fmt.Sprintf("worker lease reclaim execution artifacts: total=%d", len(executions))}
 	for _, execution := range executions {
 		rows = append(rows, fmt.Sprintf(
-			"worker lease reclaim execution artifact: %s status=%s mode=%s dispatch=%s results=%d skipped=%d",
-			execution.Path,
+			"worker lease reclaim execution artifact: %s artifact_b64=%s status=%s mode=%s dispatch=%s dispatch_b64=%s results=%d skipped=%d",
+			compactRuntimeRowValue(execution.Path),
+			runtimeRowValueB64(execution.Path),
 			installRequestDisplayValue(execution.Status, "unknown"),
 			installRequestDisplayValue(execution.Mode, "unknown"),
-			execution.DispatchPath,
+			compactRuntimeRowValue(execution.DispatchPath),
+			runtimeRowValueB64(execution.DispatchPath),
 			len(execution.Results),
 			len(execution.Skipped),
 		))
@@ -5533,13 +8223,18 @@ func workerLeaseReclaimExecutionRuntimeRows(executions []WorkerLeaseReclaimExecu
 		))
 		for _, result := range execution.Results {
 			rows = append(rows, fmt.Sprintf(
-				"worker lease reclaim execution result run=%s execution=%s status=%s worker=%s tool=%s capability=%s",
-				result.RunID,
-				result.ExecutionID,
+				"worker lease reclaim execution result run=%s run_b64=%s execution=%s execution_b64=%s status=%s worker=%s worker_b64=%s tool=%s capability=%s lease_path=%s lease_path_b64=%s",
+				compactRuntimeRowValue(result.RunID),
+				runtimeRowValueB64(result.RunID),
+				compactRuntimeRowValue(result.ExecutionID),
+				runtimeRowValueB64(result.ExecutionID),
 				installRequestDisplayValue(result.Status, "unknown"),
-				installRequestDisplayValue(result.WorkerID, "unknown"),
+				compactRuntimeRowValue(installRequestDisplayValue(result.WorkerID, "unknown")),
+				runtimeRowValueB64(result.WorkerID),
 				installRequestDisplayValue(result.Tool, "unknown"),
 				installRequestDisplayValue(result.Capability, "unknown"),
+				compactRuntimeRowValue(result.LeasePath),
+				runtimeRowValueB64(result.LeasePath),
 			))
 			rows = append(rows, fmt.Sprintf(
 				"reclaim result: %s/%s %s worker=%s",
@@ -5664,6 +8359,487 @@ func workspaceSafetyBypassRuntimeRows(root string) []string {
 	return rows
 }
 
+func tuiModelWithManagedBundleRows(root string, model tui.Model) tui.Model {
+	bundles, err := ListManagedToolBundles(root)
+	if err != nil {
+		return model.AppendRuntimeRows(tui.RuntimeTabToolchainHealth, []string{
+			"managed bundle error: mode=metadata-only error=" + compactRuntimeRowValue(err.Error()),
+		})
+	}
+	if len(bundles) == 0 {
+		return model
+	}
+	return model.AppendRuntimeRows(tui.RuntimeTabToolchainHealth, managedBundleRuntimeRows(bundles))
+}
+
+func managedBundleRuntimeRows(bundles []ManagedToolBundle) []string {
+	rows := []string{fmt.Sprintf("managed bundles: total=%d", len(bundles))}
+	for _, bundle := range bundles {
+		rows = append(rows, fmt.Sprintf(
+			"managed bundle: name=%s status=%s mode=metadata-only kind=%s version=%s source=%s source_b64=%s update_status=%s error=%s provenance_status=%s corpus_status=%s corpus_name=%s corpus_source=%s corpus_retrieved_at=%s corpus_file_count=%d corpus_sha256=%s corpus_digest_status=%s corpus_digest_algorithm=%s corpus_digest_scope=%s signature_status=%s signature_algorithm=%s signature_key_id=%s signature_signed_at=%s signature_signed_by=%s sha256=%s update_latest_version=%s update_latest_sha256=%s update_checked_at=%s update_message=%s provenance_source_url=%s provenance_upstream_version=%s provenance_retrieved_at=%s provenance_verified_by=%s payload=%s payload_b64=%s install=%s install_b64=%s manifest=%s manifest_b64=%s",
+			installRequestDisplayValue(bundle.Name, "unknown"),
+			installRequestDisplayValue(bundle.Status, "unknown"),
+			installRequestDisplayValue(bundle.Kind, "unknown"),
+			installRequestDisplayValue(bundle.Version, "unknown"),
+			compactRuntimeRowValue(bundle.Source),
+			runtimeRowValueB64(bundle.Source),
+			installRequestDisplayValue(bundle.UpdateStatus, "unknown"),
+			strings.Join(strings.Fields(bundle.Error), "_"),
+			installRequestDisplayValue(bundle.ProvenanceStatus, "missing"),
+			installRequestDisplayValue(bundle.CorpusStatus, "missing"),
+			installRequestDisplayValue(bundle.CorpusName, "none"),
+			installRequestDisplayValue(bundle.CorpusSource, "none"),
+			installRequestDisplayValue(bundle.CorpusRetrievedAt, "none"),
+			bundle.CorpusFileCount,
+			installRequestDisplayValue(bundle.CorpusSHA256, "none"),
+			installRequestDisplayValue(bundle.CorpusDigestStatus, "none"),
+			installRequestDisplayValue(bundle.CorpusDigestAlgorithm, "none"),
+			installRequestDisplayValue(bundle.CorpusDigestScope, "none"),
+			installRequestDisplayValue(bundle.SignatureStatus, "missing"),
+			installRequestDisplayValue(bundle.SignatureAlgorithm, "none"),
+			installRequestDisplayValue(bundle.SignatureKeyID, "none"),
+			installRequestDisplayValue(bundle.SignatureSignedAt, "none"),
+			installRequestDisplayValue(bundle.SignatureSignedBy, "none"),
+			installRequestDisplayValue(bundle.SHA256, "none"),
+			installRequestDisplayValue(bundle.UpdateLatestVersion, "none"),
+			installRequestDisplayValue(bundle.UpdateLatestSHA256, "none"),
+			installRequestDisplayValue(bundle.UpdateCheckedAt, "none"),
+			installRequestDisplayValue(bundle.UpdateMessage, "none"),
+			installRequestDisplayValue(bundle.ProvenanceSourceURL, "none"),
+			installRequestDisplayValue(bundle.ProvenanceUpstreamVersion, "none"),
+			installRequestDisplayValue(bundle.ProvenanceRetrievedAt, "none"),
+			installRequestDisplayValue(bundle.ProvenanceVerifiedBy, "none"),
+			installRequestDisplayValue(compactRuntimeRowValue(bundle.PayloadPath), "none"),
+			runtimeRowValueB64(bundle.PayloadPath),
+			installRequestDisplayValue(compactRuntimeRowValue(bundle.InstallPath), "none"),
+			runtimeRowValueB64(bundle.InstallPath),
+			installRequestDisplayValue(compactRuntimeRowValue(bundle.ManifestPath), "none"),
+			runtimeRowValueB64(bundle.ManifestPath),
+		))
+	}
+	return rows
+}
+
+func tuiModelWithReleaseManagedStatusRows(root string, model tui.Model) tui.Model {
+	source, found, err := ReadReleaseManagedToolBundleStatusSource(root)
+	if err != nil {
+		return model.AppendRuntimeRows(tui.RuntimeTabToolchainHealth, []string{
+			"release managed status source error: mode=metadata-only error=" + compactRuntimeRowValue(err.Error()),
+		})
+	}
+	if !found {
+		return model
+	}
+	rows := releaseManagedStatusSourceRuntimeRows(source)
+	if strings.TrimSpace(source.Status) != "current" || strings.TrimSpace(source.ReleaseRoot) == "" {
+		return model.AppendRuntimeRows(tui.RuntimeTabToolchainHealth, rows)
+	}
+	statuses, err := listReleaseManagedToolBundleStatusesWithExpectedSHA(root, source.ReleaseRoot, source.ExpectedSHA256Bundle, source.ExpectedSHA256)
+	if err != nil {
+		rows = append(rows, "release managed status error: mode=read-only error="+compactRuntimeRowValue(err.Error()))
+		return model.AppendRuntimeRows(tui.RuntimeTabToolchainHealth, rows)
+	}
+	rows = append(rows, releaseManagedStatusRuntimeRows(statuses)...)
+	return model.AppendRuntimeRows(tui.RuntimeTabToolchainHealth, rows)
+}
+
+func tuiModelWithManagedUpdateRequestRows(root string, model tui.Model) tui.Model {
+	requests, err := ListManagedToolBundleUpdateRequests(root)
+	if err != nil || len(requests) == 0 {
+		return model
+	}
+	return model.AppendRuntimeRows(tui.RuntimeTabToolchainHealth, managedUpdateRequestRuntimeRows(requests))
+}
+
+func tuiModelWithManagedUpdateDownloadPlanRows(root string, model tui.Model) tui.Model {
+	plans, err := ListManagedToolBundleUpdateDownloadPlans(root)
+	if err != nil || len(plans) == 0 {
+		return model
+	}
+	return model.AppendRuntimeRows(tui.RuntimeTabToolchainHealth, managedUpdateDownloadPlanRuntimeRows(plans))
+}
+
+func tuiModelWithManagedUpdateDownloadExecutionRows(root string, model tui.Model) tui.Model {
+	executions, err := ListManagedToolBundleUpdateDownloadExecutions(root)
+	if err != nil || len(executions) == 0 {
+		return model
+	}
+	return model.AppendRuntimeRows(tui.RuntimeTabToolchainHealth, managedUpdateDownloadExecutionRuntimeRows(executions))
+}
+
+func tuiModelWithManagedUpdateApplyExecutionRows(root string, model tui.Model) tui.Model {
+	executions, err := ListManagedToolBundleUpdateApplyExecutions(root)
+	if err != nil || len(executions) == 0 {
+		return model
+	}
+	return model.AppendRuntimeRows(tui.RuntimeTabToolchainHealth, managedUpdateApplyExecutionRuntimeRows(executions))
+}
+
+func releaseManagedStatusSourceRuntimeRows(source ReleaseManagedToolBundleStatusSource) []string {
+	return []string{fmt.Sprintf(
+		"release managed status source: status=%s mode=%s expected_sha256_bundle=%s expected_sha256_status=%s expected_sha256=%s release_root=%s release_root_b64=%s total=%d available=%d blocked=%d not_imported=%d imported=%d linked=%d conflict=%d marker=%s marker_b64=%s reason=%s reason_b64=%s",
+		installRequestDisplayValue(source.Status, "unknown"),
+		installRequestDisplayValue(source.Mode, "metadata-only"),
+		installRequestDisplayValue(source.ExpectedSHA256Bundle, "none"),
+		installRequestDisplayValue(source.ExpectedSHA256Status, "none"),
+		installRequestDisplayValue(source.ExpectedSHA256, "none"),
+		installRequestDisplayValue(compactRuntimeRowValue(source.ReleaseRoot), "none"),
+		runtimeRowValueB64(source.ReleaseRoot),
+		source.Total,
+		source.Available,
+		source.Blocked,
+		source.NotImported,
+		source.Imported,
+		source.Linked,
+		source.Conflict,
+		installRequestDisplayValue(compactRuntimeRowValue(source.Path), "none"),
+		runtimeRowValueB64(source.Path),
+		installRequestDisplayValue(compactRuntimeRowValue(source.Reason), "none"),
+		runtimeRowValueB64(source.Reason),
+	)}
+}
+
+func releaseManagedStatusRuntimeRows(statuses []ReleaseManagedToolBundleStatus) []string {
+	summary := releaseManagedToolBundleStatusSourceFromStatuses("", "", statuses)
+	rows := []string{fmt.Sprintf(
+		"release managed statuses: total=%d available=%d blocked=%d not_imported=%d imported=%d linked=%d conflict=%d",
+		summary.Total,
+		summary.Available,
+		summary.Blocked,
+		summary.NotImported,
+		summary.Imported,
+		summary.Linked,
+		summary.Conflict,
+	)}
+	for _, status := range statuses {
+		rows = append(rows, fmt.Sprintf(
+			"release managed status: name=%s status=%s mode=%s kind=%s version=%s expected_sha256_status=%s expected_sha256=%s digest_status=%s import_status=%s link_status=%s update_status=%s source=%s source_b64=%s sha256=%s provenance_status=%s corpus_status=%s corpus_name=%s corpus_source=%s corpus_retrieved_at=%s corpus_file_count=%d corpus_sha256=%s corpus_digest_status=%s corpus_digest_algorithm=%s corpus_digest_scope=%s signature_status=%s signature_algorithm=%s signature_key_id=%s signature_signed_at=%s signature_signed_by=%s update_latest_version=%s update_latest_sha256=%s update_checked_at=%s update_message=%s provenance_source_url=%s provenance_upstream_version=%s provenance_retrieved_at=%s provenance_verified_by=%s digest_algorithm=%s digest_scope=%s release_bundle=%s release_bundle_b64=%s release_payload=%s release_payload_b64=%s release_manifest=%s release_manifest_b64=%s workspace_bundle=%s workspace_bundle_b64=%s workspace_payload=%s workspace_payload_b64=%s workspace_manifest=%s workspace_manifest_b64=%s install=%s install_b64=%s error=%s error_b64=%s",
+			installRequestDisplayValue(status.Name, "unknown"),
+			installRequestDisplayValue(status.Status, "blocked"),
+			installRequestDisplayValue(status.Mode, "read-only"),
+			installRequestDisplayValue(status.Kind, "unknown"),
+			installRequestDisplayValue(status.Version, "unknown"),
+			installRequestDisplayValue(status.ExpectedSHA256Status, "none"),
+			installRequestDisplayValue(status.ExpectedSHA256, "none"),
+			installRequestDisplayValue(status.DigestStatus, "unknown"),
+			installRequestDisplayValue(status.ImportStatus, "unknown"),
+			installRequestDisplayValue(status.LinkStatus, "unknown"),
+			installRequestDisplayValue(status.UpdateStatus, "unknown"),
+			compactRuntimeRowValue(status.Source),
+			runtimeRowValueB64(status.Source),
+			installRequestDisplayValue(status.SHA256, "none"),
+			installRequestDisplayValue(status.ProvenanceStatus, "missing"),
+			installRequestDisplayValue(status.CorpusStatus, "missing"),
+			installRequestDisplayValue(status.CorpusName, "none"),
+			installRequestDisplayValue(status.CorpusSource, "none"),
+			installRequestDisplayValue(status.CorpusRetrievedAt, "none"),
+			status.CorpusFileCount,
+			installRequestDisplayValue(status.CorpusSHA256, "none"),
+			installRequestDisplayValue(status.CorpusDigestStatus, "none"),
+			installRequestDisplayValue(status.CorpusDigestAlgorithm, "none"),
+			installRequestDisplayValue(status.CorpusDigestScope, "none"),
+			installRequestDisplayValue(status.SignatureStatus, "missing"),
+			installRequestDisplayValue(status.SignatureAlgorithm, "none"),
+			installRequestDisplayValue(status.SignatureKeyID, "none"),
+			installRequestDisplayValue(status.SignatureSignedAt, "none"),
+			installRequestDisplayValue(status.SignatureSignedBy, "none"),
+			installRequestDisplayValue(status.UpdateLatestVersion, "none"),
+			installRequestDisplayValue(status.UpdateLatestSHA256, "none"),
+			installRequestDisplayValue(status.UpdateCheckedAt, "none"),
+			installRequestDisplayValue(status.UpdateMessage, "none"),
+			installRequestDisplayValue(status.ProvenanceSourceURL, "none"),
+			installRequestDisplayValue(status.ProvenanceUpstreamVersion, "none"),
+			installRequestDisplayValue(status.ProvenanceRetrievedAt, "none"),
+			installRequestDisplayValue(status.ProvenanceVerifiedBy, "none"),
+			installRequestDisplayValue(status.DigestAlgorithm, "sha256"),
+			installRequestDisplayValue(status.DigestScope, "unknown"),
+			installRequestDisplayValue(compactRuntimeRowValue(status.ReleaseBundleDir), "none"),
+			runtimeRowValueB64(status.ReleaseBundleDir),
+			installRequestDisplayValue(compactRuntimeRowValue(status.ReleasePayloadPath), "none"),
+			runtimeRowValueB64(status.ReleasePayloadPath),
+			installRequestDisplayValue(compactRuntimeRowValue(status.ReleaseManifestPath), "none"),
+			runtimeRowValueB64(status.ReleaseManifestPath),
+			installRequestDisplayValue(compactRuntimeRowValue(status.WorkspaceBundleDir), "none"),
+			runtimeRowValueB64(status.WorkspaceBundleDir),
+			installRequestDisplayValue(compactRuntimeRowValue(status.WorkspacePayloadPath), "none"),
+			runtimeRowValueB64(status.WorkspacePayloadPath),
+			installRequestDisplayValue(compactRuntimeRowValue(status.WorkspaceManifestPath), "none"),
+			runtimeRowValueB64(status.WorkspaceManifestPath),
+			installRequestDisplayValue(compactRuntimeRowValue(status.InstallPath), "none"),
+			runtimeRowValueB64(status.InstallPath),
+			compactRuntimeRowValue(status.Error),
+			runtimeRowValueB64(status.Error),
+		))
+	}
+	return rows
+}
+
+func managedUpdateRequestRuntimeRows(requests []ManagedToolBundleUpdateRequest) []string {
+	summary := SummarizeManagedToolBundleUpdateRequests(requests)
+	rows := []string{"managed update requests: " + summary.Line()}
+	for _, request := range requests {
+		rows = append(rows, fmt.Sprintf(
+			"managed update request artifact: status=%s mode=%s name=%s kind=%s current_version=%s latest_version=%s update_status=%s requested_by=%s requested_by_b64=%s latest_sha256=%s current_sha256=%s update_checked_at=%s update_message=%s update_message_b64=%s release_root=%s release_root_b64=%s release_bundle=%s release_bundle_b64=%s release_manifest=%s release_manifest_b64=%s release_payload=%s release_payload_b64=%s artifact=%s artifact_b64=%s requested_at=%s reason=%s reason_b64=%s",
+			installRequestDisplayValue(request.Status, "unknown"),
+			installRequestDisplayValue(request.Mode, "metadata-only"),
+			installRequestDisplayValue(request.Name, "unknown"),
+			installRequestDisplayValue(request.Kind, "unknown"),
+			installRequestDisplayValue(request.CurrentVersion, "unknown"),
+			installRequestDisplayValue(request.LatestVersion, "none"),
+			installRequestDisplayValue(request.UpdateStatus, "unknown"),
+			installRequestDisplayValue(compactRuntimeRowValue(request.RequestedBy), "operator"),
+			runtimeRowValueB64(request.RequestedBy),
+			installRequestDisplayValue(request.LatestSHA256, "none"),
+			installRequestDisplayValue(request.CurrentSHA256, "none"),
+			installRequestDisplayValue(request.UpdateCheckedAt, "none"),
+			installRequestDisplayValue(compactRuntimeRowValue(request.UpdateMessage), "none"),
+			runtimeRowValueB64(request.UpdateMessage),
+			installRequestDisplayValue(compactRuntimeRowValue(request.ReleaseRoot), "none"),
+			runtimeRowValueB64(request.ReleaseRoot),
+			installRequestDisplayValue(compactRuntimeRowValue(request.ReleaseBundleDir), "none"),
+			runtimeRowValueB64(request.ReleaseBundleDir),
+			installRequestDisplayValue(compactRuntimeRowValue(request.ReleaseManifestPath), "none"),
+			runtimeRowValueB64(request.ReleaseManifestPath),
+			installRequestDisplayValue(compactRuntimeRowValue(request.ReleasePayloadPath), "none"),
+			runtimeRowValueB64(request.ReleasePayloadPath),
+			installRequestDisplayValue(compactRuntimeRowValue(request.Path), "none"),
+			runtimeRowValueB64(request.Path),
+			installRequestDisplayValue(request.RequestedAt, "none"),
+			installRequestDisplayValue(compactRuntimeRowValue(request.Reason), "none"),
+			runtimeRowValueB64(request.Reason),
+		))
+		rows = append(rows, fmt.Sprintf(
+			"managed update request digest: name=%s latest_sha256=%s current_sha256=%s",
+			installRequestDisplayValue(request.Name, "unknown"),
+			installRequestDisplayValue(request.LatestSHA256, "none"),
+			installRequestDisplayValue(request.CurrentSHA256, "none"),
+		))
+	}
+	return rows
+}
+
+func managedUpdateDownloadPlanRuntimeRows(plans []ManagedToolBundleUpdateDownloadPlan) []string {
+	summary := SummarizeManagedToolBundleUpdateDownloadPlans(plans)
+	rows := []string{"managed update download plans: " + summary.Line()}
+	for _, plan := range plans {
+		rows = append(rows, fmt.Sprintf(
+			"managed update download plan artifact: status=%s mode=%s name=%s kind=%s current_version=%s latest_version=%s update_status=%s expected_sha256=%s expected_sha256_status=%s archive_format=%s archive_expected_sha256=%s archive_expected_sha256_status=%s source_url=%s source_url_b64=%s planned_by=%s planned_by_b64=%s latest_sha256=%s current_sha256=%s update_checked_at=%s update_message=%s update_message_b64=%s request=%s request_b64=%s release_root=%s release_root_b64=%s release_bundle=%s release_bundle_b64=%s release_manifest=%s release_manifest_b64=%s release_payload=%s release_payload_b64=%s artifact=%s artifact_b64=%s planned_at=%s reason=%s reason_b64=%s",
+			installRequestDisplayValue(plan.Status, "unknown"),
+			installRequestDisplayValue(plan.Mode, "metadata-only"),
+			installRequestDisplayValue(plan.Name, "unknown"),
+			installRequestDisplayValue(plan.Kind, "unknown"),
+			installRequestDisplayValue(plan.CurrentVersion, "unknown"),
+			installRequestDisplayValue(plan.LatestVersion, "none"),
+			installRequestDisplayValue(plan.UpdateStatus, "unknown"),
+			installRequestDisplayValue(plan.ExpectedSHA256, "none"),
+			installRequestDisplayValue(plan.ExpectedSHA256Status, "unknown"),
+			installRequestDisplayValue(plan.ArchiveFormat, "none"),
+			installRequestDisplayValue(plan.ArchiveExpectedSHA256, "none"),
+			installRequestDisplayValue(plan.ArchiveExpectedSHA256Status, "unknown"),
+			installRequestDisplayValue(compactRuntimeRowValue(plan.SourceURL), "none"),
+			runtimeRowValueB64(plan.SourceURL),
+			installRequestDisplayValue(compactRuntimeRowValue(plan.PlannedBy), "operator"),
+			runtimeRowValueB64(plan.PlannedBy),
+			installRequestDisplayValue(plan.LatestSHA256, "none"),
+			installRequestDisplayValue(plan.CurrentSHA256, "none"),
+			installRequestDisplayValue(plan.UpdateCheckedAt, "none"),
+			installRequestDisplayValue(compactRuntimeRowValue(plan.UpdateMessage), "none"),
+			runtimeRowValueB64(plan.UpdateMessage),
+			installRequestDisplayValue(compactRuntimeRowValue(plan.RequestPath), "none"),
+			runtimeRowValueB64(plan.RequestPath),
+			installRequestDisplayValue(compactRuntimeRowValue(plan.ReleaseRoot), "none"),
+			runtimeRowValueB64(plan.ReleaseRoot),
+			installRequestDisplayValue(compactRuntimeRowValue(plan.ReleaseBundleDir), "none"),
+			runtimeRowValueB64(plan.ReleaseBundleDir),
+			installRequestDisplayValue(compactRuntimeRowValue(plan.ReleaseManifestPath), "none"),
+			runtimeRowValueB64(plan.ReleaseManifestPath),
+			installRequestDisplayValue(compactRuntimeRowValue(plan.ReleasePayloadPath), "none"),
+			runtimeRowValueB64(plan.ReleasePayloadPath),
+			installRequestDisplayValue(compactRuntimeRowValue(plan.Path), "none"),
+			runtimeRowValueB64(plan.Path),
+			installRequestDisplayValue(plan.PlannedAt, "none"),
+			installRequestDisplayValue(compactRuntimeRowValue(plan.Reason), "none"),
+			runtimeRowValueB64(plan.Reason),
+		))
+		rows = append(rows, fmt.Sprintf(
+			"managed update download plan digest: name=%s expected_sha256=%s latest_sha256=%s current_sha256=%s source_url=%s",
+			installRequestDisplayValue(plan.Name, "unknown"),
+			installRequestDisplayValue(plan.ExpectedSHA256, "none"),
+			installRequestDisplayValue(plan.LatestSHA256, "none"),
+			installRequestDisplayValue(plan.CurrentSHA256, "none"),
+			installRequestDisplayValue(compactRuntimeRowValue(plan.SourceURL), "none"),
+		))
+	}
+	return rows
+}
+
+func managedUpdateDownloadExecutionRuntimeRows(executions []ManagedToolBundleUpdateDownloadExecution) []string {
+	summary := SummarizeManagedToolBundleUpdateDownloadExecutions(executions)
+	rows := []string{"managed update download executions: " + summary.Line()}
+	for _, execution := range executions {
+		rows = append(rows, fmt.Sprintf(
+			"managed update download execution artifact: status=%s mode=%s action=%s name=%s kind=%s current_version=%s latest_version=%s update_status=%s expected_sha256=%s actual_sha256=%s digest_status=%s digest_algorithm=%s digest_scope=%s archive_format=%s archive_expected_sha256=%s archive_actual_sha256=%s archive_digest_status=%s archive_digest_algorithm=%s archive_digest_scope=%s http_status=%d content_length=%d bytes_written=%d redirect_policy=%s redirect_location=%s redirect_location_b64=%s redirect_location_status=%s source_url=%s source_url_b64=%s actor=%s actor_b64=%s latest_sha256=%s current_sha256=%s update_checked_at=%s update_message=%s update_message_b64=%s plan=%s plan_b64=%s request=%s request_b64=%s release_root=%s release_root_b64=%s release_bundle=%s release_bundle_b64=%s release_manifest=%s release_manifest_b64=%s release_payload=%s release_payload_b64=%s archive=%s archive_b64=%s payload=%s payload_b64=%s artifact=%s artifact_b64=%s executed_at=%s reason=%s reason_b64=%s error=%s error_b64=%s",
+			installRequestDisplayValue(execution.Status, "unknown"),
+			installRequestDisplayValue(execution.Mode, "execute"),
+			installRequestDisplayValue(execution.Action, "download"),
+			installRequestDisplayValue(execution.Name, "unknown"),
+			installRequestDisplayValue(execution.Kind, "unknown"),
+			installRequestDisplayValue(execution.CurrentVersion, "unknown"),
+			installRequestDisplayValue(execution.LatestVersion, "none"),
+			installRequestDisplayValue(execution.UpdateStatus, "unknown"),
+			installRequestDisplayValue(execution.ExpectedSHA256, "none"),
+			installRequestDisplayValue(execution.ActualSHA256, "none"),
+			installRequestDisplayValue(execution.DigestStatus, "unknown"),
+			installRequestDisplayValue(execution.DigestAlgorithm, "unknown"),
+			installRequestDisplayValue(execution.DigestScope, "unknown"),
+			installRequestDisplayValue(execution.ArchiveFormat, "none"),
+			installRequestDisplayValue(execution.ArchiveExpectedSHA256, "none"),
+			installRequestDisplayValue(execution.ArchiveActualSHA256, "none"),
+			installRequestDisplayValue(execution.ArchiveDigestStatus, "unknown"),
+			installRequestDisplayValue(execution.ArchiveDigestAlgorithm, "unknown"),
+			installRequestDisplayValue(execution.ArchiveDigestScope, "unknown"),
+			execution.HTTPStatus,
+			execution.ContentLength,
+			execution.BytesWritten,
+			installRequestDisplayValue(execution.RedirectPolicy, "none"),
+			installRequestDisplayValue(compactRuntimeRowValue(execution.RedirectLocation), "none"),
+			runtimeRowValueB64(execution.RedirectLocation),
+			installRequestDisplayValue(execution.RedirectLocationStatus, "none"),
+			installRequestDisplayValue(compactRuntimeRowValue(execution.SourceURL), "none"),
+			runtimeRowValueB64(execution.SourceURL),
+			installRequestDisplayValue(compactRuntimeRowValue(execution.Actor), "operator"),
+			runtimeRowValueB64(execution.Actor),
+			installRequestDisplayValue(execution.LatestSHA256, "none"),
+			installRequestDisplayValue(execution.CurrentSHA256, "none"),
+			installRequestDisplayValue(execution.UpdateCheckedAt, "none"),
+			installRequestDisplayValue(compactRuntimeRowValue(execution.UpdateMessage), "none"),
+			runtimeRowValueB64(execution.UpdateMessage),
+			installRequestDisplayValue(compactRuntimeRowValue(execution.PlanPath), "none"),
+			runtimeRowValueB64(execution.PlanPath),
+			installRequestDisplayValue(compactRuntimeRowValue(execution.RequestPath), "none"),
+			runtimeRowValueB64(execution.RequestPath),
+			installRequestDisplayValue(compactRuntimeRowValue(execution.ReleaseRoot), "none"),
+			runtimeRowValueB64(execution.ReleaseRoot),
+			installRequestDisplayValue(compactRuntimeRowValue(execution.ReleaseBundleDir), "none"),
+			runtimeRowValueB64(execution.ReleaseBundleDir),
+			installRequestDisplayValue(compactRuntimeRowValue(execution.ReleaseManifestPath), "none"),
+			runtimeRowValueB64(execution.ReleaseManifestPath),
+			installRequestDisplayValue(compactRuntimeRowValue(execution.ReleasePayloadPath), "none"),
+			runtimeRowValueB64(execution.ReleasePayloadPath),
+			installRequestDisplayValue(compactRuntimeRowValue(execution.ArchivePath), "none"),
+			runtimeRowValueB64(execution.ArchivePath),
+			installRequestDisplayValue(compactRuntimeRowValue(execution.PayloadPath), "none"),
+			runtimeRowValueB64(execution.PayloadPath),
+			installRequestDisplayValue(compactRuntimeRowValue(execution.Path), "none"),
+			runtimeRowValueB64(execution.Path),
+			installRequestDisplayValue(execution.ExecutedAt, "none"),
+			installRequestDisplayValue(compactRuntimeRowValue(execution.Reason), "none"),
+			runtimeRowValueB64(execution.Reason),
+			installRequestDisplayValue(compactRuntimeRowValue(execution.Error), "none"),
+			runtimeRowValueB64(execution.Error),
+		))
+		rows = append(rows, fmt.Sprintf(
+			"managed update download execution digest: name=%s digest_status=%s digest_algorithm=%s digest_scope=%s expected_sha256=%s actual_sha256=%s archive_digest_status=%s archive_digest_scope=%s bytes_written=%d http_status=%d",
+			installRequestDisplayValue(execution.Name, "unknown"),
+			installRequestDisplayValue(execution.DigestStatus, "unknown"),
+			installRequestDisplayValue(execution.DigestAlgorithm, "unknown"),
+			installRequestDisplayValue(execution.DigestScope, "unknown"),
+			installRequestDisplayValue(execution.ExpectedSHA256, "none"),
+			installRequestDisplayValue(execution.ActualSHA256, "none"),
+			installRequestDisplayValue(execution.ArchiveDigestStatus, "unknown"),
+			installRequestDisplayValue(execution.ArchiveDigestScope, "unknown"),
+			execution.BytesWritten,
+			execution.HTTPStatus,
+		))
+		rows = append(rows, fmt.Sprintf(
+			"managed update download execution transfer: name=%s bytes_written=%d http_status=%d content_length=%d archive_format=%s archive_digest_status=%s redirect_policy=%s redirect_location_status=%s",
+			installRequestDisplayValue(execution.Name, "unknown"),
+			execution.BytesWritten,
+			execution.HTTPStatus,
+			execution.ContentLength,
+			installRequestDisplayValue(execution.ArchiveFormat, "none"),
+			installRequestDisplayValue(execution.ArchiveDigestStatus, "unknown"),
+			installRequestDisplayValue(execution.RedirectPolicy, "none"),
+			installRequestDisplayValue(execution.RedirectLocationStatus, "none"),
+		))
+	}
+	return rows
+}
+
+func managedUpdateApplyExecutionRuntimeRows(executions []ManagedToolBundleUpdateApplyExecution) []string {
+	summary := SummarizeManagedToolBundleUpdateApplyExecutions(executions)
+	rows := []string{"managed update apply executions: " + summary.Line()}
+	for _, execution := range executions {
+		rows = append(rows, fmt.Sprintf(
+			"managed update apply execution artifact: status=%s mode=%s action=%s name=%s kind=%s current_version=%s latest_version=%s update_status=%s expected_sha256=%s actual_sha256=%s digest_status=%s digest_algorithm=%s digest_scope=%s source_url=%s source_url_b64=%s actor=%s actor_b64=%s latest_sha256=%s current_sha256=%s update_checked_at=%s update_message=%s update_message_b64=%s download_execution=%s download_execution_b64=%s plan=%s plan_b64=%s request=%s request_b64=%s release_root=%s release_root_b64=%s release_bundle=%s release_bundle_b64=%s release_manifest=%s release_manifest_b64=%s release_payload=%s release_payload_b64=%s staged_payload=%s staged_payload_b64=%s workspace_bundle=%s workspace_bundle_b64=%s workspace_manifest=%s workspace_manifest_b64=%s workspace_payload=%s workspace_payload_b64=%s install=%s install_b64=%s artifact=%s artifact_b64=%s applied_at=%s reason=%s reason_b64=%s error=%s error_b64=%s",
+			installRequestDisplayValue(execution.Status, "unknown"),
+			installRequestDisplayValue(execution.Mode, "apply"),
+			installRequestDisplayValue(execution.Action, "workspace-copy"),
+			installRequestDisplayValue(execution.Name, "unknown"),
+			installRequestDisplayValue(execution.Kind, "unknown"),
+			installRequestDisplayValue(execution.CurrentVersion, "unknown"),
+			installRequestDisplayValue(execution.LatestVersion, "none"),
+			installRequestDisplayValue(execution.UpdateStatus, "unknown"),
+			installRequestDisplayValue(execution.ExpectedSHA256, "none"),
+			installRequestDisplayValue(execution.ActualSHA256, "none"),
+			installRequestDisplayValue(execution.DigestStatus, "unknown"),
+			installRequestDisplayValue(execution.DigestAlgorithm, "unknown"),
+			installRequestDisplayValue(execution.DigestScope, "unknown"),
+			installRequestDisplayValue(compactRuntimeRowValue(execution.SourceURL), "none"),
+			runtimeRowValueB64(execution.SourceURL),
+			installRequestDisplayValue(compactRuntimeRowValue(execution.Actor), "operator"),
+			runtimeRowValueB64(execution.Actor),
+			installRequestDisplayValue(execution.LatestSHA256, "none"),
+			installRequestDisplayValue(execution.CurrentSHA256, "none"),
+			installRequestDisplayValue(execution.UpdateCheckedAt, "none"),
+			installRequestDisplayValue(compactRuntimeRowValue(execution.UpdateMessage), "none"),
+			runtimeRowValueB64(execution.UpdateMessage),
+			installRequestDisplayValue(compactRuntimeRowValue(execution.DownloadExecutionPath), "none"),
+			runtimeRowValueB64(execution.DownloadExecutionPath),
+			installRequestDisplayValue(compactRuntimeRowValue(execution.PlanPath), "none"),
+			runtimeRowValueB64(execution.PlanPath),
+			installRequestDisplayValue(compactRuntimeRowValue(execution.RequestPath), "none"),
+			runtimeRowValueB64(execution.RequestPath),
+			installRequestDisplayValue(compactRuntimeRowValue(execution.ReleaseRoot), "none"),
+			runtimeRowValueB64(execution.ReleaseRoot),
+			installRequestDisplayValue(compactRuntimeRowValue(execution.ReleaseBundleDir), "none"),
+			runtimeRowValueB64(execution.ReleaseBundleDir),
+			installRequestDisplayValue(compactRuntimeRowValue(execution.ReleaseManifestPath), "none"),
+			runtimeRowValueB64(execution.ReleaseManifestPath),
+			installRequestDisplayValue(compactRuntimeRowValue(execution.ReleasePayloadPath), "none"),
+			runtimeRowValueB64(execution.ReleasePayloadPath),
+			installRequestDisplayValue(compactRuntimeRowValue(execution.StagedPayloadPath), "none"),
+			runtimeRowValueB64(execution.StagedPayloadPath),
+			installRequestDisplayValue(compactRuntimeRowValue(execution.WorkspaceBundleDir), "none"),
+			runtimeRowValueB64(execution.WorkspaceBundleDir),
+			installRequestDisplayValue(compactRuntimeRowValue(execution.WorkspaceManifestPath), "none"),
+			runtimeRowValueB64(execution.WorkspaceManifestPath),
+			installRequestDisplayValue(compactRuntimeRowValue(execution.WorkspacePayloadPath), "none"),
+			runtimeRowValueB64(execution.WorkspacePayloadPath),
+			installRequestDisplayValue(compactRuntimeRowValue(execution.InstallPath), "none"),
+			runtimeRowValueB64(execution.InstallPath),
+			installRequestDisplayValue(compactRuntimeRowValue(execution.Path), "none"),
+			runtimeRowValueB64(execution.Path),
+			installRequestDisplayValue(execution.AppliedAt, "none"),
+			installRequestDisplayValue(compactRuntimeRowValue(execution.Reason), "none"),
+			runtimeRowValueB64(execution.Reason),
+			installRequestDisplayValue(compactRuntimeRowValue(execution.Error), "none"),
+			runtimeRowValueB64(execution.Error),
+		))
+		rows = append(rows, fmt.Sprintf(
+			"managed update apply execution digest: name=%s digest_status=%s digest_algorithm=%s digest_scope=%s expected_sha256=%s actual_sha256=%s latest_version=%s",
+			installRequestDisplayValue(execution.Name, "unknown"),
+			installRequestDisplayValue(execution.DigestStatus, "unknown"),
+			installRequestDisplayValue(execution.DigestAlgorithm, "unknown"),
+			installRequestDisplayValue(execution.DigestScope, "unknown"),
+			installRequestDisplayValue(execution.ExpectedSHA256, "none"),
+			installRequestDisplayValue(execution.ActualSHA256, "none"),
+			installRequestDisplayValue(execution.LatestVersion, "none"),
+		))
+	}
+	return rows
+}
+
 func installRequestRuntimeRows(requests []ToolchainInstallRequest, summary ToolchainInstallRequestSummary) []string {
 	rows := []string{"install requests: " + summary.Line()}
 	for _, request := range requests {
@@ -5749,8 +8925,9 @@ func installDispatchArtifactRuntimeRows(dispatches []ToolchainInstallDispatch) [
 	rows := []string{fmt.Sprintf("install dispatch artifacts: total=%d", len(dispatches))}
 	for _, dispatch := range dispatches {
 		rows = append(rows, fmt.Sprintf(
-			"dispatch artifact: %s status=%s mode=%s ready=%d skipped=%d",
-			dispatch.Path,
+			"dispatch artifact: %s artifact_b64=%s status=%s mode=%s ready=%d skipped=%d",
+			compactRuntimeRowValue(dispatch.Path),
+			runtimeRowValueB64(dispatch.Path),
 			installRequestDisplayValue(dispatch.Status, "unknown"),
 			installRequestDisplayValue(dispatch.Mode, "unknown"),
 			len(dispatch.Ready),
@@ -5774,17 +8951,22 @@ func installOrchestrationArtifactRuntimeRows(orchestrations []ToolchainInstallOr
 	rows := []string{fmt.Sprintf("install orchestration artifacts: total=%d", len(orchestrations))}
 	for _, orchestration := range orchestrations {
 		rows = append(rows, fmt.Sprintf(
-			"install orchestration artifact: %s status=%s mode=%s ready=%d skipped=%d results=%d dispatch=%s execution=%s retry_dispatch=%s error=%s",
-			orchestration.Path,
+			"install orchestration artifact: %s artifact_b64=%s status=%s mode=%s ready=%d skipped=%d results=%d dispatch=%s dispatch_b64=%s execution=%s execution_b64=%s retry_dispatch=%s retry_dispatch_b64=%s error=%s error_b64=%s",
+			compactRuntimeRowValue(orchestration.Path),
+			runtimeRowValueB64(orchestration.Path),
 			installRequestDisplayValue(orchestration.Status, "unknown"),
 			installRequestDisplayValue(orchestration.Mode, "unknown"),
 			orchestration.DispatchReady,
 			orchestration.DispatchSkipped,
 			orchestration.ExecutionResults,
-			installRequestDisplayValue(orchestration.DispatchPath, "none"),
-			installRequestDisplayValue(orchestration.ExecutionPath, "none"),
-			installRequestDisplayValue(orchestration.RetryDispatchPath, "none"),
+			compactRuntimeRowValue(installRequestDisplayValue(orchestration.DispatchPath, "none")),
+			runtimeRowValueB64(orchestration.DispatchPath),
+			compactRuntimeRowValue(installRequestDisplayValue(orchestration.ExecutionPath, "none")),
+			runtimeRowValueB64(orchestration.ExecutionPath),
+			compactRuntimeRowValue(installRequestDisplayValue(orchestration.RetryDispatchPath, "none")),
+			runtimeRowValueB64(orchestration.RetryDispatchPath),
 			compactRuntimeRowValue(orchestration.Error),
+			runtimeRowValueB64(orchestration.Error),
 		))
 		rows = append(rows, fmt.Sprintf(
 			"orchestration artifact state: %s mode=%s dispatch_ready=%d retry_ready=%d results=%d",
@@ -5813,11 +8995,13 @@ func installExecutionArtifactRuntimeRows(executions []ToolchainInstallDispatchEx
 	rows := []string{fmt.Sprintf("install execution artifacts: total=%d", len(executions))}
 	for _, execution := range executions {
 		rows = append(rows, fmt.Sprintf(
-			"execution artifact: %s status=%s mode=%s dispatch=%s results=%d skipped=%d",
-			execution.Path,
+			"execution artifact: %s artifact_b64=%s status=%s mode=%s dispatch=%s dispatch_b64=%s results=%d skipped=%d",
+			compactRuntimeRowValue(execution.Path),
+			runtimeRowValueB64(execution.Path),
 			installRequestDisplayValue(execution.Status, "unknown"),
 			installRequestDisplayValue(execution.Mode, "unknown"),
-			execution.DispatchPath,
+			compactRuntimeRowValue(execution.DispatchPath),
+			runtimeRowValueB64(execution.DispatchPath),
 			len(execution.Results),
 			len(execution.Skipped),
 		))
@@ -5829,15 +9013,20 @@ func installExecutionArtifactRuntimeRows(executions []ToolchainInstallDispatchEx
 			len(execution.Skipped),
 		))
 		for _, result := range execution.Results {
+			command := strings.Join(result.Command, " ")
 			rows = append(rows, fmt.Sprintf(
-				"execution result %s/%s: %s artifact=%s dispatch=%s command=%s output=%s",
+				"execution result %s/%s: %s output=%s output_b64=%s artifact=%s artifact_b64=%s dispatch=%s dispatch_b64=%s command=%s command_b64=%s",
 				result.Pack,
 				result.Dependency,
 				installRequestDisplayValue(result.Status, "unknown"),
-				execution.Path,
-				execution.DispatchPath,
-				strings.Join(result.Command, " "),
 				compactRuntimeRowValue(result.Output),
+				runtimeRowValueB64(result.Output),
+				compactRuntimeRowValue(execution.Path),
+				runtimeRowValueB64(execution.Path),
+				compactRuntimeRowValue(execution.DispatchPath),
+				runtimeRowValueB64(execution.DispatchPath),
+				command,
+				runtimeRowValueB64(command),
 			))
 		}
 	}
@@ -5884,8 +9073,9 @@ func installRetryDispatchArtifactRuntimeRows(dispatches []ToolchainInstallRetryD
 	rows := []string{fmt.Sprintf("install retry dispatch artifacts: total=%d", len(dispatches))}
 	for _, dispatch := range dispatches {
 		rows = append(rows, fmt.Sprintf(
-			"retry dispatch artifact: %s status=%s mode=%s ready=%d skipped=%d",
-			dispatch.Path,
+			"retry dispatch artifact: %s artifact_b64=%s status=%s mode=%s ready=%d skipped=%d",
+			compactRuntimeRowValue(dispatch.Path),
+			runtimeRowValueB64(dispatch.Path),
 			installRequestDisplayValue(dispatch.Status, "unknown"),
 			installRequestDisplayValue(dispatch.Mode, "unknown"),
 			len(dispatch.Ready),
@@ -5909,11 +9099,13 @@ func installRetryExecutionArtifactRuntimeRows(executions []ToolchainInstallRetry
 	rows := []string{fmt.Sprintf("install retry execution artifacts: total=%d", len(executions))}
 	for _, execution := range executions {
 		rows = append(rows, fmt.Sprintf(
-			"retry execution artifact: %s status=%s mode=%s retry_dispatch=%s results=%d skipped=%d",
-			execution.Path,
+			"retry execution artifact: %s artifact_b64=%s status=%s mode=%s retry_dispatch=%s retry_dispatch_b64=%s results=%d skipped=%d",
+			compactRuntimeRowValue(execution.Path),
+			runtimeRowValueB64(execution.Path),
 			installRequestDisplayValue(execution.Status, "unknown"),
 			installRequestDisplayValue(execution.Mode, "unknown"),
-			execution.RetryDispatchPath,
+			compactRuntimeRowValue(execution.RetryDispatchPath),
+			runtimeRowValueB64(execution.RetryDispatchPath),
 			len(execution.Results),
 			len(execution.Skipped),
 		))
@@ -5925,37 +9117,54 @@ func installRetryExecutionArtifactRuntimeRows(executions []ToolchainInstallRetry
 			len(execution.Skipped),
 		))
 		for _, result := range execution.Results {
+			command := strings.Join(result.Command, " ")
 			rows = append(rows, fmt.Sprintf(
-				"retry execution result %s/%s: %s output=%s error=%s artifact=%s retry_dispatch=%s source_execution=%s dispatch=%s command=%s",
+				"retry execution result %s/%s: %s output=%s output_b64=%s error=%s error_b64=%s artifact=%s artifact_b64=%s retry_dispatch=%s retry_dispatch_b64=%s source_execution=%s source_execution_b64=%s dispatch=%s dispatch_b64=%s command=%s command_b64=%s",
 				result.Pack,
 				result.Dependency,
 				installRequestDisplayValue(result.Status, "unknown"),
 				compactRuntimeRowValue(result.Output),
+				runtimeRowValueB64(result.Output),
 				compactRuntimeRowValue(result.Error),
-				execution.Path,
-				execution.RetryDispatchPath,
-				result.ExecutionPath,
-				result.DispatchPath,
-				strings.Join(result.Command, " "),
+				runtimeRowValueB64(result.Error),
+				compactRuntimeRowValue(execution.Path),
+				runtimeRowValueB64(execution.Path),
+				compactRuntimeRowValue(execution.RetryDispatchPath),
+				runtimeRowValueB64(execution.RetryDispatchPath),
+				compactRuntimeRowValue(result.ExecutionPath),
+				runtimeRowValueB64(result.ExecutionPath),
+				compactRuntimeRowValue(result.DispatchPath),
+				runtimeRowValueB64(result.DispatchPath),
+				command,
+				runtimeRowValueB64(command),
 			))
 			rows = append(rows, fmt.Sprintf(
-				"retry execution result refs summary %s/%s: source_execution=%s dispatch=%s artifact=%s retry_dispatch=%s",
+				"retry execution result refs summary %s/%s: source_execution=%s source_execution_b64=%s dispatch=%s dispatch_b64=%s artifact=%s artifact_b64=%s retry_dispatch=%s retry_dispatch_b64=%s",
 				result.Pack,
 				result.Dependency,
-				filepath.Base(result.ExecutionPath),
-				filepath.Base(result.DispatchPath),
-				filepath.Base(execution.Path),
-				filepath.Base(execution.RetryDispatchPath),
+				compactRuntimeRowValue(filepath.Base(result.ExecutionPath)),
+				runtimeRowValueB64(filepath.Base(result.ExecutionPath)),
+				compactRuntimeRowValue(filepath.Base(result.DispatchPath)),
+				runtimeRowValueB64(filepath.Base(result.DispatchPath)),
+				compactRuntimeRowValue(filepath.Base(execution.Path)),
+				runtimeRowValueB64(filepath.Base(execution.Path)),
+				compactRuntimeRowValue(filepath.Base(execution.RetryDispatchPath)),
+				runtimeRowValueB64(filepath.Base(execution.RetryDispatchPath)),
 			))
 			rows = append(rows, fmt.Sprintf(
-				"retry execution result refs %s/%s: source_execution=%s dispatch=%s artifact=%s retry_dispatch=%s command=%s",
+				"retry execution result refs %s/%s: source_execution=%s source_execution_b64=%s dispatch=%s dispatch_b64=%s artifact=%s artifact_b64=%s retry_dispatch=%s retry_dispatch_b64=%s command=%s command_b64=%s",
 				result.Pack,
 				result.Dependency,
-				result.ExecutionPath,
-				result.DispatchPath,
-				execution.Path,
-				execution.RetryDispatchPath,
-				strings.Join(result.Command, " "),
+				compactRuntimeRowValue(result.ExecutionPath),
+				runtimeRowValueB64(result.ExecutionPath),
+				compactRuntimeRowValue(result.DispatchPath),
+				runtimeRowValueB64(result.DispatchPath),
+				compactRuntimeRowValue(execution.Path),
+				runtimeRowValueB64(execution.Path),
+				compactRuntimeRowValue(execution.RetryDispatchPath),
+				runtimeRowValueB64(execution.RetryDispatchPath),
+				command,
+				runtimeRowValueB64(command),
 			))
 		}
 	}
@@ -5964,6 +9173,10 @@ func installRetryExecutionArtifactRuntimeRows(executions []ToolchainInstallRetry
 
 func compactRuntimeRowValue(value string) string {
 	return strings.Join(strings.Fields(value), " ")
+}
+
+func runtimeRowValueB64(value string) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(value))
 }
 
 func compactExecutionOutput(execution ToolchainInstallDispatchExecution) string {

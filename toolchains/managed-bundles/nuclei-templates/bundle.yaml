@@ -3,4 +3,23 @@ kind: rule_bundle
 version: "2026.06.04-ouro-seed"
 source: ouroboros/release-managed-rule-bundle-seed
 payload: payload
-sha256: 169dfc9fb0b9470b8032307f6495278d81839afeaef7cd7a8247235177e1908f
+sha256: 01e5f879e780939e0d1a6bb0204045807a0585e8a5bb608032ae0e8b12c24b57
+provenance:
+  source_url: "https://github.com/projectdiscovery/nuclei-templates"
+  upstream_version: "2026.06.04-ouro-seed"
+  retrieved_at: "2026-06-05T00:00:00Z"
+  verified_by: "ouroboros-release-seed"
+corpus:
+  schema: "ouroboros.rule_corpus.v1"
+  name: "nuclei-templates"
+  source: "https://github.com/projectdiscovery/nuclei-templates"
+  retrieved_at: "2026-06-05T00:00:00Z"
+  file_count: 1
+  digest_algorithm: "sha256"
+  digest_scope: "directory_canonical_records"
+  sha256: "01e5f879e780939e0d1a6bb0204045807a0585e8a5bb608032ae0e8b12c24b57"
+update:
+  latest_version: "2026.06.04-ouro-seed"
+  latest_sha256: "01e5f879e780939e0d1a6bb0204045807a0585e8a5bb608032ae0e8b12c24b57"
+  checked_at: "2026-06-05T00:00:00Z"
+  message: "current"

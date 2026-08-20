@@ -144,6 +144,9 @@ func inspectorForRuntimeAction(action RuntimeAction) Inspector {
 	}
 	if action.Hint != "" {
 		rows = append(rows, "hint: "+action.Hint)
+		if action.Kind == "managed-bundle" || action.Kind == "release-managed-status" {
+			rows = append(rows, "action hint: "+action.Hint)
+		}
 	}
 	if action.Source != "" {
 		rows = append(rows, "source: "+action.Source)
@@ -256,6 +259,12 @@ func inspectorForRuntimeAction(action RuntimeAction) Inspector {
 	}
 	if action.ArtifactPath != "" {
 		rows = append(rows, "artifact path: "+action.ArtifactPath)
+	}
+	if action.ArchivePath != "" {
+		rows = append(rows, "archive path: "+action.ArchivePath)
+	}
+	if action.ReleaseBundlePath != "" {
+		rows = append(rows, "release bundle path: "+action.ReleaseBundlePath)
 	}
 	if action.BasePath != "" {
 		rows = append(rows, "base path: "+action.BasePath)

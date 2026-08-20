@@ -2,8 +2,10 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"math"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -15,11 +17,34 @@ import (
 )
 
 const (
-	closedLoopPlannerSource  = "closed-loop-planner"
-	closedLoopPlannerStageID = "closed-loop-planner-preview"
+	closedLoopPlannerSource            = "closed-loop-planner"
+	closedLoopPlannerStageID           = "closed-loop-planner-preview"
+	closedLoopPlannerGenerationStageID = "closed-loop-planner-generation"
 )
 
-func runClosedLoopPlannerPreviewStage(ctx context.Context, root string, runID string, store *eventlog.SQLiteStore, options RunOptions, persistedEvents *[]eventlog.Event) error {
+func validateRunProviderGenerationOptions(options RunOptions) error {
+	if !options.EnableProviderGeneration {
+		return nil
+	}
+	if strings.TrimSpace(options.ProviderGenerationPrompt) == "" {
+		return fmt.Errorf("run provider generation prompt is required")
+	}
+	if options.ProviderGenerationMaxTokens < 0 {
+		return fmt.Errorf("run provider generation max_tokens must be non-negative")
+	}
+	if options.ProviderGenerationMaxEstimatedCostUSD != nil {
+		maxCost := *options.ProviderGenerationMaxEstimatedCostUSD
+		if math.IsNaN(maxCost) || math.IsInf(maxCost, 0) {
+			return fmt.Errorf("run provider generation max_estimated_cost_usd must be finite")
+		}
+		if maxCost < 0 {
+			return fmt.Errorf("run provider generation max_estimated_cost_usd must be non-negative")
+		}
+	}
+	return nil
+}
+
+func runClosedLoopPlannerPreviewStage(ctx context.Context, root string, runID string, provider ProviderRuntime, store *eventlog.SQLiteStore, options RunOptions, persistedEvents *[]eventlog.Event) error {
 	if err := appendRunEvent(ctx, store, stageEvent(runID, closedLoopPlannerStageID, "Review replay state for the next closed-loop planner step", "started"), options, persistedEvents); err != nil {
 		return err
 	}
@@ -91,14 +116,276 @@ func runClosedLoopPlannerPreviewStage(ctx context.Context, root string, runID st
 				"source":     closedLoopPlannerSource,
 			}),
 		},
+		closedLoopPlannerModelUsagePreviewEvent(runID, provider),
+		closedLoopPlannerModelUsagePreviewSuggestionEvent(runID, provider),
 	}
 	for _, event := range events {
 		if err := appendRunEvent(ctx, store, event, options, persistedEvents); err != nil {
 			return err
 		}
 	}
+	if options.EnableProviderGeneration {
+		if err := runClosedLoopPlannerProviderGenerationStage(ctx, root, runID, store, options, persistedEvents); err != nil {
+			return err
+		}
+	}
 
 	return appendRunEvent(ctx, store, stageEvent(runID, closedLoopPlannerStageID, "Review replay state for the next closed-loop planner step", "completed"), options, persistedEvents)
+}
+
+func runClosedLoopPlannerProviderGenerationStage(ctx context.Context, root string, runID string, store *eventlog.SQLiteStore, options RunOptions, persistedEvents *[]eventlog.Event) error {
+	if err := appendRunEvent(ctx, store, stageEvent(runID, closedLoopPlannerGenerationStageID, "Generate closed-loop planner guidance with the configured provider", "started"), options, persistedEvents); err != nil {
+		return err
+	}
+	result, err := GenerateProviderMessage(ctx, root, ProviderGenerationRequest{
+		SystemPrompt:         options.ProviderGenerationSystemPrompt,
+		UserPrompt:           options.ProviderGenerationPrompt,
+		MaxTokens:            options.ProviderGenerationMaxTokens,
+		RequiredCapabilities: options.ProviderGenerationRequiredCapabilities,
+		Stream:               options.ProviderGenerationStream,
+	})
+	if err != nil {
+		return failClosedLoopPlannerProviderGenerationStage(ctx, runID, store, options, persistedEvents, err)
+	}
+	budget, err := EnforceProviderGenerationBudget(result, ProviderGenerationBudgetOptions{
+		MaxEstimatedCostUSD: options.ProviderGenerationMaxEstimatedCostUSD,
+	})
+	if err != nil {
+		return failClosedLoopPlannerProviderGenerationStage(ctx, runID, store, options, persistedEvents, err)
+	}
+	ledgerWrite := false
+	if options.ProviderGenerationRecordUsage {
+		if _, err := RecordProviderGenerationUsage(root, result, ProviderUsageRecordOptions{
+			MaxEstimatedCostUSD: options.ProviderGenerationMaxEstimatedCostUSD,
+		}); err != nil {
+			return failClosedLoopPlannerProviderGenerationStage(ctx, runID, store, options, persistedEvents, err)
+		}
+		ledgerWrite = true
+	}
+	artifact, err := RecordModelGenerationArtifact(root, runID, result, budget, ledgerWrite, ModelGenerationArtifactOptions{})
+	if err != nil {
+		return failClosedLoopPlannerProviderGenerationStage(ctx, runID, store, options, persistedEvents, err)
+	}
+	if err := appendRunEvent(ctx, store, closedLoopPlannerModelGenerationEvent(runID, result, budget, ledgerWrite, artifact.Path), options, persistedEvents); err != nil {
+		return err
+	}
+	if options.ProviderGenerationToolPlanPreview {
+		if err := runClosedLoopPlannerModelToolPlanPreview(ctx, root, runID, store, options, persistedEvents, result, artifact.Path); err != nil {
+			return failClosedLoopPlannerProviderGenerationStage(ctx, runID, store, options, persistedEvents, err)
+		}
+	}
+	if err := appendRunEvent(ctx, store, closedLoopPlannerModelGenerationSuggestionEvent(runID, result, ledgerWrite), options, persistedEvents); err != nil {
+		return err
+	}
+	return appendRunEvent(ctx, store, stageEvent(runID, closedLoopPlannerGenerationStageID, "Generate closed-loop planner guidance with the configured provider", "completed"), options, persistedEvents)
+}
+
+func runClosedLoopPlannerModelToolPlanPreview(ctx context.Context, root string, runID string, store *eventlog.SQLiteStore, options RunOptions, persistedEvents *[]eventlog.Event, result ProviderGenerationResult, generationArtifactPath string) error {
+	extraction := ExtractModelToolPlanPreview(result.Text)
+	if !extraction.Valid {
+		return appendRunEvent(ctx, store, closedLoopPlannerModelToolPlanPreviewEvent(runID, result, extraction, ModelToolPlanPreviewArtifact{}), options, persistedEvents)
+	}
+	review, err := CreateToolCompilePreviewReview(root, ToolCompilePreviewOptions{Action: extraction.Action})
+	if err != nil {
+		return fmt.Errorf("create model tool-plan compile preview review: %w", err)
+	}
+	artifact, err := RecordModelToolPlanPreviewArtifact(root, runID, result, generationArtifactPath, extraction, review, ModelToolPlanPreviewArtifactOptions{})
+	if err != nil {
+		return err
+	}
+	return appendRunEvent(ctx, store, closedLoopPlannerModelToolPlanPreviewEvent(runID, result, extraction, artifact), options, persistedEvents)
+}
+
+func failClosedLoopPlannerProviderGenerationStage(ctx context.Context, runID string, store *eventlog.SQLiteStore, options RunOptions, persistedEvents *[]eventlog.Event, cause error) error {
+	if appendErr := appendRunEvent(ctx, store, stageEventWithReason(runID, closedLoopPlannerGenerationStageID, "Generate closed-loop planner guidance with the configured provider", "failed", cause.Error()), options, persistedEvents); appendErr != nil {
+		return fmt.Errorf("record failed closed-loop planner provider generation: %w", appendErr)
+	}
+	return cause
+}
+
+func closedLoopPlannerModelUsagePreviewEvent(runID string, provider ProviderRuntime) eventlog.Event {
+	return eventlog.Event{
+		RunID: runID,
+		Type:  eventlog.EventVerification,
+		Payload: mustJSON(map[string]any{
+			"kind":                  "model_usage_preview",
+			"source":                closedLoopPlannerStageID,
+			"agent_id":              "closed-loop-planner",
+			"role":                  "planner",
+			"status":                "recorded",
+			"execution_mode":        "metadata-only",
+			"budget_status":         "not_enforced",
+			"ledger_write":          false,
+			"routing_strategy":      strings.TrimSpace(provider.RoutingStrategy),
+			"provider_attempts":     provider.ProviderAttemptCount,
+			"provider_failover":     provider.ProviderFailover,
+			"selected_provider":     strings.TrimSpace(provider.SelectedProviderName),
+			"failed_providers":      append([]string{}, provider.FailedProviderNames...),
+			"required_capabilities": append([]string{}, provider.RequiredCapabilities...),
+			"capability_match":      provider.CapabilityMatch,
+			"skipped_providers":     appendProviderSkippedProviders(nil, provider.SkippedProviders...),
+			"model_usage": map[string]any{
+				"run_id":        runID,
+				"agent_id":      "closed-loop-planner",
+				"role":          "planner",
+				"provider":      strings.TrimSpace(provider.ProviderName),
+				"model":         strings.TrimSpace(provider.Model),
+				"input_tokens":  0,
+				"output_tokens": 0,
+				"cost":          0,
+			},
+		}),
+	}
+}
+
+func closedLoopPlannerModelUsagePreviewSuggestionEvent(runID string, provider ProviderRuntime) eventlog.Event {
+	providerName := strings.TrimSpace(provider.ProviderName)
+	if providerName == "" {
+		providerName = "unknown"
+	}
+	model := strings.TrimSpace(provider.Model)
+	if model == "" {
+		model = "not-set"
+	}
+	return eventlog.Event{
+		RunID: runID,
+		Type:  eventlog.EventFact,
+		Payload: mustJSON(map[string]any{
+			"fact_id":    "a-model-usage-accounting-preview",
+			"kind":       "suggestion",
+			"statement":  fmt.Sprintf("model usage accounting preview recorded metadata-only usage for provider %s model %s with 0 input and 0 output tokens; no provider generation call or provider usage ledger write was performed", providerName, model),
+			"confidence": 1,
+			"source":     "model-usage-accounting",
+		}),
+	}
+}
+
+func closedLoopPlannerModelGenerationEvent(runID string, result ProviderGenerationResult, budget ProviderGenerationBudgetDecision, ledgerWrite bool, reviewArtifactPath string) eventlog.Event {
+	budgetStatus := "not_enforced"
+	if budget.Enforced {
+		budgetStatus = budget.Status
+	}
+	return eventlog.Event{
+		RunID: runID,
+		Type:  eventlog.EventVerification,
+		Payload: mustJSON(map[string]any{
+			"kind":                     "model_generation",
+			"source":                   closedLoopPlannerGenerationStageID,
+			"agent_id":                 "closed-loop-planner",
+			"role":                     "planner",
+			"status":                   "completed",
+			"execution_mode":           "provider-generation",
+			"budget_status":            budgetStatus,
+			"ledger_write":             ledgerWrite,
+			"review_artifact_path":     strings.TrimSpace(reviewArtifactPath),
+			"assistant_text_persisted": false,
+			"routing_strategy":         strings.TrimSpace(result.RoutingStrategy),
+			"provider_attempts":        result.ProviderAttemptCount,
+			"provider_failover":        result.ProviderFailover,
+			"selected_provider":        strings.TrimSpace(result.SelectedProviderName),
+			"failed_providers":         append([]string{}, result.FailedProviderNames...),
+			"required_capabilities":    append([]string{}, result.RequiredCapabilities...),
+			"capability_match":         result.CapabilityMatch,
+			"skipped_providers":        appendProviderSkippedProviders(nil, result.SkippedProviders...),
+			"streaming":                result.Streaming,
+			"stream_chunk_count":       result.StreamChunkCount,
+			"stream_completed":         result.StreamCompleted,
+			"stream_digest":            strings.TrimSpace(result.StreamDigest),
+			"stream_preview":           providerGenerationTextPreview(result.StreamPreview),
+			"text_digest":              providerGenerationTextDigest(result.Text),
+			"text_preview":             providerGenerationTextPreview(result.Text),
+			"model_usage": map[string]any{
+				"run_id":        runID,
+				"agent_id":      "closed-loop-planner",
+				"role":          "planner",
+				"provider":      strings.TrimSpace(result.ProviderName),
+				"model":         strings.TrimSpace(result.Model),
+				"input_tokens":  result.InputTokens,
+				"output_tokens": result.OutputTokens,
+				"cost":          result.EstimatedCostUSD,
+				"latency_ms":    int64(result.Latency / time.Millisecond),
+			},
+		}),
+	}
+}
+
+func closedLoopPlannerModelToolPlanPreviewEvent(runID string, result ProviderGenerationResult, extraction ModelToolPlanPreviewExtraction, artifact ModelToolPlanPreviewArtifact) eventlog.Event {
+	status := "skipped"
+	validity := "invalid"
+	if extraction.Valid {
+		status = "completed"
+		validity = "valid"
+	}
+	reason := strings.TrimSpace(extraction.Reason)
+	if reason == "" {
+		reason = "unknown"
+	}
+	return eventlog.Event{
+		RunID: runID,
+		Type:  eventlog.EventVerification,
+		Payload: mustJSON(map[string]any{
+			"kind":                           "model_tool_plan_preview",
+			"source":                         closedLoopPlannerGenerationStageID,
+			"agent_id":                       "closed-loop-planner",
+			"role":                           "planner",
+			"status":                         status,
+			"execution_mode":                 "metadata-only",
+			"provider":                       strings.TrimSpace(result.ProviderName),
+			"model":                          strings.TrimSpace(result.Model),
+			"action":                         string(extraction.Action),
+			"semantic_action":                string(extraction.Action),
+			"valid":                          extraction.Valid,
+			"validity":                       validity,
+			"reason":                         reason,
+			"marker_preview":                 strings.TrimSpace(extraction.MarkerPreview),
+			"model_output_digest":            strings.TrimSpace(extraction.ModelOutputDigest),
+			"model_generation_artifact_path": strings.TrimSpace(artifact.ModelGenerationArtifactPath),
+			"compile_preview_review_path":    strings.TrimSpace(artifact.ReviewPath),
+			"compile_preview_nodes":          artifact.ReviewNodes,
+			"compile_preview_warnings":       artifact.ReviewWarnings,
+			"artifact_path":                  strings.TrimSpace(artifact.Path),
+			"artifact_digest":                strings.TrimSpace(artifact.ArtifactDigest),
+			"assistant_text_persisted":       false,
+			"executed_tools":                 0,
+			"worker_dispatch":                false,
+			"target_contact":                 false,
+		}),
+	}
+}
+
+func closedLoopPlannerModelGenerationSuggestionEvent(runID string, result ProviderGenerationResult, ledgerWrite bool) eventlog.Event {
+	providerName := strings.TrimSpace(result.ProviderName)
+	if providerName == "" {
+		providerName = "unknown"
+	}
+	model := strings.TrimSpace(result.Model)
+	if model == "" {
+		model = "not-set"
+	}
+	return eventlog.Event{
+		RunID: runID,
+		Type:  eventlog.EventFact,
+		Payload: mustJSON(map[string]any{
+			"fact_id":    "a-model-generation-provider-gate",
+			"kind":       "suggestion",
+			"statement":  fmt.Sprintf("closed-loop planner provider generation completed for provider %s model %s with %d input and %d output tokens; full assistant text and prompts were not persisted; usage ledger write=%t", providerName, model, result.InputTokens, result.OutputTokens, ledgerWrite),
+			"confidence": 1,
+			"source":     "model-generation",
+		}),
+	}
+}
+
+func providerGenerationTextDigest(text string) string {
+	sum := sha256.Sum256([]byte(text))
+	return fmt.Sprintf("%x", sum[:])
+}
+
+func providerGenerationTextPreview(text string) string {
+	preview := strings.Join(strings.Fields(text), " ")
+	if len(preview) > 120 {
+		preview = strings.TrimSpace(preview[:120]) + "..."
+	}
+	return preview
 }
 
 type closedLoopPlannerCompilePreview struct {

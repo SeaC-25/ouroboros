@@ -1,7 +1,9 @@
-package main
+﻿package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -63,6 +65,9 @@ var runInteractiveTUI = func(model interactiveModel) error {
 	return newInteractiveSession(model).Run()
 }
 
+var runWorkspaceWithOptions = app.RunWorkspaceWithOptions
+var completionFinalAcceptanceBeforePublishHook func(completionEvidenceStatus, string) error
+
 func main() {
 	cmd := newRootCommand(os.Stdout, os.Stderr)
 	if err := cmd.Execute(); err != nil {
@@ -82,8 +87,12 @@ func newRootCommand(out io.Writer, errOut io.Writer) *cobra.Command {
 	cmd.SilenceErrors = true
 
 	cmd.AddCommand(newInitCommand(out))
+	cmd.AddCommand(newChatCommand(out))
 	cmd.AddCommand(newDoctorCommand(out))
 	cmd.AddCommand(newRunCommand(out))
+	cmd.AddCommand(newWorkflowStatusCommand(out))
+	cmd.AddCommand(newCompletionStatusCommand(out))
+	cmd.AddCommand(newCompletionAcceptCommand(out))
 	cmd.AddCommand(newReportProjectCommand(out))
 	cmd.AddCommand(newReportProjectDispatchCommand(out))
 	cmd.AddCommand(newReportProjectDispatchesCommand(out))
@@ -118,7 +127,941 @@ func newRootCommand(out io.Writer, errOut io.Writer) *cobra.Command {
 	cmd.AddCommand(newProviderCommand(out))
 	cmd.AddCommand(newToolchainCommand(out))
 	cmd.AddCommand(newRuntimeCommand(out))
+	cmd.AddCommand(newServeCommand(out))
 	return cmd
+}
+
+func newWorkflowStatusCommand(out io.Writer) *cobra.Command {
+	return &cobra.Command{
+		Use:   "workflow-status <workspace>",
+		Short: "Show the read-only operator workflow status and next gate",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			status, err := app.SummarizeWorkspaceWorkflow(args[0])
+			if err != nil {
+				return err
+			}
+			return printWorkflowStatus(out, status)
+		},
+	}
+}
+
+func printWorkflowStatus(out io.Writer, status app.WorkspaceWorkflowStatus) error {
+	if _, err := fmt.Fprintf(
+		out,
+		"workflow-status: status=%s mode=%s stage=%s next_gate=%s reason=%s action=%s previews=%d acceptances=%d dispatches=%d executions=%d report_dispatches=%d report_executions=%d safety_errors=%d\n",
+		status.Status,
+		status.Mode,
+		status.Stage,
+		status.NextGate,
+		status.Reason,
+		status.Action,
+		status.PreviewCount,
+		status.AcceptanceCount,
+		status.DispatchCount,
+		status.ExecutionCount,
+		status.ReportDispatchCount,
+		status.ReportExecutionCount,
+		status.SafetyErrorCount,
+	); err != nil {
+		return err
+	}
+	if strings.TrimSpace(status.Command) != "" {
+		if _, err := fmt.Fprintf(out, "workflow-command: %s\n", strings.TrimSpace(status.Command)); err != nil {
+			return err
+		}
+	}
+	links := []string{
+		"preview=" + status.PreviewPath,
+		"acceptance=" + status.AcceptancePath,
+		"review=" + status.ReviewPath,
+		"selection=" + status.SelectionPath,
+		"dispatch=" + status.DispatchPath,
+		"execution=" + status.ExecutionPath,
+		"report_dispatch=" + status.ReportDispatchPath,
+		"report_execution=" + status.ReportExecutionPath,
+		"report_selection=" + status.ReportSelectionPath,
+		"report_run=" + status.ReportRunID,
+		"report=" + status.ReportPath,
+	}
+	if _, err := fmt.Fprintf(out, "workflow-links: %s\n", strings.Join(nonEmptyWorkflowStatusParts(links), " ")); err != nil {
+		return err
+	}
+	for _, safetyErr := range status.SafetyErrors {
+		if trimmed := strings.TrimSpace(safetyErr); trimmed != "" {
+			if _, err := fmt.Fprintf(out, "workflow-safety-error: %s\n", trimmed); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func nonEmptyWorkflowStatusParts(parts []string) []string {
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		key, value, ok := strings.Cut(part, "=")
+		if !ok || strings.TrimSpace(value) == "" {
+			continue
+		}
+		out = append(out, key+"="+strings.TrimSpace(value))
+	}
+	return out
+}
+
+type completionEvidenceStatus struct {
+	LogDir                    string
+	ResultPath                string
+	ManifestPath              string
+	ManifestDigestPath        string
+	FinalAcceptancePath       string
+	ResultPresent             bool
+	ManifestPresent           bool
+	ManifestDigestPresent     bool
+	FinalAcceptancePresent    bool
+	Status                    string
+	FinalReviewStatus         string
+	Claim100Ready             bool
+	RemainingManualStep       string
+	ResultSHA256              string
+	EvidenceManifestSHA256    string
+	ActualResultSHA256        string
+	ActualManifestSHA256      string
+	ResultDigestStatus        string
+	ManifestDigestStatus      string
+	RemainingManualStepStatus string
+	EvidenceLinkStatus        string
+	EvidenceSchemaStatus      string
+	FinalAcceptanceStatus     string
+	FixtureEvidenceDetected   bool
+}
+
+func newCompletionStatusCommand(out io.Writer) *cobra.Command {
+	return &cobra.Command{
+		Use:   "completion-status <audit-log-dir>",
+		Short: "Show read-only final completion evidence status",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			status, err := summarizeCompletionEvidenceStatus(args[0])
+			if err != nil {
+				return err
+			}
+			return printCompletionEvidenceStatus(out, status)
+		},
+	}
+}
+
+func summarizeCompletionEvidenceStatus(logDir string) (completionEvidenceStatus, error) {
+	trimmedLogDir := strings.TrimSpace(logDir)
+	if trimmedLogDir == "" {
+		return completionEvidenceStatus{}, fmt.Errorf("completion audit log directory is required")
+	}
+	if !filepath.IsAbs(trimmedLogDir) {
+		return completionEvidenceStatus{}, fmt.Errorf("completion audit log directory must be absolute")
+	}
+	if err := assertCompletionEvidencePathComponentsNoSymlink("completion audit log directory", trimmedLogDir); err != nil {
+		return completionEvidenceStatus{}, err
+	}
+	info, err := os.Lstat(trimmedLogDir)
+	if err != nil {
+		return completionEvidenceStatus{}, fmt.Errorf("stat completion audit log directory: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return completionEvidenceStatus{}, fmt.Errorf("completion audit log directory must not be a symlink")
+	}
+	if !info.IsDir() {
+		return completionEvidenceStatus{}, fmt.Errorf("completion audit log directory must be a directory")
+	}
+
+	status := completionEvidenceStatus{
+		LogDir:                    trimmedLogDir,
+		ResultPath:                filepath.Join(trimmedLogDir, "completion-audit.txt"),
+		ManifestPath:              filepath.Join(trimmedLogDir, "completion-evidence-manifest.txt"),
+		ManifestDigestPath:        filepath.Join(trimmedLogDir, "completion-evidence-manifest.sha256"),
+		FinalAcceptancePath:       filepath.Join(trimmedLogDir, "completion-final-acceptance.txt"),
+		Status:                    "incomplete",
+		FinalReviewStatus:         "completion_audit_required",
+		Claim100Ready:             false,
+		RemainingManualStep:       "run_make_audit-completion",
+		ResultSHA256:              "none",
+		EvidenceManifestSHA256:    "none",
+		ActualResultSHA256:        "none",
+		ActualManifestSHA256:      "none",
+		ResultDigestStatus:        "not_checked",
+		ManifestDigestStatus:      "not_checked",
+		RemainingManualStepStatus: "not_checked",
+		EvidenceLinkStatus:        "not_checked",
+		EvidenceSchemaStatus:      "not_checked",
+		FinalAcceptanceStatus:     "not_checked",
+	}
+
+	result, found, err := readCompletionEvidenceKeyValueFile(status.ResultPath)
+	if err != nil {
+		return completionEvidenceStatus{}, err
+	}
+	status.ResultPresent = found
+	manifest, found, err := readCompletionEvidenceKeyValueFile(status.ManifestPath)
+	if err != nil {
+		return completionEvidenceStatus{}, err
+	}
+	status.ManifestPresent = found
+	manifestDigest, found, err := readCompletionEvidenceKeyValueFile(status.ManifestDigestPath)
+	if err != nil {
+		return completionEvidenceStatus{}, err
+	}
+	status.ManifestDigestPresent = found
+	finalAcceptance, found, err := readCompletionEvidenceKeyValueFile(status.FinalAcceptancePath)
+	if err != nil {
+		return completionEvidenceStatus{}, err
+	}
+	status.FinalAcceptancePresent = found
+
+	manifestResultSHA := strings.TrimSpace(manifest["result_sha256"])
+	sidecarResultSHA := strings.TrimSpace(manifestDigest["result_sha256"])
+	sidecarManifestSHA := strings.TrimSpace(manifestDigest["evidence_manifest_sha256"])
+	if value := sidecarResultSHA; value != "" {
+		status.ResultSHA256 = value
+	} else if value := manifestResultSHA; value != "" {
+		status.ResultSHA256 = value
+	}
+	if value := sidecarManifestSHA; value != "" {
+		status.EvidenceManifestSHA256 = value
+	}
+
+	if status.ResultPresent {
+		actual, err := completionEvidenceFileSHA256(status.ResultPath)
+		if err != nil {
+			return completionEvidenceStatus{}, err
+		}
+		status.ActualResultSHA256 = actual
+		status.ResultDigestStatus = completionEvidenceDigestStatus(actual, manifestResultSHA, sidecarResultSHA)
+	}
+	if status.ManifestPresent {
+		actual, err := completionEvidenceFileSHA256(status.ManifestPath)
+		if err != nil {
+			return completionEvidenceStatus{}, err
+		}
+		status.ActualManifestSHA256 = actual
+		status.ManifestDigestStatus = completionEvidenceDigestStatus(actual, sidecarManifestSHA)
+	}
+	if status.ResultPresent && status.ManifestPresent && status.ManifestDigestPresent {
+		status.EvidenceSchemaStatus = completionEvidenceSchemaStatus(result, manifest, manifestDigest)
+		status.RemainingManualStepStatus = completionEvidenceRemainingManualStepStatus(result, manifest, manifestDigest)
+		status.EvidenceLinkStatus = completionEvidenceLinkStatus(status, result, manifest, manifestDigest)
+	}
+
+	readyEvidenceStatus := status.ResultPresent && status.ManifestPresent && status.ManifestDigestPresent &&
+		result["status"] == "ready-for-final-review" &&
+		manifest["status"] == "ready-for-final-review" &&
+		manifestDigest["status"] == "ready-for-final-review"
+	if readyEvidenceStatus {
+		if status.RemainingManualStepStatus != "matched" {
+			status.FinalReviewStatus = "completion_evidence_manual_step_mismatch"
+			status.RemainingManualStep = "rerun_make_audit-completion"
+			return status, nil
+		}
+		if status.EvidenceSchemaStatus != "matched" {
+			status.FinalReviewStatus = "completion_evidence_schema_mismatch"
+			status.RemainingManualStep = "rerun_make_audit-completion"
+			return status, nil
+		}
+		if status.EvidenceLinkStatus != "matched" {
+			status.FinalReviewStatus = "completion_evidence_link_mismatch"
+			status.RemainingManualStep = "rerun_make_audit-completion"
+			return status, nil
+		}
+		if status.ResultDigestStatus != "matched" || status.ManifestDigestStatus != "matched" {
+			status.FinalReviewStatus = "completion_evidence_digest_mismatch"
+			status.RemainingManualStep = "rerun_make_audit-completion"
+			return status, nil
+		}
+		if completionEvidenceLooksFixture(result, manifest, manifestDigest) {
+			status.Status = "ready-for-final-review"
+			status.FinalReviewStatus = "fixture_evidence_not_acceptable"
+			status.FixtureEvidenceDetected = true
+			status.RemainingManualStep = "replace_fixture_evidence_with_real_operator_evidence"
+			status.FinalAcceptanceStatus = "not_applicable"
+			return status, nil
+		}
+		status.Status = "ready-for-final-review"
+		status.FinalReviewStatus = "operator_review_required"
+		if value := strings.TrimSpace(manifestDigest["remaining_manual_step"]); value != "" {
+			status.RemainingManualStep = value
+		} else if value := strings.TrimSpace(manifest["remaining_manual_step"]); value != "" {
+			status.RemainingManualStep = value
+		} else if value := strings.TrimSpace(result["remaining_manual_step"]); value != "" {
+			status.RemainingManualStep = value
+		} else {
+			status.RemainingManualStep = "claim_100_after_real_operator_evidence_review"
+		}
+		if status.FinalAcceptancePresent {
+			finalAcceptanceStatus, err := completionEvidenceFinalAcceptanceStatus(status, finalAcceptance, result, manifest, manifestDigest)
+			if err != nil {
+				return completionEvidenceStatus{}, err
+			}
+			status.FinalAcceptanceStatus = finalAcceptanceStatus
+			if finalAcceptanceStatus == "matched" {
+				status.Status = "complete"
+				status.FinalReviewStatus = "accepted"
+				status.Claim100Ready = true
+				status.RemainingManualStep = "none"
+				return status, nil
+			}
+			status.Status = "incomplete"
+			status.FinalReviewStatus = "final_acceptance_mismatch"
+			status.RemainingManualStep = "rerun_completion-accept"
+			return status, nil
+		}
+		status.FinalAcceptanceStatus = "missing"
+		return status, nil
+	}
+
+	if status.ResultPresent || status.ManifestPresent || status.ManifestDigestPresent {
+		status.FinalReviewStatus = "completion_audit_incomplete"
+		status.RemainingManualStep = "rerun_make_audit-completion"
+	}
+	return status, nil
+}
+
+func newCompletionAcceptCommand(out io.Writer) *cobra.Command {
+	var reviewedBy string
+	var acceptedAt string
+	var acceptRealEvidence bool
+	cmd := &cobra.Command{
+		Use:   "completion-accept <audit-log-dir>",
+		Short: "Write explicit final operator acceptance for reviewed completion evidence",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			acceptancePath, err := writeCompletionFinalAcceptance(args[0], completionFinalAcceptanceOptions{
+				ReviewedBy:         reviewedBy,
+				AcceptedAt:         acceptedAt,
+				AcceptRealEvidence: acceptRealEvidence,
+			})
+			if err != nil {
+				_, _ = fmt.Fprintf(out, "completion-accept: failed: %v\n", err)
+				return err
+			}
+			_, err = fmt.Fprintf(
+				out,
+				"completion-accept: status=accepted claim_100_ready=true final_acceptance=%s accepted_by=%s\n",
+				acceptancePath,
+				strings.TrimSpace(reviewedBy),
+			)
+			return err
+		},
+	}
+	cmd.Flags().StringVar(&reviewedBy, "reviewed-by", "", "Operator identity that performed final evidence review")
+	cmd.Flags().StringVar(&acceptedAt, "accepted-at", "", "Final acceptance timestamp in RFC3339 format; defaults to current UTC time")
+	cmd.Flags().BoolVar(&acceptRealEvidence, "accept-real-evidence", false, "Confirm real operator-owned evidence was reviewed")
+	return cmd
+}
+
+type completionFinalAcceptanceOptions struct {
+	ReviewedBy         string
+	AcceptedAt         string
+	AcceptRealEvidence bool
+}
+
+type completionLinkedEvidenceDigests struct {
+	ProductionSummaryPath   string
+	ProductionSummarySHA256 string
+	AttestationPath         string
+	AttestationSHA256       string
+	PolicyPath              string
+	PolicySHA256            string
+}
+
+func writeCompletionFinalAcceptance(logDir string, opts completionFinalAcceptanceOptions) (string, error) {
+	status, err := summarizeCompletionEvidenceStatus(logDir)
+	if err != nil {
+		return "", err
+	}
+	if status.FixtureEvidenceDetected || status.FinalReviewStatus == "fixture_evidence_not_acceptable" {
+		return "", fmt.Errorf("fixture evidence cannot be final accepted")
+	}
+	if status.Status != "ready-for-final-review" || status.FinalReviewStatus != "operator_review_required" {
+		return "", fmt.Errorf("completion evidence is not ready for final acceptance: status=%s final_review_status=%s", status.Status, status.FinalReviewStatus)
+	}
+	if !opts.AcceptRealEvidence {
+		return "", fmt.Errorf("final acceptance requires --accept-real-evidence")
+	}
+	reviewer := strings.TrimSpace(opts.ReviewedBy)
+	if reviewer == "" {
+		return "", fmt.Errorf("final acceptance requires --reviewed-by")
+	}
+	if strings.EqualFold(reviewer, "final-evidence-fixture") {
+		return "", fmt.Errorf("fixture evidence cannot be final accepted")
+	}
+	acceptedAt := strings.TrimSpace(opts.AcceptedAt)
+	if acceptedAt == "" {
+		acceptedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	if _, err := time.Parse(time.RFC3339, acceptedAt); err != nil {
+		return "", fmt.Errorf("accepted-at must be RFC3339: %w", err)
+	}
+
+	_, result, manifest, manifestDigest, err := readReadyCompletionEvidenceForAcceptance(status)
+	if err != nil {
+		return "", err
+	}
+	linkedEvidence, err := completionLinkedEvidenceDigestsFromManifest(manifest)
+	if err != nil {
+		return "", err
+	}
+	if completionEvidenceLooksFixture(result, manifest, manifestDigest) {
+		return "", fmt.Errorf("fixture evidence cannot be final accepted")
+	}
+	manifestDigestSHA, err := completionEvidenceFileSHA256(status.ManifestDigestPath)
+	if err != nil {
+		return "", err
+	}
+	if err := assertCompletionAcceptanceOutputPath(status.FinalAcceptancePath); err != nil {
+		return "", err
+	}
+	tmp, err := os.CreateTemp(status.LogDir, ".completion-final-acceptance.txt.*")
+	if err != nil {
+		return "", fmt.Errorf("create final acceptance temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	body := strings.Join([]string{
+		"schema=ouroboros.completion_audit.final_acceptance.v1",
+		"status=accepted",
+		"accepted_by=" + reviewer,
+		"accepted_at=" + acceptedAt,
+		"result=" + status.ResultPath,
+		"result_sha256=" + status.ActualResultSHA256,
+		"evidence_manifest=" + status.ManifestPath,
+		"evidence_manifest_sha256=" + status.ActualManifestSHA256,
+		"evidence_manifest_digest=" + status.ManifestDigestPath,
+		"evidence_manifest_digest_sha256=" + manifestDigestSHA,
+		"production_summary=" + linkedEvidence.ProductionSummaryPath,
+		"production_summary_sha256=" + linkedEvidence.ProductionSummarySHA256,
+		"attestation=" + linkedEvidence.AttestationPath,
+		"attestation_sha256=" + linkedEvidence.AttestationSHA256,
+		"policy=" + linkedEvidence.PolicyPath,
+		"policy_sha256=" + linkedEvidence.PolicySHA256,
+		"real_operator_evidence_reviewed=true",
+		"fixture_evidence_accepted=false",
+		"claim_100_ready=true",
+		"",
+	}, "\n")
+	if _, err := io.WriteString(tmp, body); err != nil {
+		_ = tmp.Close()
+		return "", fmt.Errorf("write final acceptance temp file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return "", fmt.Errorf("close final acceptance temp file: %w", err)
+	}
+	if completionFinalAcceptanceBeforePublishHook != nil {
+		if err := completionFinalAcceptanceBeforePublishHook(status, tmpPath); err != nil {
+			return "", err
+		}
+	}
+	if err := assertCompletionEvidencePathComponentsNoSymlink("completion audit log directory", status.LogDir); err != nil {
+		return "", err
+	}
+	if err := assertCompletionAcceptanceOutputPath(status.FinalAcceptancePath); err != nil {
+		return "", err
+	}
+	if err := os.Rename(tmpPath, status.FinalAcceptancePath); err != nil {
+		return "", fmt.Errorf("publish final acceptance: %w", err)
+	}
+	cleanup = false
+	return status.FinalAcceptancePath, nil
+}
+
+func completionLinkedEvidenceDigestsFromManifest(manifest map[string]string) (completionLinkedEvidenceDigests, error) {
+	productionSummaryPath, productionSummarySHA, err := completionLinkedEvidenceDigest(manifest, "production_summary")
+	if err != nil {
+		return completionLinkedEvidenceDigests{}, err
+	}
+	attestationPath, attestationSHA, err := completionLinkedEvidenceDigest(manifest, "attestation")
+	if err != nil {
+		return completionLinkedEvidenceDigests{}, err
+	}
+	policyPath, policySHA, err := completionLinkedEvidenceDigest(manifest, "policy")
+	if err != nil {
+		return completionLinkedEvidenceDigests{}, err
+	}
+	return completionLinkedEvidenceDigests{
+		ProductionSummaryPath:   productionSummaryPath,
+		ProductionSummarySHA256: productionSummarySHA,
+		AttestationPath:         attestationPath,
+		AttestationSHA256:       attestationSHA,
+		PolicyPath:              policyPath,
+		PolicySHA256:            policySHA,
+	}, nil
+}
+
+func completionLinkedEvidenceDigest(manifest map[string]string, key string) (string, string, error) {
+	path := strings.TrimSpace(manifest[key])
+	if path == "" {
+		return "", "", fmt.Errorf("completion evidence manifest missing %s", key)
+	}
+	if !filepath.IsAbs(path) {
+		return "", "", fmt.Errorf("completion evidence manifest %s must be absolute", key)
+	}
+	if _, found, err := readCompletionEvidenceKeyValueFile(path); err != nil {
+		return "", "", err
+	} else if !found {
+		return "", "", fmt.Errorf("completion evidence manifest %s not found: %s", key, path)
+	}
+	expectedDigest := strings.TrimSpace(manifest[key+"_sha256"])
+	if expectedDigest == "" {
+		return "", "", fmt.Errorf("completion evidence manifest missing %s_sha256", key)
+	}
+	digest, err := completionEvidenceFileSHA256(path)
+	if err != nil {
+		return "", "", err
+	}
+	if !strings.EqualFold(expectedDigest, digest) {
+		return "", "", fmt.Errorf("%s_sha256 mismatch: expected %s actual %s", key, expectedDigest, digest)
+	}
+	return path, digest, nil
+}
+
+func readReadyCompletionEvidenceForAcceptance(status completionEvidenceStatus) (map[string]string, map[string]string, map[string]string, map[string]string, error) {
+	result, found, err := readCompletionEvidenceKeyValueFile(status.ResultPath)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	if !found {
+		return nil, nil, nil, nil, fmt.Errorf("completion audit result is missing")
+	}
+	manifest, found, err := readCompletionEvidenceKeyValueFile(status.ManifestPath)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	if !found {
+		return nil, nil, nil, nil, fmt.Errorf("completion evidence manifest is missing")
+	}
+	manifestDigest, found, err := readCompletionEvidenceKeyValueFile(status.ManifestDigestPath)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	if !found {
+		return nil, nil, nil, nil, fmt.Errorf("completion evidence manifest digest is missing")
+	}
+	return nil, result, manifest, manifestDigest, nil
+}
+
+func completionEvidenceFinalAcceptanceStatus(status completionEvidenceStatus, acceptance, result, manifest, manifestDigest map[string]string) (string, error) {
+	if strings.TrimSpace(acceptance["schema"]) != "ouroboros.completion_audit.final_acceptance.v1" {
+		return "schema_mismatch", nil
+	}
+	if strings.TrimSpace(acceptance["status"]) != "accepted" {
+		return "mismatch", nil
+	}
+	if strings.TrimSpace(acceptance["accepted_by"]) == "" || strings.EqualFold(strings.TrimSpace(acceptance["accepted_by"]), "final-evidence-fixture") {
+		return "mismatch", nil
+	}
+	if _, err := time.Parse(time.RFC3339, strings.TrimSpace(acceptance["accepted_at"])); err != nil {
+		return "mismatch", nil
+	}
+	if strings.TrimSpace(acceptance["real_operator_evidence_reviewed"]) != "true" {
+		return "mismatch", nil
+	}
+	if strings.TrimSpace(acceptance["fixture_evidence_accepted"]) != "false" {
+		return "mismatch", nil
+	}
+	if strings.TrimSpace(acceptance["claim_100_ready"]) != "true" {
+		return "mismatch", nil
+	}
+	if completionEvidenceLooksFixture(result, manifest, manifestDigest) {
+		return "fixture_evidence", nil
+	}
+	linkedEvidence, err := completionLinkedEvidenceDigestsFromManifest(manifest)
+	if err != nil {
+		return "mismatch", nil
+	}
+	if status.ActualResultSHA256 == "none" || status.ActualManifestSHA256 == "none" {
+		return "mismatch", nil
+	}
+	manifestDigestSHA, err := completionEvidenceFileSHA256(status.ManifestDigestPath)
+	if err != nil {
+		return "", err
+	}
+	links := []struct {
+		value    string
+		expected string
+	}{
+		{value: acceptance["result"], expected: status.ResultPath},
+		{value: acceptance["evidence_manifest"], expected: status.ManifestPath},
+		{value: acceptance["evidence_manifest_digest"], expected: status.ManifestDigestPath},
+		{value: acceptance["production_summary"], expected: linkedEvidence.ProductionSummaryPath},
+		{value: acceptance["attestation"], expected: linkedEvidence.AttestationPath},
+		{value: acceptance["policy"], expected: linkedEvidence.PolicyPath},
+	}
+	for _, link := range links {
+		trimmed := strings.TrimSpace(link.value)
+		if trimmed == "" || !filepath.IsAbs(trimmed) {
+			return "mismatch", nil
+		}
+		matches, err := sameCompletionEvidencePath(trimmed, link.expected)
+		if err != nil {
+			return "", err
+		}
+		if !matches {
+			return "mismatch", nil
+		}
+	}
+	digests := []struct {
+		value    string
+		expected string
+	}{
+		{value: acceptance["result_sha256"], expected: status.ActualResultSHA256},
+		{value: acceptance["evidence_manifest_sha256"], expected: status.ActualManifestSHA256},
+		{value: acceptance["evidence_manifest_digest_sha256"], expected: manifestDigestSHA},
+		{value: acceptance["production_summary_sha256"], expected: linkedEvidence.ProductionSummarySHA256},
+		{value: acceptance["attestation_sha256"], expected: linkedEvidence.AttestationSHA256},
+		{value: acceptance["policy_sha256"], expected: linkedEvidence.PolicySHA256},
+	}
+	for _, digest := range digests {
+		if !strings.EqualFold(strings.TrimSpace(digest.value), digest.expected) {
+			return "mismatch", nil
+		}
+	}
+	return "matched", nil
+}
+
+func completionEvidenceLooksFixture(result, manifest, manifestDigest map[string]string) bool {
+	for _, value := range []string{
+		result["reviewed_by"],
+		manifest["attestation_reviewed_by"],
+		manifestDigest["attestation_reviewed_by"],
+	} {
+		if strings.EqualFold(strings.TrimSpace(value), "final-evidence-fixture") {
+			return true
+		}
+	}
+	policyPath := strings.TrimSpace(manifest["policy"])
+	if policyPath == "" {
+		return false
+	}
+	policy, found, err := readCompletionEvidenceKeyValueFile(policyPath)
+	if err != nil || !found {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(policy["deployment_environment"]), "fixture") {
+		return true
+	}
+	if strings.EqualFold(strings.TrimSpace(policy["accepted_by"]), "final-evidence-fixture") {
+		return true
+	}
+	if strings.Contains(strings.ToLower(strings.TrimSpace(policy["authorization_scope"])), "fixture") {
+		return true
+	}
+	attestationPath := strings.TrimSpace(manifest["attestation"])
+	if attestationPath == "" {
+		return false
+	}
+	attestation, found, err := readCompletionEvidenceKeyValueFile(attestationPath)
+	if err != nil || !found {
+		return false
+	}
+	if strings.TrimSpace(attestation["attestation_status"]) != "approved" {
+		return true
+	}
+	if strings.EqualFold(strings.TrimSpace(attestation["reviewed_by"]), "final-evidence-fixture") {
+		return true
+	}
+	if !strings.EqualFold(strings.TrimSpace(attestation["production_evidence"]), "operator_owned") {
+		return true
+	}
+	if !strings.EqualFold(strings.TrimSpace(attestation["fixture_evidence_allowed"]), "false") {
+		return true
+	}
+	return false
+}
+
+func assertCompletionAcceptanceOutputPath(path string) error {
+	if err := assertCompletionEvidencePathComponentsNoSymlink("final acceptance path", path); err != nil {
+		return err
+	}
+	info, err := os.Lstat(path)
+	if err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("final acceptance path must not be a symlink")
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("final acceptance path must be regular or absent")
+		}
+		return nil
+	}
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return fmt.Errorf("stat final acceptance path: %w", err)
+}
+
+func assertCompletionEvidencePathComponentsNoSymlink(label, candidate string) error {
+	canonical, err := assertCompletionEvidenceCanonicalPath(label, candidate)
+	if err != nil {
+		return err
+	}
+	volume := filepath.VolumeName(canonical)
+	rest := strings.TrimPrefix(canonical, volume)
+	current := volume + string(os.PathSeparator)
+	rest = strings.TrimPrefix(rest, string(os.PathSeparator))
+	for _, part := range strings.Split(rest, string(os.PathSeparator)) {
+		if part == "" {
+			continue
+		}
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return fmt.Errorf("stat %s path component %s: %w", label, current, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("%s path component must not be a symlink: %s", label, current)
+		}
+	}
+	return nil
+}
+
+func assertCompletionEvidenceCanonicalPath(label, candidate string) (string, error) {
+	trimmed := strings.TrimSpace(candidate)
+	if trimmed == "" {
+		return "", fmt.Errorf("%s is required", label)
+	}
+	if !filepath.IsAbs(trimmed) {
+		return "", fmt.Errorf("%s must be absolute", label)
+	}
+	cleaned := filepath.Clean(trimmed)
+	if cleaned != trimmed {
+		return "", fmt.Errorf("%s must be canonical without . or .. components: %s", label, trimmed)
+	}
+	return trimmed, nil
+}
+
+func completionEvidenceSchemaStatus(result, manifest, manifestDigest map[string]string) string {
+	schemas := []struct {
+		value    string
+		expected string
+	}{
+		{value: result["schema"], expected: "ouroboros.completion_audit.result.v1"},
+		{value: manifest["schema"], expected: "ouroboros.completion_audit.evidence_manifest.v1"},
+		{value: manifestDigest["schema"], expected: "ouroboros.completion_audit.evidence_manifest_digest.v1"},
+	}
+	for _, schema := range schemas {
+		trimmed := strings.TrimSpace(schema.value)
+		if trimmed == "" {
+			return "missing"
+		}
+		if trimmed != schema.expected {
+			return "mismatch"
+		}
+	}
+	return "matched"
+}
+
+func completionEvidenceRemainingManualStepStatus(result, manifest, manifestDigest map[string]string) string {
+	expected := "claim_100_after_real_operator_evidence_review"
+	steps := []string{
+		strings.TrimSpace(result["remaining_manual_step"]),
+		strings.TrimSpace(manifest["remaining_manual_step"]),
+		strings.TrimSpace(manifestDigest["remaining_manual_step"]),
+	}
+	for _, step := range steps {
+		if step == "" {
+			return "missing"
+		}
+		if step != expected {
+			return "mismatch"
+		}
+	}
+	return "matched"
+}
+
+func completionEvidenceLinkStatus(status completionEvidenceStatus, result, manifest, manifestDigest map[string]string) string {
+	links := []struct {
+		value    string
+		expected string
+	}{
+		{value: result["evidence_manifest"], expected: status.ManifestPath},
+		{value: result["evidence_manifest_digest"], expected: status.ManifestDigestPath},
+		{value: manifest["result"], expected: status.ResultPath},
+		{value: manifestDigest["result"], expected: status.ResultPath},
+		{value: manifestDigest["evidence_manifest"], expected: status.ManifestPath},
+	}
+	for _, link := range links {
+		trimmed := strings.TrimSpace(link.value)
+		if trimmed == "" {
+			return "missing"
+		}
+		if !filepath.IsAbs(trimmed) {
+			return "relative"
+		}
+		matches, err := sameCompletionEvidencePath(link.value, link.expected)
+		if err != nil || !matches {
+			return "mismatch"
+		}
+	}
+	return "matched"
+}
+
+func sameCompletionEvidencePath(value, expected string) (bool, error) {
+	actualCanonical, err := assertCompletionEvidenceCanonicalPath("final acceptance linked path", value)
+	if err != nil {
+		return false, err
+	}
+	expectedCanonical, err := assertCompletionEvidenceCanonicalPath("expected completion evidence path", expected)
+	if err != nil {
+		return false, err
+	}
+	return actualCanonical == expectedCanonical, nil
+}
+
+func completionEvidenceDigestStatus(actual string, expectedValues ...string) string {
+	foundExpected := false
+	for _, expected := range expectedValues {
+		trimmed := strings.TrimSpace(expected)
+		if trimmed == "" {
+			continue
+		}
+		foundExpected = true
+		if !strings.EqualFold(trimmed, actual) {
+			return "mismatch"
+		}
+	}
+	if !foundExpected {
+		return "missing"
+	}
+	return "matched"
+}
+
+func completionEvidenceFileSHA256(path string) (string, error) {
+	bytes, found, err := readCompletionEvidenceRegularFileBytes(path)
+	if err != nil {
+		return "", err
+	}
+	if !found {
+		return "", fmt.Errorf("completion evidence file not found: %s", path)
+	}
+	digest := sha256.Sum256(bytes)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+func readCompletionEvidenceRegularFileBytes(path string) ([]byte, bool, error) {
+	if err := assertCompletionEvidencePathComponentsNoSymlink("completion evidence file", path); err != nil {
+		return nil, false, err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("stat completion evidence file %s: %w", path, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, false, fmt.Errorf("completion evidence file must not be a symlink: %s", path)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, false, fmt.Errorf("completion evidence file must be regular: %s", path)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, false, fmt.Errorf("open completion evidence file %s: %w", path, err)
+	}
+	defer file.Close()
+	openedInfo, err := file.Stat()
+	if err != nil {
+		return nil, false, fmt.Errorf("stat opened completion evidence file %s: %w", path, err)
+	}
+	if !os.SameFile(info, openedInfo) {
+		return nil, false, fmt.Errorf("completion evidence file changed while opening: %s", path)
+	}
+	bytes, err := io.ReadAll(file)
+	if err != nil {
+		return nil, false, fmt.Errorf("read completion evidence file %s: %w", path, err)
+	}
+	return bytes, true, nil
+}
+
+func readCompletionEvidenceKeyValueFile(path string) (map[string]string, bool, error) {
+	bytes, found, err := readCompletionEvidenceRegularFileBytes(path)
+	if err != nil {
+		return nil, false, err
+	}
+	if !found {
+		return nil, false, nil
+	}
+	fields := map[string]string{}
+	for lineNumber, line := range strings.Split(string(bytes), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		key, value, ok := strings.Cut(trimmed, "=")
+		if !ok || strings.TrimSpace(key) == "" {
+			return nil, false, fmt.Errorf("parse completion evidence file %s line %d: expected key=value", path, lineNumber+1)
+		}
+		key = strings.TrimSpace(key)
+		if _, exists := fields[key]; exists {
+			return nil, false, fmt.Errorf("parse completion evidence file %s line %d: duplicate key %s", path, lineNumber+1, key)
+		}
+		fields[key] = strings.TrimSpace(value)
+	}
+	return fields, true, nil
+}
+
+func printCompletionEvidenceStatus(out io.Writer, status completionEvidenceStatus) error {
+	if _, err := fmt.Fprintf(
+		out,
+		"completion-status: status=%s result=%t manifest=%t manifest_digest=%t final_review_status=%s claim_100_ready=%t remaining_manual_step=%s remaining_manual_step_status=%s evidence_schema_status=%s evidence_link_status=%s result_digest_status=%s evidence_manifest_digest_status=%s final_acceptance=%t final_acceptance_status=%s fixture_evidence_detected=%t\n",
+		status.Status,
+		status.ResultPresent,
+		status.ManifestPresent,
+		status.ManifestDigestPresent,
+		status.FinalReviewStatus,
+		status.Claim100Ready,
+		status.RemainingManualStep,
+		status.RemainingManualStepStatus,
+		status.EvidenceSchemaStatus,
+		status.EvidenceLinkStatus,
+		status.ResultDigestStatus,
+		status.ManifestDigestStatus,
+		status.FinalAcceptancePresent,
+		status.FinalAcceptanceStatus,
+		status.FixtureEvidenceDetected,
+	); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(
+		out,
+		"completion-status-artifacts: result=%s manifest=%s manifest_digest=%s final_acceptance=%s\n",
+		status.ResultPath,
+		status.ManifestPath,
+		status.ManifestDigestPath,
+		status.FinalAcceptancePath,
+	); err != nil {
+		return err
+	}
+	_, err := fmt.Fprintf(
+		out,
+		"completion-status-digests: result_sha256=%s evidence_manifest_sha256=%s\n",
+		status.ResultSHA256,
+		status.EvidenceManifestSHA256,
+	)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(
+		out,
+		"completion-status-actual-digests: result_sha256=%s evidence_manifest_sha256=%s\n",
+		status.ActualResultSHA256,
+		status.ActualManifestSHA256,
+	)
+	return err
 }
 
 func newInitCommand(out io.Writer) *cobra.Command {
@@ -134,6 +1077,94 @@ func newInitCommand(out io.Writer) *cobra.Command {
 			return err
 		},
 	}
+}
+
+func newChatCommand(out io.Writer) *cobra.Command {
+	var printTUI bool
+	var prompt string
+	cmd := &cobra.Command{
+		Use:   "chat <workspace>",
+		Short: "Launch the workspace AI chat IDE",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if cmd.Flags().Changed("prompt") {
+				if printTUI {
+					return fmt.Errorf("chat --prompt cannot be combined with --tui")
+				}
+				result, err := app.SubmitWorkspaceAIDialogPrompt(args[0], prompt)
+				if err != nil {
+					_, _ = fmt.Fprintf(out, "chat: status=failed stored=false\n")
+					return err
+				}
+				return printChatPromptResult(out, result)
+			}
+			model := app.NewTUIModelForWorkspace(args[0]).StartAIDialogInput()
+			if printTUI {
+				_, err := fmt.Fprintln(out, model.View())
+				return err
+			}
+			return runInteractiveTUI(model)
+		},
+	}
+	cmd.Flags().BoolVar(&printTUI, "tui", false, "Print a non-interactive AI chat TUI snapshot")
+	cmd.Flags().StringVar(&prompt, "prompt", "", "Submit one AI chat prompt non-interactively through the workspace dialog path")
+	return cmd
+}
+
+func printChatPromptResult(out io.Writer, result tui.AIDialogResult) error {
+	status := strings.TrimSpace(result.Status)
+	if status == "" {
+		status = "completed"
+	}
+	provider := strings.TrimSpace(result.Provider)
+	if provider == "" {
+		provider = "local"
+	}
+	model := strings.TrimSpace(result.Model)
+	if model == "" {
+		model = "none"
+	}
+	if _, err := fmt.Fprintf(
+		out,
+		"chat: status=%s provider=%s model=%s tokens=%d stored=%t\n",
+		status,
+		provider,
+		model,
+		result.TotalTokens,
+		result.PromptStored || result.ResponseStored,
+	); err != nil {
+		return err
+	}
+	if text := strings.TrimSpace(result.Text); text != "" {
+		if _, err := fmt.Fprintf(out, "chat-text: %s\n", singleLineChatOutput(text)); err != nil {
+			return err
+		}
+	}
+	if previewStatus := strings.TrimSpace(result.PreviewStatus); previewStatus != "" {
+		if _, err := fmt.Fprintf(
+			out,
+			"chat-preview: status=%s action=%s marker=%s artifact_created=%t stored=false\n",
+			previewStatus,
+			chatOutputValue(result.PreviewAction, "none"),
+			chatOutputValue(result.PreviewMarker, "none"),
+			strings.TrimSpace(result.PreviewPath) != "",
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func chatOutputValue(value string, fallback string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return fallback
+	}
+	return singleLineChatOutput(trimmed)
+}
+
+func singleLineChatOutput(value string) string {
+	return strings.Join(strings.Fields(value), " ")
 }
 
 func newDoctorCommand(out io.Writer) *cobra.Command {
@@ -183,8 +1214,8 @@ func newDoctorCommand(out io.Writer) *cobra.Command {
 			return fmt.Errorf("workspace is not ready")
 		},
 	}
-	cmd.Flags().BoolVar(&requireSafetyAuthorization, "require-safety-authorization", false, "fail doctor when disabled safety boundaries lack authorization.yaml metadata")
 	cmd.Flags().StringVar(&outputFormat, "format", "text", "output format: text or json")
+	cmd.Flags().BoolVar(&requireSafetyAuthorization, "require-safety-authorization", false, "require safety bypass authorization for disabled controls")
 	return cmd
 }
 
@@ -196,7 +1227,6 @@ type doctorJSONReport struct {
 	Warnings                   []string                 `json:"warnings"`
 	SafetyBypasses             []app.DoctorSafetyBypass `json:"safety_bypasses"`
 	StrictGate                 doctorJSONStrictGate     `json:"strict_gate"`
-	RequireSafetyAuthorization bool                     `json:"require_safety_authorization"`
 }
 
 type doctorJSONStrictGate struct {
@@ -214,7 +1244,6 @@ func printDoctorJSON(out io.Writer, workspace string, report app.DoctorReport, r
 		Warnings:                   append([]string{}, report.Warnings...),
 		SafetyBypasses:             append([]app.DoctorSafetyBypass{}, report.SafetyBypasses...),
 		StrictGate:                 doctorJSONStrictGateFor(report, requireSafetyAuthorization),
-		RequireSafetyAuthorization: requireSafetyAuthorization,
 	}
 	encoder := json.NewEncoder(out)
 	encoder.SetIndent("", "  ")
@@ -256,8 +1285,57 @@ func newProviderCommand(out io.Writer) *cobra.Command {
 		Use:   "provider",
 		Short: "Run model provider preview commands",
 	}
+	cmd.AddCommand(newProviderConfigureOpenAICompatibleCommand(out))
 	cmd.AddCommand(newProviderGenerateCommand(out))
 	cmd.AddCommand(newProviderUsageCommand(out))
+	cmd.AddCommand(newProviderGenerationsCommand(out))
+	cmd.AddCommand(newProviderToolPlanPreviewsCommand(out))
+	cmd.AddCommand(newProviderToolPlanPreviewAcceptCommand(out))
+	cmd.AddCommand(newProviderToolPlanPreviewAcceptancesCommand(out))
+	return cmd
+}
+
+func newProviderConfigureOpenAICompatibleCommand(out io.Writer) *cobra.Command {
+	var name string
+	var baseURL string
+	var model string
+	var apiKeyEnv string
+	enabled := true
+	var timeoutMS int
+	var contextWindowTokens int
+	var capabilities []string
+	var routingStrategy string
+	cmd := &cobra.Command{
+		Use:   "configure-openai-compatible <workspace>",
+		Short: "Configure an OpenAI-compatible provider without storing API key values",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := app.ConfigureOpenAICompatibleProvider(args[0], app.OpenAICompatibleProviderConfiguration{
+				Name:                name,
+				BaseURL:             baseURL,
+				Model:               model,
+				APIKeyEnv:           apiKeyEnv,
+				Enabled:             enabled,
+				TimeoutMS:           timeoutMS,
+				ContextWindowTokens: contextWindowTokens,
+				Capabilities:        capabilities,
+				RoutingStrategy:     routingStrategy,
+			})
+			if err != nil {
+				return err
+			}
+			return printProviderConfigureResult(out, result)
+		},
+	}
+	cmd.Flags().StringVar(&name, "name", "", "provider name")
+	cmd.Flags().StringVar(&baseURL, "base-url", "", "OpenAI-compatible base URL, usually ending in /v1")
+	cmd.Flags().StringVar(&model, "model", "", "provider model name")
+	cmd.Flags().StringVar(&apiKeyEnv, "api-key-env", "", "environment variable name that holds the provider API key")
+	cmd.Flags().BoolVar(&enabled, "enable", enabled, "enable this provider after writing providers.yaml")
+	cmd.Flags().IntVar(&timeoutMS, "timeout-ms", 0, "provider HTTP timeout in milliseconds")
+	cmd.Flags().IntVar(&contextWindowTokens, "context-window-tokens", 0, "provider context window size in tokens")
+	cmd.Flags().StringSliceVar(&capabilities, "capability", nil, "provider capability; repeat or comma-separate")
+	cmd.Flags().StringVar(&routingStrategy, "routing-strategy", "", "provider routing strategy: first_enabled or enabled_order_failover")
 	return cmd
 }
 
@@ -267,6 +1345,8 @@ func newProviderGenerateCommand(out io.Writer) *cobra.Command {
 	var maxTokens int
 	var recordUsage bool
 	var maxEstimatedCostUSD float64
+	var requiredCapabilities []string
+	var stream bool
 	cmd := &cobra.Command{
 		Use:   "generate <workspace>",
 		Short: "Generate a manual provider preview message",
@@ -283,9 +1363,11 @@ func newProviderGenerateCommand(out io.Writer) *cobra.Command {
 				budgetMax = &maxEstimatedCostUSD
 			}
 			result, err := app.GenerateProviderMessage(cmd.Context(), args[0], app.ProviderGenerationRequest{
-				SystemPrompt: systemPrompt,
-				UserPrompt:   userPrompt,
-				MaxTokens:    maxTokens,
+				SystemPrompt:         systemPrompt,
+				UserPrompt:           userPrompt,
+				MaxTokens:            maxTokens,
+				RequiredCapabilities: app.NormalizeProviderCapabilities(requiredCapabilities),
+				Stream:               stream,
 			})
 			if err != nil {
 				return err
@@ -322,7 +1404,33 @@ func newProviderGenerateCommand(out io.Writer) *cobra.Command {
 	cmd.Flags().IntVar(&maxTokens, "max-tokens", 0, "maximum completion tokens for the provider preview")
 	cmd.Flags().BoolVar(&recordUsage, "record-usage", false, "write a metadata-only provider usage record for this preview")
 	cmd.Flags().Float64Var(&maxEstimatedCostUSD, "max-estimated-cost-usd", 0, "maximum allowed estimated provider preview cost in USD")
+	cmd.Flags().StringSliceVar(&requiredCapabilities, "required-capability", nil, "required provider capability for this preview; repeat or comma-separate")
+	cmd.Flags().BoolVar(&stream, "stream", false, "request a streamed provider preview and print safe stream metadata")
 	return cmd
+}
+
+func printProviderConfigureResult(out io.Writer, result app.ProviderConfigurationResult) error {
+	if _, err := fmt.Fprintf(
+		out,
+		"provider-configure: status=written provider=%s type=%s model=%s enabled=%t\n",
+		compactProviderText(result.Provider.Name),
+		compactProviderText(result.Provider.Type),
+		compactProviderText(result.Provider.Model),
+		result.Provider.Enabled,
+	); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(out, "providers_yaml=%s\n", result.Path); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(out, "api_key_env=%s\n", compactProviderText(result.Provider.APIKeyEnv)); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(out, "api_key_value_stored=%t\n", result.APIKeyValueStored); err != nil {
+		return err
+	}
+	_, err := fmt.Fprintf(out, "routing_strategy=%s\n", compactProviderText(result.RoutingStrategy))
+	return err
 }
 
 func newProviderUsageCommand(out io.Writer) *cobra.Command {
@@ -365,6 +1473,126 @@ func newProviderUsageCommand(out io.Writer) *cobra.Command {
 	return cmd
 }
 
+func newProviderGenerationsCommand(out io.Writer) *cobra.Command {
+	return &cobra.Command{
+		Use:   "generations <workspace> [artifact]",
+		Short: "List or inspect run model generation review artifacts",
+		Args:  cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 2 {
+				artifact, err := app.ReadModelGenerationArtifact(args[0], args[1])
+				if err != nil {
+					return err
+				}
+				return printProviderGenerationArtifact(out, artifact)
+			}
+			artifacts, err := app.ListModelGenerationArtifacts(args[0])
+			if err != nil {
+				return err
+			}
+			for _, artifact := range artifacts {
+				if err := printProviderGenerationArtifact(out, artifact); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	}
+}
+
+func newProviderToolPlanPreviewsCommand(out io.Writer) *cobra.Command {
+	return &cobra.Command{
+		Use:   "tool-plan-previews <workspace> [artifact]",
+		Short: "List or inspect read-only provider tool-plan preview artifacts",
+		Args:  cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 2 {
+				artifact, err := app.ReadModelToolPlanPreviewArtifact(args[0], args[1])
+				if err != nil {
+					return err
+				}
+				return printProviderToolPlanPreviewArtifact(out, artifact)
+			}
+			artifacts, err := app.ListModelToolPlanPreviewArtifacts(args[0])
+			if err != nil {
+				return err
+			}
+			for _, artifact := range artifacts {
+				if err := printProviderToolPlanPreviewArtifact(out, artifact); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	}
+}
+
+func newProviderToolPlanPreviewAcceptCommand(out io.Writer) *cobra.Command {
+	var accept bool
+	var acceptedBy string
+	var acceptedAtArg string
+	var reason string
+	cmd := &cobra.Command{
+		Use:   "tool-plan-preview-accept <workspace> <artifact>",
+		Short: "Accept a model tool-plan preview and select its compile-preview review",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if !accept {
+				return fmt.Errorf("tool-plan-preview-accept requires --accept")
+			}
+			var acceptedAt time.Time
+			if strings.TrimSpace(acceptedAtArg) != "" {
+				parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(acceptedAtArg))
+				if err != nil {
+					return fmt.Errorf("accepted-at must be RFC3339: %w", err)
+				}
+				acceptedAt = parsed
+			}
+			acceptance, err := app.AcceptModelToolPlanPreviewArtifact(args[0], args[1], app.ModelToolPlanPreviewAcceptanceOptions{
+				AcceptedBy: acceptedBy,
+				AcceptedAt: acceptedAt,
+				Reason:     reason,
+			})
+			if err != nil {
+				return err
+			}
+			return printProviderToolPlanPreviewAcceptance(out, acceptance)
+		},
+	}
+	cmd.Flags().BoolVar(&accept, "accept", false, "Confirm accepting this model tool-plan preview as the current compile-preview review selection")
+	cmd.Flags().StringVar(&acceptedBy, "accepted-by", "", "operator identity; defaults to operator")
+	cmd.Flags().StringVar(&acceptedAtArg, "accepted-at", "", "acceptance timestamp in RFC3339; defaults to now")
+	cmd.Flags().StringVar(&reason, "reason", "", "acceptance reason")
+	return cmd
+}
+
+func newProviderToolPlanPreviewAcceptancesCommand(out io.Writer) *cobra.Command {
+	return &cobra.Command{
+		Use:   "tool-plan-preview-acceptances <workspace> [artifact]",
+		Short: "List or inspect model tool-plan preview acceptance artifacts",
+		Args:  cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 2 {
+				acceptance, err := app.ReadModelToolPlanPreviewAcceptance(args[0], args[1])
+				if err != nil {
+					return err
+				}
+				return printProviderToolPlanPreviewAcceptance(out, acceptance)
+			}
+			acceptances, err := app.ListModelToolPlanPreviewAcceptances(args[0])
+			if err != nil {
+				return err
+			}
+			for _, acceptance := range acceptances {
+				if err := printProviderToolPlanPreviewAcceptance(out, acceptance); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	}
+}
+
 func printProviderGenerationResult(out io.Writer, result app.ProviderGenerationResult) error {
 	lines := []string{
 		"provider-generate: status=completed",
@@ -383,6 +1611,9 @@ func printProviderGenerationResult(out io.Writer, result app.ProviderGenerationR
 	if len(result.Capabilities) > 0 {
 		lines = append(lines, fmt.Sprintf("capabilities=%s", strings.Join(result.Capabilities, "|")))
 	}
+	lines = append(lines, providerRoutingOutputLines(result.RoutingStrategy, result.ProviderAttemptCount, result.ProviderFailover, result.SelectedProviderName, result.ProviderName, result.FailedProviderNames)...)
+	lines = append(lines, providerCapabilityRoutingOutputParts(result.RequiredCapabilities, result.CapabilityMatch, result.SkippedProviders)...)
+	lines = append(lines, providerStreamingOutputLines(result.Streaming, result.StreamChunkCount, result.StreamCompleted, result.StreamDigest, result.StreamPreview)...)
 	lines = append(lines,
 		fmt.Sprintf("latency_ms=%d", result.Latency.Milliseconds()),
 		fmt.Sprintf("text=%s", compactProviderText(result.Text)),
@@ -436,6 +1667,216 @@ func printProviderUsageRecord(out io.Writer, record app.ProviderUsageRecord) err
 	return err
 }
 
+func printProviderGenerationArtifact(out io.Writer, artifact app.ModelGenerationArtifact) error {
+	parts := []string{
+		"provider-generation:",
+		fmt.Sprintf("path=%s", artifact.Path),
+		fmt.Sprintf("artifact=%s", artifact.ArtifactID),
+		fmt.Sprintf("run=%s", artifact.RunID),
+		fmt.Sprintf("source=%s", artifact.Source),
+		fmt.Sprintf("created_at=%s", artifact.CreatedAt),
+		fmt.Sprintf("status=%s", artifact.Status),
+		fmt.Sprintf("mode=%s", artifact.ExecutionMode),
+		fmt.Sprintf("provider=%s", compactProviderText(artifact.ProviderName)),
+		fmt.Sprintf("model=%s", compactProviderText(artifact.Model)),
+		fmt.Sprintf("input_tokens=%d", artifact.InputTokens),
+		fmt.Sprintf("output_tokens=%d", artifact.OutputTokens),
+		fmt.Sprintf("total_tokens=%d", artifact.TotalTokens),
+	}
+	if artifact.ContextWindowTokens > 0 {
+		parts = append(parts, fmt.Sprintf("context_window_tokens=%d", artifact.ContextWindowTokens))
+	}
+	if artifact.EstimatedCostAvailable {
+		parts = append(parts, fmt.Sprintf("estimated_cost_usd=%.6f", artifact.EstimatedCostUSD))
+	}
+	if len(artifact.Capabilities) > 0 {
+		parts = append(parts, fmt.Sprintf("capabilities=%s", strings.Join(artifact.Capabilities, "|")))
+	}
+	parts = append(parts,
+		fmt.Sprintf("budget_status=%s", artifact.BudgetStatus),
+		fmt.Sprintf("ledger_write=%t", artifact.LedgerWrite),
+		fmt.Sprintf("assistant_text_persisted=%t", artifact.AssistantTextPersisted),
+	)
+	parts = append(parts, providerRoutingOutputParts(artifact.RoutingStrategy, artifact.ProviderAttemptCount, artifact.ProviderFailover, artifact.SelectedProviderName, artifact.ProviderName, artifact.FailedProviderNames)...)
+	parts = append(parts, providerCapabilityRoutingOutputParts(artifact.RequiredCapabilities, artifact.CapabilityMatch, artifact.SkippedProviders)...)
+	parts = append(parts, providerStreamingOutputParts(artifact.Streaming, artifact.StreamChunkCount, artifact.StreamCompleted, artifact.StreamDigest, artifact.StreamPreview)...)
+	parts = append(parts,
+		fmt.Sprintf("digest=%s", artifact.TextDigest),
+		fmt.Sprintf("preview=%s", compactProviderText(artifact.TextPreview)),
+	)
+	if artifact.BudgetEnforced {
+		parts = append(parts, fmt.Sprintf("budget_max_estimated_cost_usd=%.6f", artifact.BudgetMaxEstimatedCostUSD))
+	}
+	_, err := fmt.Fprintln(out, strings.Join(parts, " "))
+	return err
+}
+
+func printProviderToolPlanPreviewArtifact(out io.Writer, artifact app.ModelToolPlanPreviewArtifact) error {
+	parts := []string{
+		"provider-tool-plan-preview:",
+		fmt.Sprintf("path=%s", artifact.Path),
+		fmt.Sprintf("artifact=%s", artifact.ArtifactID),
+		fmt.Sprintf("run=%s", artifact.RunID),
+		fmt.Sprintf("source=%s", artifact.Source),
+		fmt.Sprintf("agent=%s", compactProviderText(artifact.AgentID)),
+		fmt.Sprintf("role=%s", compactProviderText(artifact.Role)),
+		fmt.Sprintf("created_at=%s", artifact.CreatedAt),
+		fmt.Sprintf("status=%s", artifact.Status),
+		fmt.Sprintf("mode=%s", artifact.ExecutionMode),
+		fmt.Sprintf("provider=%s", compactProviderText(artifact.ProviderName)),
+		fmt.Sprintf("model=%s", compactProviderText(artifact.Model)),
+		fmt.Sprintf("action=%s", artifact.Action),
+		fmt.Sprintf("valid=%t", artifact.Valid),
+		fmt.Sprintf("reason=%s", compactProviderText(artifact.Reason)),
+		fmt.Sprintf("marker=%s", compactProviderText(artifact.MarkerPreview)),
+		fmt.Sprintf("model_output_digest=%s", compactProviderText(artifact.ModelOutputDigest)),
+		fmt.Sprintf("generation_artifact=%s", artifact.ModelGenerationArtifactPath),
+		fmt.Sprintf("review=%s", artifact.ReviewPath),
+		fmt.Sprintf("review_nodes=%d", artifact.ReviewNodes),
+		fmt.Sprintf("review_warnings=%d", artifact.ReviewWarnings),
+		fmt.Sprintf("assistant_text_persisted=%t", artifact.AssistantTextPersisted),
+		fmt.Sprintf("executed_tools=%d", artifact.ExecutedTools),
+		fmt.Sprintf("worker_dispatch=%t", artifact.WorkerDispatch),
+		fmt.Sprintf("target_contact=%t", artifact.TargetContact),
+		fmt.Sprintf("digest=%s", compactProviderText(artifact.ArtifactDigest)),
+	}
+	_, err := fmt.Fprintln(out, strings.Join(parts, " "))
+	return err
+}
+
+func printProviderToolPlanPreviewAcceptance(out io.Writer, acceptance app.ModelToolPlanPreviewAcceptance) error {
+	parts := []string{
+		"provider-tool-plan-preview-acceptance:",
+		fmt.Sprintf("path=%s", acceptance.Path),
+		fmt.Sprintf("artifact=%s", acceptance.ArtifactID),
+		fmt.Sprintf("source=%s", acceptance.Source),
+		fmt.Sprintf("status=%s", acceptance.Status),
+		fmt.Sprintf("mode=%s", acceptance.ExecutionMode),
+		fmt.Sprintf("accepted_at=%s", acceptance.AcceptedAt),
+		fmt.Sprintf("accepted_by=%s", compactProviderText(acceptance.AcceptedBy)),
+		fmt.Sprintf("reason=%s", compactProviderText(acceptance.Reason)),
+		fmt.Sprintf("run=%s", acceptance.RunID),
+		fmt.Sprintf("provider=%s", compactProviderText(acceptance.ProviderName)),
+		fmt.Sprintf("model=%s", compactProviderText(acceptance.Model)),
+		fmt.Sprintf("action=%s", acceptance.Action),
+		fmt.Sprintf("preview=%s", acceptance.PreviewArtifactPath),
+		fmt.Sprintf("review=%s", acceptance.ReviewPath),
+		fmt.Sprintf("selection=%s", acceptance.SelectionPath),
+		fmt.Sprintf("review_nodes=%d", acceptance.ReviewNodes),
+		fmt.Sprintf("review_warnings=%d", acceptance.ReviewWarnings),
+		fmt.Sprintf("model_output_digest=%s", compactProviderText(acceptance.ModelOutputDigest)),
+		fmt.Sprintf("generation_artifact=%s", acceptance.ModelGenerationArtifact),
+		fmt.Sprintf("assistant_text_persisted=%t", acceptance.AssistantTextPersisted),
+		fmt.Sprintf("executed_tools=%d", acceptance.ExecutedTools),
+		fmt.Sprintf("worker_dispatch=%t", acceptance.WorkerDispatch),
+		fmt.Sprintf("target_contact=%t", acceptance.TargetContact),
+		fmt.Sprintf("execution_dispatch_created=%t", acceptance.ExecutionDispatchCreated),
+		fmt.Sprintf("digest=%s", compactProviderText(acceptance.AcceptanceDigest)),
+	}
+	_, err := fmt.Fprintln(out, strings.Join(parts, " "))
+	return err
+}
+
+func providerRoutingOutputLines(strategy string, attempts int, failover bool, selected string, provider string, failed []string) []string {
+	parts := providerRoutingOutputParts(strategy, attempts, failover, selected, provider, failed)
+	lines := make([]string, 0, len(parts))
+	for _, part := range parts {
+		lines = append(lines, part)
+	}
+	return lines
+}
+
+func providerRoutingOutputParts(strategy string, attempts int, failover bool, selected string, provider string, failed []string) []string {
+	strategy = strings.TrimSpace(strategy)
+	if strategy == "" {
+		strategy = "first_enabled"
+	}
+	if attempts <= 0 {
+		attempts = 1
+	}
+	selected = strings.TrimSpace(selected)
+	if selected == "" {
+		selected = strings.TrimSpace(provider)
+	}
+	return []string{
+		fmt.Sprintf("routing=%s", compactProviderText(strategy)),
+		fmt.Sprintf("attempts=%d", attempts),
+		fmt.Sprintf("failover=%t", failover),
+		fmt.Sprintf("selected=%s", compactProviderText(selected)),
+		fmt.Sprintf("failed=%s", compactProviderList(failed)),
+	}
+}
+
+func compactProviderList(values []string) string {
+	if len(values) == 0 {
+		return "none"
+	}
+	cleaned := make([]string, 0, len(values))
+	for _, value := range values {
+		value = compactProviderText(value)
+		if value != "" {
+			cleaned = append(cleaned, value)
+		}
+	}
+	if len(cleaned) == 0 {
+		return "none"
+	}
+	return strings.Join(cleaned, "|")
+}
+
+func providerCapabilityRoutingOutputParts(requiredCapabilities []string, capabilityMatch bool, skippedProviders []app.ProviderSkippedProvider) []string {
+	if len(requiredCapabilities) == 0 && len(skippedProviders) == 0 {
+		return nil
+	}
+	return []string{
+		fmt.Sprintf("required_capabilities=%s", compactProviderList(app.NormalizeProviderCapabilities(requiredCapabilities))),
+		fmt.Sprintf("capability_match=%t", capabilityMatch),
+		fmt.Sprintf("skipped_providers=%s", compactProviderSkippedProviderList(skippedProviders)),
+	}
+}
+
+func providerStreamingOutputLines(streaming bool, chunkCount int, completed bool, digest string, preview string) []string {
+	parts := providerStreamingOutputParts(streaming, chunkCount, completed, digest, preview)
+	lines := make([]string, 0, len(parts))
+	for _, part := range parts {
+		lines = append(lines, part)
+	}
+	return lines
+}
+
+func providerStreamingOutputParts(streaming bool, chunkCount int, completed bool, digest string, preview string) []string {
+	if !streaming {
+		return nil
+	}
+	return []string{
+		"streaming=true",
+		fmt.Sprintf("stream_completed=%t", completed),
+		fmt.Sprintf("stream_chunk_count=%d", chunkCount),
+		fmt.Sprintf("stream_digest=%s", compactProviderText(digest)),
+		fmt.Sprintf("stream_preview=%s", compactProviderText(preview)),
+	}
+}
+
+func compactProviderSkippedProviderList(skippedProviders []app.ProviderSkippedProvider) string {
+	if len(skippedProviders) == 0 {
+		return "none"
+	}
+	parts := make([]string, 0, len(skippedProviders))
+	for _, skipped := range skippedProviders {
+		name := compactProviderText(skipped.Name)
+		reason := compactProviderText(skipped.Reason)
+		if name == "" || reason == "" {
+			continue
+		}
+		parts = append(parts, name+"="+reason)
+	}
+	if len(parts) == 0 {
+		return "none"
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, "|")
+}
+
 func printProviderUsageSummary(out io.Writer, summary app.ProviderUsageSummary) error {
 	parts := []string{
 		"provider-usage-summary:",
@@ -462,19 +1903,28 @@ func newRunCommand(out io.Writer) *cobra.Command {
 	var action string
 	var deferReportProjection bool
 	var requireSafetyAuthorization bool
+	var providerGenerate bool
+	var providerGeneratePrompt string
+	var providerGenerateSystemPrompt string
+	var providerGenerateMaxTokens int
+	var providerGenerateMaxEstimatedCostUSD float64
+	var providerGenerateRecordUsage bool
+	var providerGenerateRequiredCapabilities []string
+	var providerGenerateStream bool
+	var providerGenerateToolPlanPreview bool
 	cmd := &cobra.Command{
 		Use:   "run <workspace>",
 		Short: "Run the production execution path for a workspace",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if interactive {
-				return runInteractiveWorkspace(context.Background(), args[0], out, printTUI, compiler.SemanticAction(action), deferReportProjection, requireSafetyAuthorization)
+			runOptions, err := runOptionsFromCommand(cmd, compiler.SemanticAction(action), deferReportProjection, requireSafetyAuthorization, providerGenerate, providerGeneratePrompt, providerGenerateSystemPrompt, providerGenerateMaxTokens, providerGenerateMaxEstimatedCostUSD, providerGenerateRecordUsage, providerGenerateRequiredCapabilities, providerGenerateStream, providerGenerateToolPlanPreview)
+			if err != nil {
+				return err
 			}
-			result, err := app.RunWorkspaceWithOptions(context.Background(), args[0], app.RunOptions{
-				Action:                     compiler.SemanticAction(action),
-				DeferReportProjection:      deferReportProjection,
-				RequireSafetyAuthorization: requireSafetyAuthorization,
-			})
+			if interactive {
+				return runInteractiveWorkspace(context.Background(), args[0], out, printTUI, runOptions)
+			}
+			result, err := runWorkspaceWithOptions(context.Background(), args[0], runOptions)
 			if err != nil {
 				return err
 			}
@@ -485,8 +1935,47 @@ func newRunCommand(out io.Writer) *cobra.Command {
 	cmd.Flags().BoolVar(&interactive, "interactive", false, "Launch an interactive TUI after the run")
 	cmd.Flags().StringVar(&action, "action", "", "Semantic action to compile for this run (default discover_assets)")
 	cmd.Flags().BoolVar(&deferReportProjection, "defer-report-projection", false, "Skip synchronous report projection so it can be projected later")
-	cmd.Flags().BoolVar(&requireSafetyAuthorization, "require-safety-authorization", false, "Fail run when disabled safety boundaries lack current authorization.yaml metadata")
+	cmd.Flags().BoolVar(&providerGenerate, "provider-generate", false, "Enable an explicit provider generation step during the closed-loop planner stage")
+	cmd.Flags().StringVar(&providerGeneratePrompt, "provider-generate-prompt", "", "User prompt for the run-integrated provider generation step")
+	cmd.Flags().StringVar(&providerGenerateSystemPrompt, "provider-generate-system-prompt", "", "System prompt for the run-integrated provider generation step")
+	cmd.Flags().IntVar(&providerGenerateMaxTokens, "provider-generate-max-tokens", 0, "Maximum completion tokens for run-integrated provider generation")
+	cmd.Flags().BoolVar(&providerGenerateRecordUsage, "provider-generate-record-usage", false, "Write a metadata-only provider usage record for run-integrated provider generation")
+	cmd.Flags().StringSliceVar(&providerGenerateRequiredCapabilities, "provider-generate-required-capability", nil, "Required provider capability for run-integrated provider generation; repeat or comma-separate")
+	cmd.Flags().BoolVar(&providerGenerateStream, "provider-generate-stream", false, "Request streamed output for run-integrated provider generation and persist only safe stream metadata")
+	cmd.Flags().BoolVar(&providerGenerateToolPlanPreview, "provider-generate-tool-plan-preview", false, "Enable read-only metadata-only tool plan preview from provider generation output; does not execute tools, dispatch workers, or touch targets")
 	return cmd
+}
+
+func runOptionsFromCommand(cmd *cobra.Command, action compiler.SemanticAction, deferReportProjection bool, requireSafetyAuthorization bool, providerGenerate bool, providerGeneratePrompt string, providerGenerateSystemPrompt string, providerGenerateMaxTokens int, providerGenerateMaxEstimatedCostUSD float64, providerGenerateRecordUsage bool, providerGenerateRequiredCapabilities []string, providerGenerateStream bool, providerGenerateToolPlanPreview bool) (app.RunOptions, error) {
+	options := app.RunOptions{
+		Action:                     action,
+		DeferReportProjection:      deferReportProjection,
+	}
+	if !providerGenerate {
+		return options, nil
+	}
+	if strings.TrimSpace(providerGeneratePrompt) == "" {
+	}
+	if providerGenerateMaxTokens < 0 {
+		return app.RunOptions{}, fmt.Errorf("provider generation max_tokens must be non-negative")
+	}
+	var maxCost *float64
+	if cmd.Flags().Changed("provider-generate-max-estimated-cost-usd") {
+		if providerGenerateMaxEstimatedCostUSD < 0 {
+			return app.RunOptions{}, fmt.Errorf("provider generation max_estimated_cost_usd must be non-negative")
+		}
+		maxCost = &providerGenerateMaxEstimatedCostUSD
+	}
+	options.EnableProviderGeneration = true
+	options.ProviderGenerationPrompt = providerGeneratePrompt
+	options.ProviderGenerationSystemPrompt = providerGenerateSystemPrompt
+	options.ProviderGenerationMaxTokens = providerGenerateMaxTokens
+	options.ProviderGenerationMaxEstimatedCostUSD = maxCost
+	options.ProviderGenerationRecordUsage = providerGenerateRecordUsage
+	options.ProviderGenerationRequiredCapabilities = app.NormalizeProviderCapabilities(providerGenerateRequiredCapabilities)
+	options.ProviderGenerationStream = providerGenerateStream
+	options.ProviderGenerationToolPlanPreview = providerGenerateToolPlanPreview
+	return options, nil
 }
 
 type runOutcome struct {
@@ -494,7 +1983,7 @@ type runOutcome struct {
 	err    error
 }
 
-func runInteractiveWorkspace(ctx context.Context, root string, out io.Writer, printTUI bool, action compiler.SemanticAction, deferReportProjection bool, requireSafetyAuthorization bool) error {
+func runInteractiveWorkspace(ctx context.Context, root string, out io.Writer, printTUI bool, options app.RunOptions) error {
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
 	pauseController := app.NewRunPauseController()
@@ -516,16 +2005,12 @@ func runInteractiveWorkspace(ctx context.Context, root string, out io.Writer, pr
 	session := newInteractiveSession(model)
 	outcomes := make(chan runOutcome, 1)
 	go func() {
-		result, err := app.RunWorkspaceWithOptions(runCtx, root, app.RunOptions{
-			PauseController:            pauseController,
-			Action:                     action,
-			DeferReportProjection:      deferReportProjection,
-			RequireSafetyAuthorization: requireSafetyAuthorization,
-			OnSnapshot: func(snapshot eventlog.ReplaySnapshot) error {
-				session.Send(tui.ReplaySnapshotMsg{Snapshot: snapshot})
-				return nil
-			},
-		})
+		options.PauseController = pauseController
+		options.OnSnapshot = func(snapshot eventlog.ReplaySnapshot) error {
+			session.Send(tui.ReplaySnapshotMsg{Snapshot: snapshot})
+			return nil
+		}
+		result, err := runWorkspaceWithOptions(runCtx, root, options)
 		if err != nil {
 			session.Quit()
 		}
@@ -5623,6 +7108,20 @@ func newToolchainCommand(out io.Writer) *cobra.Command {
 	cmd.AddCommand(newToolchainAuthoredToolsCommand(out))
 	cmd.AddCommand(newToolchainAuthoredToolRegistryCommand(out))
 	cmd.AddCommand(newToolchainManagedBundlesCommand(out))
+	cmd.AddCommand(newToolchainManagedBundleImportCommand(out))
+	cmd.AddCommand(newToolchainReleaseManagedBundlesCommand(out))
+	cmd.AddCommand(newToolchainReleaseManagedStatusCommand(out))
+	cmd.AddCommand(newToolchainReleaseManagedStatusSourceCommand(out))
+	cmd.AddCommand(newToolchainReleaseManagedStatusSourceSetCommand(out))
+	cmd.AddCommand(newToolchainReleaseManagedStatusSourceClearCommand(out))
+	cmd.AddCommand(newToolchainManagedUpdateRequestCommand(out))
+	cmd.AddCommand(newToolchainManagedUpdateRequestsCommand(out))
+	cmd.AddCommand(newToolchainManagedUpdateDownloadPlanCommand(out))
+	cmd.AddCommand(newToolchainManagedUpdateDownloadPlansCommand(out))
+	cmd.AddCommand(newToolchainExecuteManagedUpdateDownloadPlanCommand(out))
+	cmd.AddCommand(newToolchainManagedUpdateDownloadExecutionsCommand(out))
+	cmd.AddCommand(newToolchainApplyManagedUpdateDownloadExecutionCommand(out))
+	cmd.AddCommand(newToolchainManagedUpdateApplyExecutionsCommand(out))
 	cmd.AddCommand(newToolchainManagedInstallPlanCommand(out))
 	cmd.AddCommand(newToolchainManagedInstallCommand(out))
 	cmd.AddCommand(newToolchainReleaseManagedInstallPlanCommand(out))
@@ -5635,6 +7134,9 @@ func newToolchainCommand(out io.Writer) *cobra.Command {
 	cmd.AddCommand(newToolchainCompilePreviewReviewSelectionCommand(out))
 	cmd.AddCommand(newToolchainCompilePreviewReviewSelectionClearCommand(out))
 	cmd.AddCommand(newToolchainCompilePreviewReviewsCommand(out))
+	cmd.AddCommand(newToolchainCompilePreviewReviewExecutionDispatchCommand(out))
+	cmd.AddCommand(newToolchainCompilePreviewReviewExecutionDispatchesCommand(out))
+	cmd.AddCommand(newToolchainExecuteCompilePreviewReviewExecutionDispatchCommand(out))
 	cmd.AddCommand(newToolchainExecuteCompilePreviewReviewCommand(out))
 	cmd.AddCommand(newToolchainCompilePreviewReviewExecutionsCommand(out))
 	cmd.AddCommand(newToolchainCompilePreviewSignalsCommand(out))
@@ -10936,6 +12438,455 @@ func newToolchainManagedBundlesCommand(out io.Writer) *cobra.Command {
 	}
 }
 
+func newToolchainManagedBundleImportCommand(out io.Writer) *cobra.Command {
+	var kind string
+	var version string
+	var source string
+	var expectedSHA256 string
+	var importBundle bool
+	cmd := &cobra.Command{
+		Use:   "managed-bundle-import <workspace> <name> <payload>",
+		Short: "Import a local binary or rule bundle payload as a workspace managed bundle",
+		Args:  cobra.ExactArgs(3),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := app.ImportManagedToolBundle(args[0], app.ManagedToolBundleImportOptions{
+				Import:                 importBundle,
+				Name:                   args[1],
+				Kind:                   kind,
+				Version:                version,
+				Source:                 source,
+				PayloadPath:            args[2],
+				ExpectedSHA256:         expectedSHA256,
+				ExpectedSHA256Provided: cmd.Flags().Changed("expected-sha256"),
+			})
+			if err != nil {
+				return err
+			}
+			return printManagedToolBundleImportResult(out, result)
+		},
+	}
+	cmd.Flags().StringVar(&kind, "kind", "binary", "managed bundle kind to import (binary or rule_bundle)")
+	cmd.Flags().StringVar(&version, "version", "", "managed bundle version metadata")
+	cmd.Flags().StringVar(&source, "source", "", "managed bundle source metadata")
+	cmd.Flags().StringVar(&expectedSHA256, "expected-sha256", "", "expected payload SHA-256 digest before workspace import")
+	cmd.Flags().BoolVar(&importBundle, "import", false, "copy the local payload into workspace managed-bundles")
+	return cmd
+}
+
+func newToolchainReleaseManagedBundlesCommand(out io.Writer) *cobra.Command {
+	return &cobra.Command{
+		Use:   "release-managed-bundles <release-root> [name]",
+		Short: "List or inspect release-managed tool bundles",
+		Args:  cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 2 {
+				bundle, err := app.ReadReleaseManagedToolBundle(args[0], args[1])
+				if err != nil {
+					return err
+				}
+				return printReleaseManagedToolBundle(out, bundle)
+			}
+			bundles, err := app.ListReleaseManagedToolBundles(args[0])
+			if err != nil {
+				return err
+			}
+			sort.SliceStable(bundles, func(i, j int) bool {
+				return bundles[i].Name < bundles[j].Name
+			})
+			for _, bundle := range bundles {
+				if err := printReleaseManagedToolBundle(out, bundle); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	}
+}
+
+func newToolchainReleaseManagedStatusCommand(out io.Writer) *cobra.Command {
+	var expectedSHA256 string
+	cmd := &cobra.Command{
+		Use:   "release-managed-status <workspace> <release-root> [name]",
+		Short: "List or inspect release-managed bundle workspace import status",
+		Args:  cobra.RangeArgs(2, 3),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			expectedProvided := cmd.Flags().Changed("expected-sha256")
+			if expectedProvided && len(args) != 3 {
+				return fmt.Errorf("release-managed-status --expected-sha256 requires a bundle name")
+			}
+			if len(args) == 3 {
+				status, err := app.ReadReleaseManagedToolBundleStatusWithOptions(args[0], args[1], args[2], app.ReleaseManagedToolBundleStatusOptions{
+					ExpectedSHA256:         expectedSHA256,
+					ExpectedSHA256Provided: expectedProvided,
+				})
+				if err != nil {
+					return err
+				}
+				return printReleaseManagedToolBundleStatus(out, status)
+			}
+			statuses, err := app.ListReleaseManagedToolBundleStatuses(args[0], args[1])
+			if err != nil {
+				return err
+			}
+			sort.SliceStable(statuses, func(i, j int) bool {
+				return statuses[i].Name < statuses[j].Name
+			})
+			for _, status := range statuses {
+				if err := printReleaseManagedToolBundleStatus(out, status); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&expectedSHA256, "expected-sha256", "", "expected release managed payload SHA-256 digest for the named bundle")
+	return cmd
+}
+
+func newToolchainReleaseManagedStatusSourceCommand(out io.Writer) *cobra.Command {
+	return &cobra.Command{
+		Use:   "release-managed-status-source <workspace>",
+		Short: "Read the workspace release-managed status source marker",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			source, found, err := app.ReadReleaseManagedToolBundleStatusSource(args[0])
+			if err != nil {
+				return err
+			}
+			if !found {
+				_, _ = fmt.Fprintln(out, "release-managed-status-source: status=missing mode=metadata-only")
+				return nil
+			}
+			return printReleaseManagedToolBundleStatusSource(out, source)
+		},
+	}
+}
+
+func newToolchainReleaseManagedStatusSourceSetCommand(out io.Writer) *cobra.Command {
+	var set bool
+	var setBy string
+	var reason string
+	var pinBundle string
+	var expectedSHA256 string
+	cmd := &cobra.Command{
+		Use:   "release-managed-status-source-set <workspace> <release-root>",
+		Short: "Set the workspace release-managed status source marker",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			expectedProvided := cmd.Flags().Changed("expected-sha256")
+			source, err := app.SetReleaseManagedToolBundleStatusSource(args[0], args[1], app.ReleaseManagedToolBundleStatusSourceOptions{
+				Set:                    set,
+				SetBy:                  setBy,
+				Reason:                 reason,
+				ExpectedSHA256Bundle:   pinBundle,
+				ExpectedSHA256:         expectedSHA256,
+				ExpectedSHA256Provided: expectedProvided,
+			})
+			if err != nil {
+				return err
+			}
+			return printReleaseManagedToolBundleStatusSource(out, source)
+		},
+	}
+	cmd.Flags().BoolVar(&set, "set", false, "write the release-managed status source marker")
+	cmd.Flags().StringVar(&setBy, "set-by", "operator", "actor setting the release-managed status source marker")
+	cmd.Flags().StringVar(&reason, "reason", "", "reason for setting the release-managed status source marker")
+	cmd.Flags().StringVar(&pinBundle, "pin-bundle", "", "release-managed bundle name to pin with --expected-sha256")
+	cmd.Flags().StringVar(&expectedSHA256, "expected-sha256", "", "expected release managed payload SHA-256 digest for --pin-bundle")
+	return cmd
+}
+
+func newToolchainReleaseManagedStatusSourceClearCommand(out io.Writer) *cobra.Command {
+	var clear bool
+	var clearedBy string
+	var reason string
+	cmd := &cobra.Command{
+		Use:   "release-managed-status-source-clear <workspace>",
+		Short: "Clear the workspace release-managed status source marker",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			source, err := app.ClearReleaseManagedToolBundleStatusSource(args[0], app.ReleaseManagedToolBundleStatusSourceClearOptions{
+				Clear:     clear,
+				ClearedBy: clearedBy,
+				Reason:    reason,
+			})
+			if err != nil {
+				return err
+			}
+			return printReleaseManagedToolBundleStatusSource(out, source)
+		},
+	}
+	cmd.Flags().BoolVar(&clear, "clear", false, "write a cleared release-managed status source marker")
+	cmd.Flags().StringVar(&clearedBy, "cleared-by", "operator", "actor clearing the release-managed status source marker")
+	cmd.Flags().StringVar(&reason, "reason", "", "reason for clearing the release-managed status source marker")
+	return cmd
+}
+
+func newToolchainManagedUpdateRequestCommand(out io.Writer) *cobra.Command {
+	var request bool
+	var requestedBy string
+	var reason string
+	cmd := &cobra.Command{
+		Use:   "managed-update-request <workspace> <release-root> <name>",
+		Short: "Write a pending metadata-only managed bundle update request",
+		Args:  cobra.ExactArgs(3),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			updateRequest, err := app.CreateManagedToolBundleUpdateRequest(args[0], args[1], args[2], app.ManagedToolBundleUpdateRequestOptions{
+				Request:     request,
+				RequestedBy: requestedBy,
+				Reason:      reason,
+			})
+			if err != nil {
+				return err
+			}
+			if _, err := fmt.Fprintf(out, "managed-update-request: %s\n", updateRequest.Path); err != nil {
+				return err
+			}
+			return printManagedToolBundleUpdateRequestFields(out, updateRequest)
+		},
+	}
+	cmd.Flags().BoolVar(&request, "request", false, "write the managed bundle update request artifact")
+	cmd.Flags().StringVar(&requestedBy, "requested-by", "operator", "actor requesting the managed bundle update")
+	cmd.Flags().StringVar(&reason, "reason", "", "reason for requesting the managed bundle update")
+	return cmd
+}
+
+func newToolchainManagedUpdateRequestsCommand(out io.Writer) *cobra.Command {
+	return &cobra.Command{
+		Use:   "managed-update-requests <workspace> [artifact]",
+		Short: "List or inspect metadata-only managed bundle update requests",
+		Args:  cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 2 {
+				request, err := app.ReadManagedToolBundleUpdateRequest(args[0], args[1])
+				if err != nil {
+					return err
+				}
+				return printManagedToolBundleUpdateRequest(out, request)
+			}
+			requests, err := app.ListManagedToolBundleUpdateRequests(args[0])
+			if err != nil {
+				return err
+			}
+			summary := app.SummarizeManagedToolBundleUpdateRequests(requests)
+			if _, err := fmt.Fprintf(out, "managed-update-requests: %s\n", summary.Line()); err != nil {
+				return err
+			}
+			for _, request := range requests {
+				if err := printManagedToolBundleUpdateRequest(out, request); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	}
+}
+
+func newToolchainManagedUpdateDownloadPlanCommand(out io.Writer) *cobra.Command {
+	var planFlag bool
+	var sourceURL string
+	var expectedSHA256 string
+	var archiveFormat string
+	var archiveExpectedSHA256 string
+	var plannedBy string
+	var reason string
+	cmd := &cobra.Command{
+		Use:   "managed-update-download-plan <workspace> <request-artifact>",
+		Short: "Write a metadata-only managed bundle update download plan",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			plan, err := app.CreateManagedToolBundleUpdateDownloadPlan(args[0], args[1], app.ManagedToolBundleUpdateDownloadPlanOptions{
+				Plan:                  planFlag,
+				SourceURL:             sourceURL,
+				ExpectedSHA256:        expectedSHA256,
+				ArchiveFormat:         archiveFormat,
+				ArchiveExpectedSHA256: archiveExpectedSHA256,
+				PlannedBy:             plannedBy,
+				Reason:                reason,
+			})
+			if err != nil {
+				return err
+			}
+			if _, err := fmt.Fprintf(out, "managed-update-download-plan: %s\n", plan.Path); err != nil {
+				return err
+			}
+			return printManagedToolBundleUpdateDownloadPlanFields(out, plan)
+		},
+	}
+	cmd.Flags().BoolVar(&planFlag, "plan", false, "write the managed bundle update download plan artifact")
+	cmd.Flags().StringVar(&sourceURL, "source-url", "", "HTTPS source URL to review for the planned update payload")
+	cmd.Flags().StringVar(&expectedSHA256, "expected-sha256", "", "expected update payload SHA-256 digest")
+	cmd.Flags().StringVar(&archiveFormat, "archive-format", "", "archive format for binary or rule-bundle update payloads")
+	cmd.Flags().StringVar(&archiveExpectedSHA256, "expected-archive-sha256", "", "expected archive byte SHA-256 digest")
+	cmd.Flags().StringVar(&plannedBy, "planned-by", "operator", "actor planning the managed bundle update download")
+	cmd.Flags().StringVar(&reason, "reason", "", "reason for planning the managed bundle update download")
+	return cmd
+}
+
+func newToolchainManagedUpdateDownloadPlansCommand(out io.Writer) *cobra.Command {
+	return &cobra.Command{
+		Use:   "managed-update-download-plans <workspace> [artifact]",
+		Short: "List or inspect metadata-only managed bundle update download plans",
+		Args:  cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 2 {
+				plan, err := app.ReadManagedToolBundleUpdateDownloadPlan(args[0], args[1])
+				if err != nil {
+					return err
+				}
+				return printManagedToolBundleUpdateDownloadPlan(out, plan)
+			}
+			plans, err := app.ListManagedToolBundleUpdateDownloadPlans(args[0])
+			if err != nil {
+				return err
+			}
+			summary := app.SummarizeManagedToolBundleUpdateDownloadPlans(plans)
+			if _, err := fmt.Fprintf(out, "managed-update-download-plans: %s\n", summary.Line()); err != nil {
+				return err
+			}
+			for _, plan := range plans {
+				if err := printManagedToolBundleUpdateDownloadPlan(out, plan); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	}
+}
+
+func newToolchainExecuteManagedUpdateDownloadPlanCommand(out io.Writer) *cobra.Command {
+	var execute bool
+	var actor string
+	var reason string
+	cmd := &cobra.Command{
+		Use:   "execute-managed-update-download-plan <workspace> <plan-artifact>",
+		Short: "Download a reviewed managed bundle update payload into workspace staging",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			execution, err := app.ExecuteManagedToolBundleUpdateDownloadPlan(args[0], args[1], app.ManagedToolBundleUpdateDownloadExecutionOptions{
+				Execute: execute,
+				Actor:   actor,
+				Reason:  reason,
+			})
+			if err != nil {
+				if execution.Path != "" {
+					_ = printManagedToolBundleUpdateDownloadExecution(out, execution)
+				}
+				return err
+			}
+			if _, err := fmt.Fprintf(out, "managed-update-download-execution: %s\n", execution.Path); err != nil {
+				return err
+			}
+			if execution.ArchivePath != "" {
+				if _, err := fmt.Fprintf(out, "archive=%s\n", execution.ArchivePath); err != nil {
+					return err
+				}
+			}
+			if execution.PayloadPath != "" {
+				if _, err := fmt.Fprintf(out, "payload=%s\n", execution.PayloadPath); err != nil {
+					return err
+				}
+			}
+			return printManagedToolBundleUpdateDownloadExecutionFields(out, execution)
+		},
+	}
+	cmd.Flags().BoolVar(&execute, "execute", false, "download the reviewed managed bundle update payload into workspace staging")
+	cmd.Flags().StringVar(&actor, "actor", "operator", "actor executing the managed bundle update download")
+	cmd.Flags().StringVar(&reason, "reason", "", "reason for executing the managed bundle update download")
+	return cmd
+}
+
+func newToolchainManagedUpdateDownloadExecutionsCommand(out io.Writer) *cobra.Command {
+	return &cobra.Command{
+		Use:   "managed-update-download-executions <workspace> [artifact]",
+		Short: "List or inspect managed bundle update download execution audits",
+		Args:  cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 2 {
+				execution, err := app.ReadManagedToolBundleUpdateDownloadExecution(args[0], args[1])
+				if err != nil {
+					return err
+				}
+				return printManagedToolBundleUpdateDownloadExecution(out, execution)
+			}
+			executions, err := app.ListManagedToolBundleUpdateDownloadExecutions(args[0])
+			if err != nil {
+				return err
+			}
+			summary := app.SummarizeManagedToolBundleUpdateDownloadExecutions(executions)
+			if _, err := fmt.Fprintf(out, "managed-update-download-executions: %s\n", summary.Line()); err != nil {
+				return err
+			}
+			for _, execution := range executions {
+				if err := printManagedToolBundleUpdateDownloadExecution(out, execution); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	}
+}
+
+func newToolchainApplyManagedUpdateDownloadExecutionCommand(out io.Writer) *cobra.Command {
+	var apply bool
+	var actor string
+	var reason string
+	cmd := &cobra.Command{
+		Use:   "apply-managed-update-download-execution <workspace> <download-execution-artifact>",
+		Short: "Apply a verified managed bundle update download into workspace managed bundles",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			execution, err := app.ApplyManagedToolBundleUpdateDownloadExecution(args[0], args[1], app.ManagedToolBundleUpdateApplyOptions{
+				Apply:  apply,
+				Actor:  actor,
+				Reason: reason,
+			})
+			if err != nil {
+				return err
+			}
+			if _, err := fmt.Fprintf(out, "managed-update-apply-execution: %s\n", execution.Path); err != nil {
+				return err
+			}
+			return printManagedToolBundleUpdateApplyExecutionFields(out, execution)
+		},
+	}
+	cmd.Flags().BoolVar(&apply, "apply", false, "apply the verified managed bundle update download into workspace managed bundles")
+	cmd.Flags().StringVar(&actor, "actor", "operator", "actor applying the managed bundle update")
+	cmd.Flags().StringVar(&reason, "reason", "", "reason for applying the managed bundle update")
+	return cmd
+}
+
+func newToolchainManagedUpdateApplyExecutionsCommand(out io.Writer) *cobra.Command {
+	return &cobra.Command{
+		Use:   "managed-update-apply-executions <workspace> [artifact]",
+		Short: "List or inspect managed bundle update apply execution audits",
+		Args:  cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 2 {
+				execution, err := app.ReadManagedToolBundleUpdateApplyExecution(args[0], args[1])
+				if err != nil {
+					return err
+				}
+				return printManagedToolBundleUpdateApplyExecution(out, execution)
+			}
+			executions, err := app.ListManagedToolBundleUpdateApplyExecutions(args[0])
+			if err != nil {
+				return err
+			}
+			summary := app.SummarizeManagedToolBundleUpdateApplyExecutions(executions)
+			if _, err := fmt.Fprintf(out, "managed-update-apply-executions: %s\n", summary.Line()); err != nil {
+				return err
+			}
+			for _, execution := range executions {
+				if err := printManagedToolBundleUpdateApplyExecution(out, execution); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	}
+}
+
 func newToolchainManagedInstallPlanCommand(out io.Writer) *cobra.Command {
 	return &cobra.Command{
 		Use:   "managed-install-plan <workspace> <pack> <dependency>",
@@ -10970,28 +12921,39 @@ func newToolchainManagedInstallCommand(out io.Writer) *cobra.Command {
 }
 
 func newToolchainReleaseManagedInstallPlanCommand(out io.Writer) *cobra.Command {
-	return &cobra.Command{
+	var expectedSHA256 string
+	cmd := &cobra.Command{
 		Use:   "release-managed-install-plan <workspace> <release-root> <pack> <dependency>",
 		Short: "Print a metadata-only release managed bundle install plan",
 		Args:  cobra.ExactArgs(4),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			plan, err := app.CreateReleaseManagedToolBundleInstallPlan(args[0], args[1], args[2], args[3])
+			plan, err := app.CreateReleaseManagedToolBundleInstallPlanWithOptions(args[0], args[1], args[2], args[3], app.ReleaseManagedToolBundleInstallPlanOptions{
+				ExpectedSHA256:         expectedSHA256,
+				ExpectedSHA256Provided: cmd.Flags().Changed("expected-sha256"),
+			})
 			if err != nil {
 				return err
 			}
 			return printReleaseManagedToolBundleInstallPlan(out, plan)
 		},
 	}
+	cmd.Flags().StringVar(&expectedSHA256, "expected-sha256", "", "expected release managed payload SHA-256 digest before planning")
+	return cmd
 }
 
 func newToolchainReleaseManagedInstallCommand(out io.Writer) *cobra.Command {
 	var execute bool
+	var expectedSHA256 string
 	cmd := &cobra.Command{
 		Use:   "release-managed-install <workspace> <release-root> <pack> <dependency>",
 		Short: "Copy a release managed tool bundle into a workspace and link it",
 		Args:  cobra.ExactArgs(4),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			result, err := app.ExecuteReleaseManagedToolBundleInstall(args[0], args[1], args[2], args[3], app.ManagedToolBundleInstallOptions{Execute: execute})
+			result, err := app.ExecuteReleaseManagedToolBundleInstall(args[0], args[1], args[2], args[3], app.ReleaseManagedToolBundleInstallOptions{
+				Execute:                execute,
+				ExpectedSHA256:         expectedSHA256,
+				ExpectedSHA256Provided: cmd.Flags().Changed("expected-sha256"),
+			})
 			if err != nil {
 				return err
 			}
@@ -10999,21 +12961,384 @@ func newToolchainReleaseManagedInstallCommand(out io.Writer) *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&execute, "execute", false, "copy the release bundle and create the workspace link")
+	cmd.Flags().StringVar(&expectedSHA256, "expected-sha256", "", "expected release managed payload SHA-256 digest before workspace install")
 	return cmd
 }
 
 func printManagedToolBundle(out io.Writer, bundle app.ManagedToolBundle) error {
 	_, err := fmt.Fprintf(
 		out,
-		"managed-bundle: name=%s kind=%s version=%s source=%s sha256=%s payload=%s install=%s manifest=%s\n",
+		"managed-bundle: name=%s status=%s kind=%s version=%s source=%s sha256=%s provenance_status=%s provenance_source_url=%s provenance_upstream_version=%s provenance_retrieved_at=%s provenance_verified_by=%s corpus_status=%s corpus_name=%s corpus_source=%s corpus_retrieved_at=%s corpus_file_count=%d corpus_sha256=%s corpus_digest_status=%s corpus_digest_algorithm=%s corpus_digest_scope=%s signature_status=%s signature_algorithm=%s signature_key_id=%s signature_signed_at=%s signature_signed_by=%s update_status=%s update_latest_version=%s update_latest_sha256=%s update_checked_at=%s update_message=%s payload=%s install=%s manifest=%s error=%s\n",
 		bundle.Name,
+		printValueOrDefault(bundle.Status, "available"),
 		bundle.Kind,
 		bundle.Version,
 		bundle.Source,
 		bundle.SHA256,
+		printValueOrDefault(bundle.ProvenanceStatus, "missing"),
+		bundle.ProvenanceSourceURL,
+		bundle.ProvenanceUpstreamVersion,
+		bundle.ProvenanceRetrievedAt,
+		bundle.ProvenanceVerifiedBy,
+		printValueOrDefault(bundle.CorpusStatus, "missing"),
+		bundle.CorpusName,
+		bundle.CorpusSource,
+		bundle.CorpusRetrievedAt,
+		bundle.CorpusFileCount,
+		bundle.CorpusSHA256,
+		bundle.CorpusDigestStatus,
+		bundle.CorpusDigestAlgorithm,
+		bundle.CorpusDigestScope,
+		printValueOrDefault(bundle.SignatureStatus, "missing"),
+		bundle.SignatureAlgorithm,
+		bundle.SignatureKeyID,
+		bundle.SignatureSignedAt,
+		bundle.SignatureSignedBy,
+		printValueOrDefault(bundle.UpdateStatus, "unknown"),
+		bundle.UpdateLatestVersion,
+		bundle.UpdateLatestSHA256,
+		bundle.UpdateCheckedAt,
+		bundle.UpdateMessage,
 		bundle.PayloadPath,
 		bundle.InstallPath,
 		bundle.ManifestPath,
+		strings.Join(strings.Fields(bundle.Error), "_"),
+	)
+	return err
+}
+
+func printValueOrDefault(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
+}
+
+func printManagedToolBundleImportResult(out io.Writer, result app.ManagedToolBundleImportResult) error {
+	_, err := fmt.Fprintf(
+		out,
+		"managed-bundle-import: status=%s mode=%s action=%s name=%s kind=%s version=%s source=%s sha256=%s expected_sha256=%s source_payload=%s bundle=%s payload=%s manifest=%s install=%s\n",
+		result.Status,
+		result.Mode,
+		result.Action,
+		result.Name,
+		result.Kind,
+		result.Version,
+		result.Source,
+		result.SHA256,
+		result.ExpectedSHA256,
+		result.SourcePayloadPath,
+		result.BundleDir,
+		result.PayloadPath,
+		result.ManifestPath,
+		result.InstallPath,
+	)
+	return err
+}
+
+func printReleaseManagedToolBundle(out io.Writer, bundle app.ReleaseManagedToolBundle) error {
+	_, err := fmt.Fprintf(
+		out,
+		"release-managed-bundle: name=%s status=%s mode=%s kind=%s version=%s source=%s sha256=%s provenance_status=%s provenance_source_url=%s provenance_upstream_version=%s provenance_retrieved_at=%s provenance_verified_by=%s corpus_status=%s corpus_name=%s corpus_source=%s corpus_retrieved_at=%s corpus_file_count=%d corpus_sha256=%s corpus_digest_status=%s corpus_digest_algorithm=%s corpus_digest_scope=%s signature_status=%s signature_algorithm=%s signature_key_id=%s signature_signed_at=%s signature_signed_by=%s update_status=%s update_latest_version=%s update_latest_sha256=%s update_checked_at=%s update_message=%s release_bundle=%s release_payload=%s release_manifest=%s error=%s\n",
+		bundle.Name,
+		bundle.Status,
+		bundle.Mode,
+		bundle.Kind,
+		bundle.Version,
+		bundle.Source,
+		bundle.SHA256,
+		printValueOrDefault(bundle.ProvenanceStatus, "missing"),
+		bundle.ProvenanceSourceURL,
+		bundle.ProvenanceUpstreamVersion,
+		bundle.ProvenanceRetrievedAt,
+		bundle.ProvenanceVerifiedBy,
+		printValueOrDefault(bundle.CorpusStatus, "missing"),
+		bundle.CorpusName,
+		bundle.CorpusSource,
+		bundle.CorpusRetrievedAt,
+		bundle.CorpusFileCount,
+		bundle.CorpusSHA256,
+		bundle.CorpusDigestStatus,
+		bundle.CorpusDigestAlgorithm,
+		bundle.CorpusDigestScope,
+		printValueOrDefault(bundle.SignatureStatus, "missing"),
+		bundle.SignatureAlgorithm,
+		bundle.SignatureKeyID,
+		bundle.SignatureSignedAt,
+		bundle.SignatureSignedBy,
+		printValueOrDefault(bundle.UpdateStatus, "unknown"),
+		bundle.UpdateLatestVersion,
+		bundle.UpdateLatestSHA256,
+		bundle.UpdateCheckedAt,
+		bundle.UpdateMessage,
+		bundle.ReleaseBundleDir,
+		bundle.ReleasePayloadPath,
+		bundle.ReleaseManifestPath,
+		strings.Join(strings.Fields(bundle.Error), "_"),
+	)
+	return err
+}
+
+func printReleaseManagedToolBundleStatus(out io.Writer, status app.ReleaseManagedToolBundleStatus) error {
+	_, err := fmt.Fprintf(
+		out,
+		"release-managed-status: name=%s status=%s mode=%s kind=%s version=%s source=%s sha256=%s expected_sha256=%s expected_sha256_status=%s provenance_status=%s provenance_source_url=%s provenance_upstream_version=%s provenance_retrieved_at=%s provenance_verified_by=%s corpus_status=%s corpus_name=%s corpus_source=%s corpus_retrieved_at=%s corpus_file_count=%d corpus_sha256=%s corpus_digest_status=%s corpus_digest_algorithm=%s corpus_digest_scope=%s signature_status=%s signature_algorithm=%s signature_key_id=%s signature_signed_at=%s signature_signed_by=%s update_status=%s update_latest_version=%s update_latest_sha256=%s update_checked_at=%s update_message=%s digest_status=%s digest_algorithm=%s digest_scope=%s import_status=%s link_status=%s release_bundle=%s release_payload=%s release_manifest=%s workspace_bundle=%s workspace_payload=%s workspace_manifest=%s install=%s error=%s\n",
+		status.Name,
+		status.Status,
+		status.Mode,
+		status.Kind,
+		status.Version,
+		status.Source,
+		status.SHA256,
+		status.ExpectedSHA256,
+		status.ExpectedSHA256Status,
+		printValueOrDefault(status.ProvenanceStatus, "missing"),
+		status.ProvenanceSourceURL,
+		status.ProvenanceUpstreamVersion,
+		status.ProvenanceRetrievedAt,
+		status.ProvenanceVerifiedBy,
+		printValueOrDefault(status.CorpusStatus, "missing"),
+		status.CorpusName,
+		status.CorpusSource,
+		status.CorpusRetrievedAt,
+		status.CorpusFileCount,
+		status.CorpusSHA256,
+		status.CorpusDigestStatus,
+		status.CorpusDigestAlgorithm,
+		status.CorpusDigestScope,
+		printValueOrDefault(status.SignatureStatus, "missing"),
+		status.SignatureAlgorithm,
+		status.SignatureKeyID,
+		status.SignatureSignedAt,
+		status.SignatureSignedBy,
+		printValueOrDefault(status.UpdateStatus, "unknown"),
+		status.UpdateLatestVersion,
+		status.UpdateLatestSHA256,
+		status.UpdateCheckedAt,
+		status.UpdateMessage,
+		status.DigestStatus,
+		status.DigestAlgorithm,
+		status.DigestScope,
+		status.ImportStatus,
+		status.LinkStatus,
+		status.ReleaseBundleDir,
+		status.ReleasePayloadPath,
+		status.ReleaseManifestPath,
+		status.WorkspaceBundleDir,
+		status.WorkspacePayloadPath,
+		status.WorkspaceManifestPath,
+		status.InstallPath,
+		strings.Join(strings.Fields(status.Error), "_"),
+	)
+	return err
+}
+
+func printReleaseManagedToolBundleStatusSource(out io.Writer, source app.ReleaseManagedToolBundleStatusSource) error {
+	_, err := fmt.Fprintf(
+		out,
+		"release-managed-status-source: status=%s mode=%s release_root=%s source=%s total=%d available=%d blocked=%d not_imported=%d imported=%d linked=%d conflict=%d expected_sha256_bundle=%s expected_sha256=%s expected_sha256_status=%s set_by=%s set_at=%s cleared_by=%s cleared_at=%s reason=%s\n",
+		source.Status,
+		source.Mode,
+		source.ReleaseRoot,
+		source.Path,
+		source.Total,
+		source.Available,
+		source.Blocked,
+		source.NotImported,
+		source.Imported,
+		source.Linked,
+		source.Conflict,
+		source.ExpectedSHA256Bundle,
+		source.ExpectedSHA256,
+		source.ExpectedSHA256Status,
+		source.SetBy,
+		source.SetAt,
+		source.ClearedBy,
+		source.ClearedAt,
+		strings.Join(strings.Fields(source.Reason), "_"),
+	)
+	return err
+}
+
+func printManagedToolBundleUpdateRequest(out io.Writer, request app.ManagedToolBundleUpdateRequest) error {
+	if _, err := fmt.Fprintf(out, "managed-update-request: %s ", request.Path); err != nil {
+		return err
+	}
+	return printManagedToolBundleUpdateRequestFields(out, request)
+}
+
+func printManagedToolBundleUpdateRequestFields(out io.Writer, request app.ManagedToolBundleUpdateRequest) error {
+	_, err := fmt.Fprintf(
+		out,
+		"status=%s mode=%s name=%s kind=%s source=%s current_version=%s current_sha256=%s latest_version=%s latest_sha256=%s update_status=%s update_checked_at=%s update_message=%s release_root=%s release_bundle=%s release_manifest=%s release_payload=%s requested_by=%s requested_at=%s reason=%s\n",
+		printValueOrDefault(request.Status, "unknown"),
+		printValueOrDefault(request.Mode, "metadata-only"),
+		request.Name,
+		request.Kind,
+		request.Source,
+		request.CurrentVersion,
+		request.CurrentSHA256,
+		request.LatestVersion,
+		request.LatestSHA256,
+		printValueOrDefault(request.UpdateStatus, "unknown"),
+		request.UpdateCheckedAt,
+		strings.Join(strings.Fields(request.UpdateMessage), "_"),
+		request.ReleaseRoot,
+		request.ReleaseBundleDir,
+		request.ReleaseManifestPath,
+		request.ReleasePayloadPath,
+		printValueOrDefault(request.RequestedBy, "operator"),
+		request.RequestedAt,
+		strings.Join(strings.Fields(request.Reason), "_"),
+	)
+	return err
+}
+
+func printManagedToolBundleUpdateDownloadPlan(out io.Writer, plan app.ManagedToolBundleUpdateDownloadPlan) error {
+	if _, err := fmt.Fprintf(out, "managed-update-download-plan: %s ", plan.Path); err != nil {
+		return err
+	}
+	return printManagedToolBundleUpdateDownloadPlanFields(out, plan)
+}
+
+func printManagedToolBundleUpdateDownloadPlanFields(out io.Writer, plan app.ManagedToolBundleUpdateDownloadPlan) error {
+	_, err := fmt.Fprintf(
+		out,
+		"status=%s mode=%s name=%s kind=%s source=%s current_version=%s current_sha256=%s latest_version=%s latest_sha256=%s update_status=%s update_checked_at=%s update_message=%s source_url=%s expected_sha256=%s expected_sha256_status=%s archive_format=%s archive_expected_sha256=%s archive_expected_sha256_status=%s request=%s release_root=%s release_bundle=%s release_manifest=%s release_payload=%s planned_by=%s planned_at=%s reason=%s\n",
+		printValueOrDefault(plan.Status, "unknown"),
+		printValueOrDefault(plan.Mode, "metadata-only"),
+		plan.Name,
+		plan.Kind,
+		plan.Source,
+		plan.CurrentVersion,
+		plan.CurrentSHA256,
+		plan.LatestVersion,
+		plan.LatestSHA256,
+		printValueOrDefault(plan.UpdateStatus, "unknown"),
+		plan.UpdateCheckedAt,
+		strings.Join(strings.Fields(plan.UpdateMessage), "_"),
+		plan.SourceURL,
+		plan.ExpectedSHA256,
+		printValueOrDefault(plan.ExpectedSHA256Status, "unknown"),
+		plan.ArchiveFormat,
+		plan.ArchiveExpectedSHA256,
+		printValueOrDefault(plan.ArchiveExpectedSHA256Status, "unknown"),
+		plan.RequestPath,
+		plan.ReleaseRoot,
+		plan.ReleaseBundleDir,
+		plan.ReleaseManifestPath,
+		plan.ReleasePayloadPath,
+		printValueOrDefault(plan.PlannedBy, "operator"),
+		plan.PlannedAt,
+		strings.Join(strings.Fields(plan.Reason), "_"),
+	)
+	return err
+}
+
+func printManagedToolBundleUpdateDownloadExecution(out io.Writer, execution app.ManagedToolBundleUpdateDownloadExecution) error {
+	if _, err := fmt.Fprintf(out, "managed-update-download-execution: %s ", execution.Path); err != nil {
+		return err
+	}
+	return printManagedToolBundleUpdateDownloadExecutionFields(out, execution)
+}
+
+func printManagedToolBundleUpdateDownloadExecutionFields(out io.Writer, execution app.ManagedToolBundleUpdateDownloadExecution) error {
+	_, err := fmt.Fprintf(
+		out,
+		"status=%s mode=%s action=%s name=%s kind=%s source=%s current_version=%s current_sha256=%s latest_version=%s latest_sha256=%s update_status=%s update_checked_at=%s update_message=%s source_url=%s expected_sha256=%s actual_sha256=%s digest_status=%s digest_algorithm=%s digest_scope=%s archive_format=%s archive=%s archive_expected_sha256=%s archive_actual_sha256=%s archive_digest_status=%s archive_digest_algorithm=%s archive_digest_scope=%s http_status=%d content_length=%d bytes_written=%d redirect_policy=%s redirect_location=%s redirect_location_status=%s plan=%s request=%s release_root=%s release_bundle=%s release_manifest=%s release_payload=%s payload=%s actor=%s executed_at=%s reason=%s error=%s\n",
+		printValueOrDefault(execution.Status, "unknown"),
+		printValueOrDefault(execution.Mode, "execute"),
+		printValueOrDefault(execution.Action, "download"),
+		execution.Name,
+		execution.Kind,
+		execution.Source,
+		execution.CurrentVersion,
+		execution.CurrentSHA256,
+		execution.LatestVersion,
+		execution.LatestSHA256,
+		printValueOrDefault(execution.UpdateStatus, "unknown"),
+		execution.UpdateCheckedAt,
+		strings.Join(strings.Fields(execution.UpdateMessage), "_"),
+		execution.SourceURL,
+		execution.ExpectedSHA256,
+		execution.ActualSHA256,
+		printValueOrDefault(execution.DigestStatus, "unknown"),
+		printValueOrDefault(execution.DigestAlgorithm, "unknown"),
+		printValueOrDefault(execution.DigestScope, "unknown"),
+		execution.ArchiveFormat,
+		execution.ArchivePath,
+		execution.ArchiveExpectedSHA256,
+		execution.ArchiveActualSHA256,
+		printValueOrDefault(execution.ArchiveDigestStatus, "unknown"),
+		printValueOrDefault(execution.ArchiveDigestAlgorithm, "unknown"),
+		printValueOrDefault(execution.ArchiveDigestScope, "unknown"),
+		execution.HTTPStatus,
+		execution.ContentLength,
+		execution.BytesWritten,
+		printValueOrDefault(execution.RedirectPolicy, "none"),
+		execution.RedirectLocation,
+		printValueOrDefault(execution.RedirectLocationStatus, "none"),
+		execution.PlanPath,
+		execution.RequestPath,
+		execution.ReleaseRoot,
+		execution.ReleaseBundleDir,
+		execution.ReleaseManifestPath,
+		execution.ReleasePayloadPath,
+		execution.PayloadPath,
+		printValueOrDefault(execution.Actor, "operator"),
+		execution.ExecutedAt,
+		strings.Join(strings.Fields(execution.Reason), "_"),
+		strings.Join(strings.Fields(execution.Error), "_"),
+	)
+	return err
+}
+
+func printManagedToolBundleUpdateApplyExecution(out io.Writer, execution app.ManagedToolBundleUpdateApplyExecution) error {
+	if _, err := fmt.Fprintf(out, "managed-update-apply-execution: %s ", execution.Path); err != nil {
+		return err
+	}
+	return printManagedToolBundleUpdateApplyExecutionFields(out, execution)
+}
+
+func printManagedToolBundleUpdateApplyExecutionFields(out io.Writer, execution app.ManagedToolBundleUpdateApplyExecution) error {
+	_, err := fmt.Fprintf(
+		out,
+		"status=%s mode=%s action=%s name=%s kind=%s source=%s current_version=%s current_sha256=%s latest_version=%s latest_sha256=%s update_status=%s update_checked_at=%s update_message=%s source_url=%s expected_sha256=%s actual_sha256=%s digest_status=%s digest_algorithm=%s digest_scope=%s download_execution=%s plan=%s request=%s release_root=%s release_bundle=%s release_manifest=%s release_payload=%s staged_payload=%s workspace_bundle=%s workspace_manifest=%s workspace_payload=%s install=%s actor=%s applied_at=%s reason=%s error=%s\n",
+		printValueOrDefault(execution.Status, "unknown"),
+		printValueOrDefault(execution.Mode, "apply"),
+		printValueOrDefault(execution.Action, "workspace-copy"),
+		execution.Name,
+		execution.Kind,
+		execution.Source,
+		execution.CurrentVersion,
+		execution.CurrentSHA256,
+		execution.LatestVersion,
+		execution.LatestSHA256,
+		printValueOrDefault(execution.UpdateStatus, "unknown"),
+		execution.UpdateCheckedAt,
+		strings.Join(strings.Fields(execution.UpdateMessage), "_"),
+		execution.SourceURL,
+		execution.ExpectedSHA256,
+		execution.ActualSHA256,
+		printValueOrDefault(execution.DigestStatus, "unknown"),
+		printValueOrDefault(execution.DigestAlgorithm, "unknown"),
+		printValueOrDefault(execution.DigestScope, "unknown"),
+		execution.DownloadExecutionPath,
+		execution.PlanPath,
+		execution.RequestPath,
+		execution.ReleaseRoot,
+		execution.ReleaseBundleDir,
+		execution.ReleaseManifestPath,
+		execution.ReleasePayloadPath,
+		execution.StagedPayloadPath,
+		execution.WorkspaceBundleDir,
+		execution.WorkspaceManifestPath,
+		execution.WorkspacePayloadPath,
+		execution.InstallPath,
+		printValueOrDefault(execution.Actor, "operator"),
+		execution.AppliedAt,
+		strings.Join(strings.Fields(execution.Reason), "_"),
+		strings.Join(strings.Fields(execution.Error), "_"),
 	)
 	return err
 }
@@ -11021,7 +13346,7 @@ func printManagedToolBundle(out io.Writer, bundle app.ManagedToolBundle) error {
 func printManagedToolBundleInstallPlan(out io.Writer, plan app.ManagedToolBundleInstallPlan) error {
 	_, err := fmt.Fprintf(
 		out,
-		"managed-install-plan: status=%s mode=%s action=%s pack=%s dependency=%s kind=%s version=%s source=%s sha256=%s payload=%s install=%s\n",
+		"managed-install-plan: status=%s mode=%s action=%s pack=%s dependency=%s kind=%s version=%s source=%s sha256=%s provenance_status=%s provenance_source_url=%s provenance_upstream_version=%s provenance_retrieved_at=%s provenance_verified_by=%s corpus_status=%s corpus_name=%s corpus_source=%s corpus_retrieved_at=%s corpus_file_count=%d corpus_sha256=%s corpus_digest_status=%s corpus_digest_algorithm=%s corpus_digest_scope=%s signature_status=%s signature_algorithm=%s signature_key_id=%s signature_signed_at=%s signature_signed_by=%s update_status=%s update_latest_version=%s update_latest_sha256=%s update_checked_at=%s update_message=%s payload=%s install=%s\n",
 		plan.Status,
 		plan.Mode,
 		plan.Action,
@@ -11031,6 +13356,30 @@ func printManagedToolBundleInstallPlan(out io.Writer, plan app.ManagedToolBundle
 		plan.Version,
 		plan.Source,
 		plan.SHA256,
+		printValueOrDefault(plan.ProvenanceStatus, "missing"),
+		plan.ProvenanceSourceURL,
+		plan.ProvenanceUpstreamVersion,
+		plan.ProvenanceRetrievedAt,
+		plan.ProvenanceVerifiedBy,
+		printValueOrDefault(plan.CorpusStatus, "missing"),
+		plan.CorpusName,
+		plan.CorpusSource,
+		plan.CorpusRetrievedAt,
+		plan.CorpusFileCount,
+		plan.CorpusSHA256,
+		plan.CorpusDigestStatus,
+		plan.CorpusDigestAlgorithm,
+		plan.CorpusDigestScope,
+		printValueOrDefault(plan.SignatureStatus, "missing"),
+		plan.SignatureAlgorithm,
+		plan.SignatureKeyID,
+		plan.SignatureSignedAt,
+		plan.SignatureSignedBy,
+		printValueOrDefault(plan.UpdateStatus, "unknown"),
+		plan.UpdateLatestVersion,
+		plan.UpdateLatestSHA256,
+		plan.UpdateCheckedAt,
+		plan.UpdateMessage,
 		plan.PayloadPath,
 		plan.InstallPath,
 	)
@@ -11040,7 +13389,7 @@ func printManagedToolBundleInstallPlan(out io.Writer, plan app.ManagedToolBundle
 func printReleaseManagedToolBundleInstallPlan(out io.Writer, plan app.ReleaseManagedToolBundleInstallPlan) error {
 	_, err := fmt.Fprintf(
 		out,
-		"release-managed-install-plan: status=%s mode=%s action=%s pack=%s dependency=%s kind=%s version=%s source=%s sha256=%s release_bundle=%s release_payload=%s workspace_bundle=%s workspace_payload=%s install=%s\n",
+		"release-managed-install-plan: status=%s mode=%s action=%s pack=%s dependency=%s kind=%s version=%s source=%s sha256=%s expected_sha256=%s expected_sha256_status=%s provenance_status=%s provenance_source_url=%s provenance_upstream_version=%s provenance_retrieved_at=%s provenance_verified_by=%s corpus_status=%s corpus_name=%s corpus_source=%s corpus_retrieved_at=%s corpus_file_count=%d corpus_sha256=%s corpus_digest_status=%s corpus_digest_algorithm=%s corpus_digest_scope=%s signature_status=%s signature_algorithm=%s signature_key_id=%s signature_signed_at=%s signature_signed_by=%s update_status=%s update_latest_version=%s update_latest_sha256=%s update_checked_at=%s update_message=%s release_bundle=%s release_payload=%s workspace_bundle=%s workspace_payload=%s install=%s\n",
 		plan.Status,
 		plan.Mode,
 		plan.Action,
@@ -11050,6 +13399,32 @@ func printReleaseManagedToolBundleInstallPlan(out io.Writer, plan app.ReleaseMan
 		plan.Version,
 		plan.Source,
 		plan.SHA256,
+		plan.ExpectedSHA256,
+		plan.ExpectedSHA256Status,
+		printValueOrDefault(plan.ProvenanceStatus, "missing"),
+		plan.ProvenanceSourceURL,
+		plan.ProvenanceUpstreamVersion,
+		plan.ProvenanceRetrievedAt,
+		plan.ProvenanceVerifiedBy,
+		printValueOrDefault(plan.CorpusStatus, "missing"),
+		plan.CorpusName,
+		plan.CorpusSource,
+		plan.CorpusRetrievedAt,
+		plan.CorpusFileCount,
+		plan.CorpusSHA256,
+		plan.CorpusDigestStatus,
+		plan.CorpusDigestAlgorithm,
+		plan.CorpusDigestScope,
+		printValueOrDefault(plan.SignatureStatus, "missing"),
+		plan.SignatureAlgorithm,
+		plan.SignatureKeyID,
+		plan.SignatureSignedAt,
+		plan.SignatureSignedBy,
+		printValueOrDefault(plan.UpdateStatus, "unknown"),
+		plan.UpdateLatestVersion,
+		plan.UpdateLatestSHA256,
+		plan.UpdateCheckedAt,
+		plan.UpdateMessage,
 		plan.ReleaseBundleDir,
 		plan.ReleasePayloadPath,
 		plan.WorkspaceBundleDir,
@@ -11062,7 +13437,7 @@ func printReleaseManagedToolBundleInstallPlan(out io.Writer, plan app.ReleaseMan
 func printReleaseManagedToolBundleInstallResult(out io.Writer, result app.ReleaseManagedToolBundleInstallResult) error {
 	_, err := fmt.Fprintf(
 		out,
-		"release-managed-install: status=%s mode=%s action=%s pack=%s dependency=%s kind=%s version=%s source=%s sha256=%s release_bundle=%s release_payload=%s workspace_bundle=%s workspace_payload=%s install=%s\n",
+		"release-managed-install: status=%s mode=%s action=%s pack=%s dependency=%s kind=%s version=%s source=%s sha256=%s expected_sha256=%s expected_sha256_status=%s provenance_status=%s provenance_source_url=%s provenance_upstream_version=%s provenance_retrieved_at=%s provenance_verified_by=%s corpus_status=%s corpus_name=%s corpus_source=%s corpus_retrieved_at=%s corpus_file_count=%d corpus_sha256=%s corpus_digest_status=%s corpus_digest_algorithm=%s corpus_digest_scope=%s signature_status=%s signature_algorithm=%s signature_key_id=%s signature_signed_at=%s signature_signed_by=%s update_status=%s update_latest_version=%s update_latest_sha256=%s update_checked_at=%s update_message=%s release_bundle=%s release_payload=%s workspace_bundle=%s workspace_payload=%s install=%s\n",
 		result.Status,
 		result.Mode,
 		result.Action,
@@ -11072,6 +13447,32 @@ func printReleaseManagedToolBundleInstallResult(out io.Writer, result app.Releas
 		result.Version,
 		result.Source,
 		result.SHA256,
+		result.ExpectedSHA256,
+		result.ExpectedSHA256Status,
+		printValueOrDefault(result.ProvenanceStatus, "missing"),
+		result.ProvenanceSourceURL,
+		result.ProvenanceUpstreamVersion,
+		result.ProvenanceRetrievedAt,
+		result.ProvenanceVerifiedBy,
+		printValueOrDefault(result.CorpusStatus, "missing"),
+		result.CorpusName,
+		result.CorpusSource,
+		result.CorpusRetrievedAt,
+		result.CorpusFileCount,
+		result.CorpusSHA256,
+		result.CorpusDigestStatus,
+		result.CorpusDigestAlgorithm,
+		result.CorpusDigestScope,
+		printValueOrDefault(result.SignatureStatus, "missing"),
+		result.SignatureAlgorithm,
+		result.SignatureKeyID,
+		result.SignatureSignedAt,
+		result.SignatureSignedBy,
+		printValueOrDefault(result.UpdateStatus, "unknown"),
+		result.UpdateLatestVersion,
+		result.UpdateLatestSHA256,
+		result.UpdateCheckedAt,
+		result.UpdateMessage,
 		result.ReleaseBundleDir,
 		result.ReleasePayloadPath,
 		result.WorkspaceBundleDir,
@@ -11084,7 +13485,7 @@ func printReleaseManagedToolBundleInstallResult(out io.Writer, result app.Releas
 func printManagedToolBundleInstallResult(out io.Writer, result app.ManagedToolBundleInstallResult) error {
 	_, err := fmt.Fprintf(
 		out,
-		"managed-install: status=%s mode=%s action=%s pack=%s dependency=%s kind=%s version=%s source=%s sha256=%s payload=%s install=%s\n",
+		"managed-install: status=%s mode=%s action=%s pack=%s dependency=%s kind=%s version=%s source=%s sha256=%s provenance_status=%s provenance_source_url=%s provenance_upstream_version=%s provenance_retrieved_at=%s provenance_verified_by=%s corpus_status=%s corpus_name=%s corpus_source=%s corpus_retrieved_at=%s corpus_file_count=%d corpus_sha256=%s corpus_digest_status=%s corpus_digest_algorithm=%s corpus_digest_scope=%s signature_status=%s signature_algorithm=%s signature_key_id=%s signature_signed_at=%s signature_signed_by=%s update_status=%s update_latest_version=%s update_latest_sha256=%s update_checked_at=%s update_message=%s payload=%s install=%s\n",
 		result.Status,
 		result.Mode,
 		result.Action,
@@ -11094,6 +13495,30 @@ func printManagedToolBundleInstallResult(out io.Writer, result app.ManagedToolBu
 		result.Version,
 		result.Source,
 		result.SHA256,
+		printValueOrDefault(result.ProvenanceStatus, "missing"),
+		result.ProvenanceSourceURL,
+		result.ProvenanceUpstreamVersion,
+		result.ProvenanceRetrievedAt,
+		result.ProvenanceVerifiedBy,
+		printValueOrDefault(result.CorpusStatus, "missing"),
+		result.CorpusName,
+		result.CorpusSource,
+		result.CorpusRetrievedAt,
+		result.CorpusFileCount,
+		result.CorpusSHA256,
+		result.CorpusDigestStatus,
+		result.CorpusDigestAlgorithm,
+		result.CorpusDigestScope,
+		printValueOrDefault(result.SignatureStatus, "missing"),
+		result.SignatureAlgorithm,
+		result.SignatureKeyID,
+		result.SignatureSignedAt,
+		result.SignatureSignedBy,
+		printValueOrDefault(result.UpdateStatus, "unknown"),
+		result.UpdateLatestVersion,
+		result.UpdateLatestSHA256,
+		result.UpdateCheckedAt,
+		result.UpdateMessage,
 		result.PayloadPath,
 		result.InstallPath,
 	)
@@ -11386,6 +13811,88 @@ func newToolchainCompilePreviewReviewsCommand(out io.Writer) *cobra.Command {
 	}
 }
 
+func newToolchainCompilePreviewReviewExecutionDispatchCommand(out io.Writer) *cobra.Command {
+	var actor string
+	var reason string
+	cmd := &cobra.Command{
+		Use:   "compile-preview-review-execution-dispatch <workspace> <review-artifact>",
+		Short: "Persist a metadata-only compile preview review execution dispatch artifact",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			dispatch, err := app.CreateToolCompilePreviewReviewExecutionDispatch(args[0], args[1], app.ToolCompilePreviewReviewExecutionDispatchOptions{
+				Actor:  actor,
+				Reason: reason,
+			})
+			if err != nil {
+				return err
+			}
+			return printToolCompilePreviewReviewExecutionDispatchCreateResult(out, dispatch)
+		},
+	}
+	cmd.Flags().StringVar(&actor, "actor", "", "operator recorded on the dispatch artifact")
+	cmd.Flags().StringVar(&reason, "reason", "", "reason recorded on the dispatch artifact")
+	return cmd
+}
+
+func newToolchainCompilePreviewReviewExecutionDispatchesCommand(out io.Writer) *cobra.Command {
+	return &cobra.Command{
+		Use:   "compile-preview-review-execution-dispatches <workspace> [artifact]",
+		Short: "List or inspect compile preview review execution dispatch artifacts",
+		Args:  cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 2 {
+				dispatch, err := app.ReadToolCompilePreviewReviewExecutionDispatch(args[0], args[1])
+				if err != nil {
+					return err
+				}
+				return printToolCompilePreviewReviewExecutionDispatchArtifact(out, dispatch)
+			}
+			dispatches, err := app.ListToolCompilePreviewReviewExecutionDispatches(args[0])
+			if err != nil {
+				return err
+			}
+			if _, err := fmt.Fprintf(out, "compile-preview-review-execution-dispatches: total=%d\n", len(dispatches)); err != nil {
+				return err
+			}
+			for _, dispatch := range dispatches {
+				if err := printToolCompilePreviewReviewExecutionDispatchArtifact(out, dispatch); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	}
+}
+
+func newToolchainExecuteCompilePreviewReviewExecutionDispatchCommand(out io.Writer) *cobra.Command {
+	var execute bool
+	var actor string
+	var reason string
+	cmd := &cobra.Command{
+		Use:   "execute-compile-preview-review-execution-dispatch <workspace> <dispatch-artifact>",
+		Short: "Execute frozen tool plan nodes from a compile preview review execution dispatch",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			execution, err := app.ExecuteToolCompilePreviewReviewExecutionDispatch(context.Background(), args[0], args[1], app.ToolCompilePreviewReviewExecutionOptions{
+				Execute: execute,
+				Actor:   actor,
+				Reason:  reason,
+			})
+			if err != nil && strings.TrimSpace(execution.Path) == "" && strings.TrimSpace(execution.Status) == "" {
+				return err
+			}
+			if printErr := printToolCompilePreviewReviewExecutionCreateResult(out, execution); printErr != nil {
+				return printErr
+			}
+			return err
+		},
+	}
+	cmd.Flags().BoolVar(&execute, "execute", false, "execute frozen nodes from the persisted compile preview review execution dispatch")
+	cmd.Flags().StringVar(&actor, "actor", "", "operator recorded on the execution artifact")
+	cmd.Flags().StringVar(&reason, "reason", "", "reason recorded on the execution artifact")
+	return cmd
+}
+
 func newToolchainExecuteCompilePreviewReviewCommand(out io.Writer) *cobra.Command {
 	var execute bool
 	var actor string
@@ -11445,13 +13952,58 @@ func newToolchainCompilePreviewReviewExecutionsCommand(out io.Writer) *cobra.Com
 	}
 }
 
+func printToolCompilePreviewReviewExecutionDispatchCreateResult(out io.Writer, dispatch app.ToolCompilePreviewReviewExecutionDispatch) error {
+	if _, err := fmt.Fprintf(
+		out,
+		"compile-preview-review-execution-dispatch: %s status=%s mode=%s review=%s selection=%s action=%s nodes=%d warnings=%d actor=%s reason=%s\n",
+		dispatch.Path,
+		dispatch.Status,
+		dispatch.Mode,
+		dispatch.ReviewPath,
+		toolCompilePreviewReviewExecutionDisplayValue(dispatch.SelectionPath, "-"),
+		dispatch.Action,
+		dispatch.ReviewNodes,
+		dispatch.ReviewWarnings,
+		toolCompilePreviewReviewExecutionDisplayValue(dispatch.Actor, "operator"),
+		strings.TrimSpace(dispatch.Reason),
+	); err != nil {
+		return err
+	}
+	if strings.TrimSpace(dispatch.Path) != "" {
+		if _, err := fmt.Fprintf(out, "artifact: %s\n", dispatch.Path); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func printToolCompilePreviewReviewExecutionDispatchArtifact(out io.Writer, dispatch app.ToolCompilePreviewReviewExecutionDispatch) error {
+	_, err := fmt.Fprintf(
+		out,
+		"compile-preview-review-execution-dispatch-artifact: %s status=%s mode=%s review=%s selection=%s action=%s nodes=%d warnings=%d actor=%s created_at=%s reason=%s\n",
+		dispatch.Path,
+		dispatch.Status,
+		dispatch.Mode,
+		dispatch.ReviewPath,
+		toolCompilePreviewReviewExecutionDisplayValue(dispatch.SelectionPath, "-"),
+		dispatch.Action,
+		dispatch.ReviewNodes,
+		dispatch.ReviewWarnings,
+		toolCompilePreviewReviewExecutionDisplayValue(dispatch.Actor, "operator"),
+		toolCompilePreviewReviewExecutionDisplayValue(dispatch.CreatedAt, "-"),
+		strings.TrimSpace(dispatch.Reason),
+	)
+	return err
+}
+
 func printToolCompilePreviewReviewExecutionCreateResult(out io.Writer, execution app.ToolCompilePreviewReviewExecution) error {
 	if _, err := fmt.Fprintf(
 		out,
-		"compile-preview-review-execution: %s status=%s mode=%s review=%s action=%s nodes=%d warnings=%d events=%d actor=%s reason=%s\n",
+		"compile-preview-review-execution: %s status=%s mode=%s dispatch=%s review=%s action=%s nodes=%d warnings=%d events=%d actor=%s reason=%s\n",
 		execution.RunID,
 		execution.Status,
 		execution.Mode,
+		toolCompilePreviewReviewExecutionDisplayValue(execution.DispatchPath, "-"),
 		execution.ReviewPath,
 		execution.Action,
 		execution.ReviewNodes,
@@ -11473,11 +14025,12 @@ func printToolCompilePreviewReviewExecutionCreateResult(out io.Writer, execution
 func printToolCompilePreviewReviewExecutionArtifact(out io.Writer, execution app.ToolCompilePreviewReviewExecution) error {
 	if _, err := fmt.Fprintf(
 		out,
-		"compile-preview-review-execution-artifact: %s status=%s mode=%s run=%s review=%s selection=%s action=%s nodes=%d warnings=%d events=%d actor=%s reason=%s\n",
+		"compile-preview-review-execution-artifact: %s status=%s mode=%s run=%s dispatch=%s review=%s selection=%s action=%s nodes=%d warnings=%d events=%d actor=%s reason=%s\n",
 		execution.Path,
 		execution.Status,
 		execution.Mode,
 		execution.RunID,
+		toolCompilePreviewReviewExecutionDisplayValue(execution.DispatchPath, "-"),
 		execution.ReviewPath,
 		toolCompilePreviewReviewExecutionDisplayValue(execution.SelectionPath, "-"),
 		execution.Action,

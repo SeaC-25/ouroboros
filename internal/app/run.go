@@ -41,14 +41,23 @@ type RunResult struct {
 }
 
 type RunOptions struct {
-	OnEvent                    func(eventlog.Event) error
-	OnSnapshot                 func(eventlog.ReplaySnapshot) error
-	ToolRunner                 ToolExecutionRunner
-	ToolConcurrency            int
-	Action                     compiler.SemanticAction
-	PauseController            *RunPauseController
-	DeferReportProjection      bool
-	RequireSafetyAuthorization bool
+	OnEvent                                func(eventlog.Event) error
+	OnSnapshot                             func(eventlog.ReplaySnapshot) error
+	ToolRunner                             ToolExecutionRunner
+	ToolConcurrency                        int
+	Action                                 compiler.SemanticAction
+	PauseController                        *RunPauseController
+	DeferReportProjection                  bool
+	RequireSafetyAuthorization             bool
+	EnableProviderGeneration               bool
+	ProviderGenerationPrompt               string
+	ProviderGenerationSystemPrompt         string
+	ProviderGenerationMaxTokens            int
+	ProviderGenerationMaxEstimatedCostUSD  *float64
+	ProviderGenerationRecordUsage          bool
+	ProviderGenerationRequiredCapabilities []string
+	ProviderGenerationStream               bool
+	ProviderGenerationToolPlanPreview      bool
 }
 
 type RunPauseController struct {
@@ -154,6 +163,7 @@ type ToolExecutionRequest struct {
 	ResourceMemoryMB         int
 	ResourceLimitCPUUnits    int
 	ResourceLimitMemoryMB    int
+	catalogInvocation        bool
 }
 
 type ToolExecutionResult struct {
@@ -224,8 +234,21 @@ type ScopeTarget struct {
 }
 
 type ProviderRuntime struct {
-	ProviderName string
-	Model        string
+	ProviderName         string
+	Model                string
+	Capabilities         []string
+	RoutingStrategy      string
+	ProviderAttemptCount int
+	ProviderFailover     bool
+	SelectedProviderName string
+	FailedProviderNames  []string
+	RequiredCapabilities []string
+	CapabilityMatch      bool
+	SkippedProviders     []ProviderSkippedProvider
+}
+
+type ProviderRuntimeOptions struct {
+	RequiredCapabilities []string
 }
 
 type ProviderAdapter interface {
@@ -237,6 +260,9 @@ func RunWorkspace(ctx context.Context, root string) (RunResult, error) {
 }
 
 func RunWorkspaceWithOptions(ctx context.Context, root string, options RunOptions) (RunResult, error) {
+	if err := validateRunProviderGenerationOptions(options); err != nil {
+		return RunResult{}, err
+	}
 	doctor, err := DoctorWorkspaceWithOptions(root, DoctorOptions{RequireSafetyAuthorization: options.RequireSafetyAuthorization})
 	if err != nil {
 		return RunResult{}, err
@@ -254,15 +280,9 @@ func RunWorkspaceWithOptions(ctx context.Context, root string, options RunOption
 	if err != nil {
 		return RunResult{}, fmt.Errorf("load provider config: %w", err)
 	}
-	provider, ok := EnabledProvider(providerConfig)
-	if !ok {
-		return RunResult{}, fmt.Errorf("provider config has no enabled provider")
-	}
-	adapter, err := providerAdapterFor(provider)
-	if err != nil {
-		return RunResult{}, err
-	}
-	providerRuntime, err := adapter.Prepare(ctx, provider)
+	providerRuntime, err := PrepareProviderRuntimeWithOptions(ctx, providerConfig, ProviderRuntimeOptions{
+		RequiredCapabilities: providerRuntimeRequiredCapabilities(options),
+	})
 	if err != nil {
 		return RunResult{}, err
 	}
@@ -310,7 +330,7 @@ func RunWorkspaceWithOptions(ctx context.Context, root string, options RunOption
 	if err := runToolExecutionStage(ctx, root, runID, manifests, scopeConfig.Scope.Targets, scopeConfig.Scope.Exclusions, scopeConfig.Scope.TargetPolicy, scopeConfig.Execution.Isolation, scopeConfig.Execution.Container, scopeConfig.Execution.ResourceLimits, scopeConfig.Execution.PackPolicies, scopeConfig.Execution.WorkerPools, toolExecutionConcurrency(scopeConfig, options), toolRunnerFromOptions(options), store, options, &persistedEvents); err != nil {
 		return RunResult{}, err
 	}
-	if err := runClosedLoopPlannerPreviewStage(ctx, root, runID, store, options, &persistedEvents); err != nil {
+	if err := runClosedLoopPlannerPreviewStage(ctx, root, runID, providerRuntime, store, options, &persistedEvents); err != nil {
 		return RunResult{}, err
 	}
 
@@ -391,6 +411,13 @@ func RunWorkspaceWithOptions(ctx context.Context, root string, options RunOption
 		TUIView:    tuiModel.View(),
 		TUIModel:   tuiModel,
 	}, nil
+}
+
+func providerRuntimeRequiredCapabilities(options RunOptions) []string {
+	if !options.EnableProviderGeneration {
+		return nil
+	}
+	return NormalizeProviderCapabilities(options.ProviderGenerationRequiredCapabilities)
 }
 
 func appendRunEvent(ctx context.Context, store *eventlog.SQLiteStore, event eventlog.Event, options RunOptions, persistedEvents *[]eventlog.Event) error {
@@ -1553,6 +1580,7 @@ func (offlineProviderAdapter) Prepare(ctx context.Context, provider Provider) (P
 	return ProviderRuntime{
 		ProviderName: provider.Name,
 		Model:        provider.Model,
+		Capabilities: NormalizeProviderCapabilities(provider.Capabilities),
 	}, nil
 }
 
@@ -1586,7 +1614,79 @@ func (openAICompatibleProviderAdapter) Prepare(ctx context.Context, provider Pro
 	return ProviderRuntime{
 		ProviderName: provider.Name,
 		Model:        provider.Model,
+		Capabilities: NormalizeProviderCapabilities(provider.Capabilities),
 	}, nil
+}
+
+func PrepareProviderRuntime(ctx context.Context, config ProviderConfig) (ProviderRuntime, error) {
+	return PrepareProviderRuntimeWithOptions(ctx, config, ProviderRuntimeOptions{})
+}
+
+func PrepareProviderRuntimeWithOptions(ctx context.Context, config ProviderConfig, options ProviderRuntimeOptions) (ProviderRuntime, error) {
+	strategy, err := providerRoutingStrategy(config)
+	if err != nil {
+		return ProviderRuntime{}, err
+	}
+	providers := EnabledProviders(config)
+	if len(providers) == 0 {
+		return ProviderRuntime{}, fmt.Errorf("provider config has no enabled provider")
+	}
+	requiredCapabilities := NormalizeProviderCapabilities(options.RequiredCapabilities)
+	if strategy != providerRoutingEnabledOrderFailover {
+		provider, skippedProviders, ok := firstProviderMatchingRequiredCapabilities(providers, requiredCapabilities)
+		if !ok {
+			return ProviderRuntime{}, noProviderMatchesRequiredCapabilitiesError("provider preflight", strategy, requiredCapabilities, skippedProviders)
+		}
+		runtime, err := prepareProviderRuntime(ctx, provider)
+		if err != nil {
+			return ProviderRuntime{}, err
+		}
+		return providerRuntimeWithRouting(runtime, strategy, 1, nil, requiredCapabilities, skippedProviders), nil
+	}
+	failedProviderNames := []string{}
+	skippedProviders := []ProviderSkippedProvider{}
+	failures := []string{}
+	attemptCount := 0
+	for _, provider := range providers {
+		if skipped, ok := skippedProviderForMissingRequiredCapabilities(provider, requiredCapabilities); ok {
+			skippedProviders = append(skippedProviders, skipped)
+			continue
+		}
+		attemptCount++
+		runtime, err := prepareProviderRuntime(ctx, provider)
+		if err == nil {
+			return providerRuntimeWithRouting(runtime, strategy, attemptCount, failedProviderNames, requiredCapabilities, skippedProviders), nil
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return ProviderRuntime{}, err
+		}
+		failedProviderNames = append(failedProviderNames, strings.TrimSpace(provider.Name))
+		failures = append(failures, providerAttemptFailureSummary(provider.Name, err))
+	}
+	if attemptCount == 0 {
+		return ProviderRuntime{}, noProviderMatchesRequiredCapabilitiesError("provider preflight", strategy, requiredCapabilities, skippedProviders)
+	}
+	return ProviderRuntime{}, fmt.Errorf("provider preflight failed after %s attempts: %s", strategy, strings.Join(failures, "; "))
+}
+
+func prepareProviderRuntime(ctx context.Context, provider Provider) (ProviderRuntime, error) {
+	adapter, err := providerAdapterFor(provider)
+	if err != nil {
+		return ProviderRuntime{}, err
+	}
+	return adapter.Prepare(ctx, provider)
+}
+
+func providerRuntimeWithRouting(runtime ProviderRuntime, strategy string, attemptCount int, failedProviderNames []string, requiredCapabilities []string, skippedProviders []ProviderSkippedProvider) ProviderRuntime {
+	runtime.RoutingStrategy = strategy
+	runtime.ProviderAttemptCount = attemptCount
+	runtime.ProviderFailover = len(failedProviderNames) > 0
+	runtime.SelectedProviderName = strings.TrimSpace(runtime.ProviderName)
+	runtime.FailedProviderNames = append([]string{}, failedProviderNames...)
+	runtime.RequiredCapabilities = append([]string{}, requiredCapabilities...)
+	runtime.CapabilityMatch = len(requiredCapabilities) > 0
+	runtime.SkippedProviders = appendProviderSkippedProviders(nil, skippedProviders...)
+	return runtime
 }
 
 func providerAdapterFor(provider Provider) (ProviderAdapter, error) {
@@ -1729,19 +1829,35 @@ func nativeManagedRunCommandWithTarget(request ToolExecutionRequest) ([]string, 
 		}
 		if resolved, ok, err := workspaceToolchainExecutable(request.WorkspaceRoot, command[0]); err != nil {
 			return nil, target, true, err
-		} else if !ok {
-			return nil, ScopeTarget{}, false, nil
-		} else {
+		} else if ok {
 			command[0] = resolved
+			return command, target, true, nil
 		}
+		resolved, err := exec.LookPath(command[0])
+		if err != nil {
+			if request.catalogInvocation {
+				return nil, target, true, fmt.Errorf("resolve catalog tool executable %s: %w", command[0], err)
+			}
+			return nil, ScopeTarget{}, false, nil
+		}
+		command[0] = resolved
 		return command, target, true, nil
 	}
 	candidates := nativeManagedToolCandidates(request)
 	for _, candidate := range candidates {
-		if _, ok, err := workspaceToolchainExecutable(request.WorkspaceRoot, candidate); err != nil {
+		if resolved, ok, err := workspaceToolchainExecutable(request.WorkspaceRoot, candidate); err != nil {
 			return nil, ScopeTarget{}, true, err
 		} else if ok {
-			command := []string{candidate}
+			command := []string{resolved}
+			var selectedTarget ScopeTarget
+			if target, ok := scopedTargetForNode(request.Node, request.ScopeTargets); ok {
+				command = append(command, target.Value)
+				selectedTarget = target
+			}
+			return command, selectedTarget, true, nil
+		}
+		if resolved, err := exec.LookPath(candidate); err == nil {
+			command := []string{resolved}
 			var selectedTarget ScopeTarget
 			if target, ok := scopedTargetForNode(request.Node, request.ScopeTargets); ok {
 				command = append(command, target.Value)
@@ -1775,7 +1891,7 @@ func managedBinaryRunCommand(request ToolExecutionRequest) ([]string, ScopeTarge
 	if !hasTarget {
 		return nil, ScopeTarget{}, false, nil
 	}
-	if strings.TrimSpace(target.Kind) == string(domain.TargetArtifact) {
+	if managedBinaryArtifactTargetKind(target.Kind) {
 		resolvedArtifact, err := workspaceArtifactPath(request.WorkspaceRoot, target.Value)
 		if err != nil {
 			return nil, target, true, err
@@ -1851,7 +1967,7 @@ func managedBinaryTargetKinds(binary string, operation string, node compiler.Pla
 		}
 	case "port_scan":
 		if binary == "naabu" {
-			return []string{string(domain.TargetCIDR)}
+			return managedBinaryNetworkTargetKinds()
 		}
 	case "dns_probe":
 		if binary == "dnsx" {
@@ -1862,14 +1978,50 @@ func managedBinaryTargetKinds(binary string, operation string, node compiler.Pla
 		}
 	case "service_fingerprint":
 		if binary == "nmap" {
-			return []string{string(domain.TargetHost), string(domain.TargetCIDR)}
+			return managedBinaryNetworkTargetKinds()
+		}
+	case "tls_assessment":
+		if binary == "testssl.sh" || binary == "sslscan" {
+			return []string{string(domain.TargetHost), string(domain.TargetDomain)}
+		}
+	case "apk_decompile":
+		if binary == "apktool" || binary == "jadx" {
+			return managedBinaryArtifactTargetKinds()
 		}
 	case "static_code_scan":
-		if binary == "mobsfscan" {
-			return []string{string(domain.TargetArtifact)}
+		if binary == "mobsfscan" || binary == "semgrep" {
+			return managedBinaryArtifactTargetKinds()
+		}
+	case "secret_scan":
+		if binary == "gitleaks" || binary == "trufflehog" {
+			return managedBinaryArtifactTargetKinds()
+		}
+	case "firmware_analyze":
+		if binary == "binwalk" {
+			return managedBinaryArtifactTargetKinds()
+		}
+	case "metadata_extract":
+		if binary == "exiftool" {
+			return managedBinaryArtifactTargetKinds()
 		}
 	}
 	return targetKindsForExecutionNode(node)
+}
+
+func managedBinaryNetworkTargetKinds() []string {
+	return []string{string(domain.TargetHost), string(domain.TargetCIDR)}
+}
+
+func managedBinaryArtifactTargetKinds() []string {
+	return []string{string(domain.TargetArtifact)}
+}
+
+func managedBinaryNetworkTargetKind(kind string) bool {
+	return containsTrimmedValue(managedBinaryNetworkTargetKinds(), kind)
+}
+
+func managedBinaryArtifactTargetKind(kind string) bool {
+	return containsTrimmedValue(managedBinaryArtifactTargetKinds(), kind)
 }
 
 func managedBinaryCommandFor(request ToolExecutionRequest, binary string, operation string, target ScopeTarget) ([]string, bool, error) {
@@ -1910,17 +2062,24 @@ func managedBinaryCommandFor(request ToolExecutionRequest, binary string, operat
 		}
 	case "template_scan":
 		if binary == "nuclei" {
-			if target.Kind != string(domain.TargetURL) || !managedBinaryHasRuleBundleDependency(request.Node, "nuclei-templates") {
+			if target.Kind != string(domain.TargetURL) {
 				return nil, false, nil
 			}
-			rulesPath, ok, err := workspaceToolchainRuleBundle(request.WorkspaceRoot, "nuclei-templates")
-			if err != nil {
-				return nil, true, err
-			}
-			if !ok {
+			command := []string{binary, "-jsonl", "-silent", "-no-color", "-disable-update-check", "-no-stdin", "-ni"}
+			if managedBinaryHasRuleBundleDependency(request.Node, "nuclei-templates") {
+				rulesPath, ok, err := workspaceToolchainRuleBundle(request.WorkspaceRoot, "nuclei-templates")
+				if err != nil {
+					return nil, true, err
+				}
+				if ok {
+					command = append(command, "-t", rulesPath)
+				} else if !request.catalogInvocation {
+					return nil, false, nil
+				}
+			} else if !request.catalogInvocation {
 				return nil, false, nil
 			}
-			return []string{binary, "-jsonl", "-silent", "-no-color", "-disable-update-check", "-no-stdin", "-ni", "-t", rulesPath, "-u", target.Value}, true, nil
+			return append(command, "-u", target.Value), true, nil
 		}
 	case "xss_scan":
 		if binary == "dalfox" {
@@ -2019,7 +2178,7 @@ func managedBinaryCommandFor(request ToolExecutionRequest, binary string, operat
 		}
 	case "port_scan":
 		if binary == "naabu" {
-			if target.Kind != string(domain.TargetCIDR) {
+			if !managedBinaryNetworkTargetKind(target.Kind) {
 				return nil, false, nil
 			}
 			return []string{binary, "-json", "-host", target.Value}, true, nil
@@ -2061,17 +2220,78 @@ func managedBinaryCommandFor(request ToolExecutionRequest, binary string, operat
 		}
 	case "service_fingerprint":
 		if binary == "nmap" {
-			if target.Kind != string(domain.TargetHost) && target.Kind != string(domain.TargetCIDR) {
+			if !managedBinaryNetworkTargetKind(target.Kind) {
 				return nil, false, nil
 			}
 			return []string{binary, "-oX", "-", target.Value}, true, nil
 		}
-	case "static_code_scan":
-		if binary == "mobsfscan" {
-			if target.Kind != string(domain.TargetArtifact) {
-				return nil, false, nil
+	case "tls_assessment":
+		if target.Kind != string(domain.TargetHost) && target.Kind != string(domain.TargetDomain) {
+			return nil, false, nil
+		}
+		switch binary {
+		case "testssl.sh":
+			outputPath, err := managedOutputFileInDirForRequest(request, binary, "testssl.json")
+			if err != nil {
+				return nil, true, err
 			}
+			return []string{binary, "--quiet", "--warnings", "off", "--color", "0", "--jsonfile", outputPath, target.Value}, true, nil
+		case "sslscan":
+			outputPath, err := managedOutputFileInDirForRequest(request, binary, "sslscan.xml")
+			if err != nil {
+				return nil, true, err
+			}
+			return []string{binary, "--no-colour", "--xml=" + outputPath, target.Value}, true, nil
+		}
+	case "apk_decompile":
+		if !managedBinaryArtifactTargetKind(target.Kind) {
+			return nil, false, nil
+		}
+		outputDir, err := managedOutputDirForRequest(request, binary)
+		if err != nil {
+			return nil, true, err
+		}
+		switch binary {
+		case "apktool":
+			return []string{binary, "decode", "--force", "--output", outputDir, target.Value}, true, nil
+		case "jadx":
+			return []string{binary, "--output-dir", outputDir, target.Value}, true, nil
+		}
+	case "static_code_scan":
+		if !managedBinaryArtifactTargetKind(target.Kind) {
+			return nil, false, nil
+		}
+		switch binary {
+		case "mobsfscan":
 			return []string{binary, "--json", "--no-fail", target.Value}, true, nil
+		case "semgrep":
+			outputPath, err := managedOutputFileInDirForRequest(request, binary, "semgrep.sarif")
+			if err != nil {
+				return nil, true, err
+			}
+			return []string{binary, "scan", "--sarif", "--output", outputPath, target.Value}, true, nil
+		}
+	case "secret_scan":
+		if !managedBinaryArtifactTargetKind(target.Kind) {
+			return nil, false, nil
+		}
+		switch binary {
+		case "gitleaks":
+			outputPath, err := managedOutputFileInDirForRequest(request, binary, "gitleaks.json")
+			if err != nil {
+				return nil, true, err
+			}
+			return []string{binary, "detect", "--no-git", "--source", target.Value, "--report-format", "json", "--report-path", outputPath, "--exit-code", "0", "--no-banner"}, true, nil
+		case "trufflehog":
+			return []string{binary, "filesystem", "--json", "--no-update", target.Value}, true, nil
+		}
+	case "firmware_analyze":
+		if binary == "binwalk" && managedBinaryArtifactTargetKind(target.Kind) {
+			return []string{binary, target.Value}, true, nil
+		}
+	case "metadata_extract":
+		if binary == "exiftool" && managedBinaryArtifactTargetKind(target.Kind) {
+			return []string{binary, "-json", target.Value}, true, nil
 		}
 	}
 	return nil, false, nil

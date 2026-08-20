@@ -1,16 +1,25 @@
 package app
 
 import (
+	"archive/tar"
+	"archive/zip"
+	"compress/gzip"
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/netip"
 	"net/url"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -64,30 +73,437 @@ type AuthoredToolArtifact struct {
 }
 
 type ManagedToolBundle struct {
-	Status       string `json:"status"`
-	Name         string `json:"name"`
-	Kind         string `json:"kind"`
-	Version      string `json:"version"`
-	Source       string `json:"source"`
-	SHA256       string `json:"sha256"`
-	BundleDir    string `json:"bundle_dir"`
-	ManifestPath string `json:"manifest_path"`
-	PayloadPath  string `json:"payload_path"`
-	InstallPath  string `json:"install_path"`
+	Status                    string `json:"status"`
+	Name                      string `json:"name"`
+	Kind                      string `json:"kind"`
+	Version                   string `json:"version"`
+	Source                    string `json:"source"`
+	SHA256                    string `json:"sha256"`
+	ProvenanceStatus          string `json:"provenance_status"`
+	ProvenanceSourceURL       string `json:"provenance_source_url,omitempty"`
+	ProvenanceUpstreamVersion string `json:"provenance_upstream_version,omitempty"`
+	ProvenanceRetrievedAt     string `json:"provenance_retrieved_at,omitempty"`
+	ProvenanceVerifiedBy      string `json:"provenance_verified_by,omitempty"`
+	CorpusStatus              string `json:"corpus_status,omitempty"`
+	CorpusName                string `json:"corpus_name,omitempty"`
+	CorpusSource              string `json:"corpus_source,omitempty"`
+	CorpusRetrievedAt         string `json:"corpus_retrieved_at,omitempty"`
+	CorpusFileCount           int    `json:"corpus_file_count,omitempty"`
+	CorpusSHA256              string `json:"corpus_sha256,omitempty"`
+	CorpusDigestStatus        string `json:"corpus_digest_status,omitempty"`
+	CorpusDigestAlgorithm     string `json:"corpus_digest_algorithm,omitempty"`
+	CorpusDigestScope         string `json:"corpus_digest_scope,omitempty"`
+	SignatureStatus           string `json:"signature_status"`
+	SignatureAlgorithm        string `json:"signature_algorithm,omitempty"`
+	SignatureKeyID            string `json:"signature_key_id,omitempty"`
+	SignatureSignedAt         string `json:"signature_signed_at,omitempty"`
+	SignatureSignedBy         string `json:"signature_signed_by,omitempty"`
+	UpdateStatus              string `json:"update_status"`
+	UpdateLatestVersion       string `json:"update_latest_version,omitempty"`
+	UpdateLatestSHA256        string `json:"update_latest_sha256,omitempty"`
+	UpdateCheckedAt           string `json:"update_checked_at,omitempty"`
+	UpdateMessage             string `json:"update_message,omitempty"`
+	BundleDir                 string `json:"bundle_dir"`
+	ManifestPath              string `json:"manifest_path"`
+	PayloadPath               string `json:"payload_path"`
+	InstallPath               string `json:"install_path"`
+	Error                     string `json:"error,omitempty"`
+}
+
+type ManagedToolBundleImportOptions struct {
+	Import                 bool
+	Name                   string
+	Kind                   string
+	Version                string
+	Source                 string
+	PayloadPath            string
+	ExpectedSHA256         string
+	ExpectedSHA256Provided bool
+}
+
+type ManagedToolBundleImportResult struct {
+	Status            string `json:"status"`
+	Mode              string `json:"mode"`
+	Action            string `json:"action"`
+	Name              string `json:"name"`
+	Kind              string `json:"kind"`
+	Version           string `json:"version"`
+	Source            string `json:"source"`
+	SHA256            string `json:"sha256"`
+	ExpectedSHA256    string `json:"expected_sha256,omitempty"`
+	SourcePayloadPath string `json:"source_payload_path"`
+	BundleDir         string `json:"bundle_dir"`
+	ManifestPath      string `json:"manifest_path"`
+	PayloadPath       string `json:"payload_path"`
+	InstallPath       string `json:"install_path"`
+}
+
+type ReleaseManagedToolBundle struct {
+	Status                    string `json:"status"`
+	Mode                      string `json:"mode"`
+	Name                      string `json:"name"`
+	Kind                      string `json:"kind,omitempty"`
+	Version                   string `json:"version,omitempty"`
+	Source                    string `json:"source,omitempty"`
+	SHA256                    string `json:"sha256,omitempty"`
+	ProvenanceStatus          string `json:"provenance_status,omitempty"`
+	ProvenanceSourceURL       string `json:"provenance_source_url,omitempty"`
+	ProvenanceUpstreamVersion string `json:"provenance_upstream_version,omitempty"`
+	ProvenanceRetrievedAt     string `json:"provenance_retrieved_at,omitempty"`
+	ProvenanceVerifiedBy      string `json:"provenance_verified_by,omitempty"`
+	CorpusStatus              string `json:"corpus_status,omitempty"`
+	CorpusName                string `json:"corpus_name,omitempty"`
+	CorpusSource              string `json:"corpus_source,omitempty"`
+	CorpusRetrievedAt         string `json:"corpus_retrieved_at,omitempty"`
+	CorpusFileCount           int    `json:"corpus_file_count,omitempty"`
+	CorpusSHA256              string `json:"corpus_sha256,omitempty"`
+	CorpusDigestStatus        string `json:"corpus_digest_status,omitempty"`
+	CorpusDigestAlgorithm     string `json:"corpus_digest_algorithm,omitempty"`
+	CorpusDigestScope         string `json:"corpus_digest_scope,omitempty"`
+	SignatureStatus           string `json:"signature_status,omitempty"`
+	SignatureAlgorithm        string `json:"signature_algorithm,omitempty"`
+	SignatureKeyID            string `json:"signature_key_id,omitempty"`
+	SignatureSignedAt         string `json:"signature_signed_at,omitempty"`
+	SignatureSignedBy         string `json:"signature_signed_by,omitempty"`
+	UpdateStatus              string `json:"update_status,omitempty"`
+	UpdateLatestVersion       string `json:"update_latest_version,omitempty"`
+	UpdateLatestSHA256        string `json:"update_latest_sha256,omitempty"`
+	UpdateCheckedAt           string `json:"update_checked_at,omitempty"`
+	UpdateMessage             string `json:"update_message,omitempty"`
+	ReleaseBundleDir          string `json:"release_bundle_dir"`
+	ReleaseManifestPath       string `json:"release_manifest_path"`
+	ReleasePayloadPath        string `json:"release_payload_path,omitempty"`
+	Error                     string `json:"error,omitempty"`
+}
+
+type ReleaseManagedToolBundleStatus struct {
+	Status                    string `json:"status"`
+	Mode                      string `json:"mode"`
+	Name                      string `json:"name"`
+	Kind                      string `json:"kind,omitempty"`
+	Version                   string `json:"version,omitempty"`
+	Source                    string `json:"source,omitempty"`
+	SHA256                    string `json:"sha256,omitempty"`
+	ExpectedSHA256            string `json:"expected_sha256,omitempty"`
+	ExpectedSHA256Status      string `json:"expected_sha256_status,omitempty"`
+	ProvenanceStatus          string `json:"provenance_status,omitempty"`
+	ProvenanceSourceURL       string `json:"provenance_source_url,omitempty"`
+	ProvenanceUpstreamVersion string `json:"provenance_upstream_version,omitempty"`
+	ProvenanceRetrievedAt     string `json:"provenance_retrieved_at,omitempty"`
+	ProvenanceVerifiedBy      string `json:"provenance_verified_by,omitempty"`
+	CorpusStatus              string `json:"corpus_status,omitempty"`
+	CorpusName                string `json:"corpus_name,omitempty"`
+	CorpusSource              string `json:"corpus_source,omitempty"`
+	CorpusRetrievedAt         string `json:"corpus_retrieved_at,omitempty"`
+	CorpusFileCount           int    `json:"corpus_file_count,omitempty"`
+	CorpusSHA256              string `json:"corpus_sha256,omitempty"`
+	CorpusDigestStatus        string `json:"corpus_digest_status,omitempty"`
+	CorpusDigestAlgorithm     string `json:"corpus_digest_algorithm,omitempty"`
+	CorpusDigestScope         string `json:"corpus_digest_scope,omitempty"`
+	SignatureStatus           string `json:"signature_status,omitempty"`
+	SignatureAlgorithm        string `json:"signature_algorithm,omitempty"`
+	SignatureKeyID            string `json:"signature_key_id,omitempty"`
+	SignatureSignedAt         string `json:"signature_signed_at,omitempty"`
+	SignatureSignedBy         string `json:"signature_signed_by,omitempty"`
+	UpdateStatus              string `json:"update_status,omitempty"`
+	UpdateLatestVersion       string `json:"update_latest_version,omitempty"`
+	UpdateLatestSHA256        string `json:"update_latest_sha256,omitempty"`
+	UpdateCheckedAt           string `json:"update_checked_at,omitempty"`
+	UpdateMessage             string `json:"update_message,omitempty"`
+	DigestStatus              string `json:"digest_status"`
+	DigestAlgorithm           string `json:"digest_algorithm,omitempty"`
+	DigestScope               string `json:"digest_scope,omitempty"`
+	ImportStatus              string `json:"import_status"`
+	LinkStatus                string `json:"link_status"`
+	ReleaseBundleDir          string `json:"release_bundle_dir"`
+	ReleaseManifestPath       string `json:"release_manifest_path"`
+	ReleasePayloadPath        string `json:"release_payload_path,omitempty"`
+	WorkspaceBundleDir        string `json:"workspace_bundle_dir,omitempty"`
+	WorkspaceManifestPath     string `json:"workspace_manifest_path,omitempty"`
+	WorkspacePayloadPath      string `json:"workspace_payload_path,omitempty"`
+	InstallPath               string `json:"install_path,omitempty"`
+	Error                     string `json:"error,omitempty"`
+}
+
+type ReleaseManagedToolBundleStatusSource struct {
+	Status               string `json:"status"`
+	Mode                 string `json:"mode"`
+	Path                 string `json:"path"`
+	ReleaseRoot          string `json:"release_root"`
+	Total                int    `json:"total"`
+	Available            int    `json:"available"`
+	Blocked              int    `json:"blocked"`
+	NotImported          int    `json:"not_imported"`
+	Imported             int    `json:"imported"`
+	Linked               int    `json:"linked"`
+	Conflict             int    `json:"conflict"`
+	ExpectedSHA256Bundle string `json:"expected_sha256_bundle,omitempty"`
+	ExpectedSHA256       string `json:"expected_sha256,omitempty"`
+	ExpectedSHA256Status string `json:"expected_sha256_status,omitempty"`
+	SetBy                string `json:"set_by,omitempty"`
+	SetAt                string `json:"set_at,omitempty"`
+	ClearedBy            string `json:"cleared_by,omitempty"`
+	ClearedAt            string `json:"cleared_at,omitempty"`
+	Reason               string `json:"reason,omitempty"`
+}
+
+type ReleaseManagedToolBundleStatusSourceOptions struct {
+	Set                    bool
+	SetBy                  string
+	Reason                 string
+	ExpectedSHA256Bundle   string
+	ExpectedSHA256         string
+	ExpectedSHA256Provided bool
+}
+
+type ReleaseManagedToolBundleStatusSourceClearOptions struct {
+	Clear     bool
+	ClearedBy string
+	Reason    string
+}
+
+type ReleaseManagedToolBundleStatusOptions struct {
+	ExpectedSHA256         string
+	ExpectedSHA256Provided bool
+}
+
+type ManagedToolBundleUpdateRequestOptions struct {
+	Request     bool
+	RequestedBy string
+	Reason      string
+}
+
+type ManagedToolBundleUpdateRequest struct {
+	Status              string `json:"status"`
+	Mode                string `json:"mode"`
+	Name                string `json:"name"`
+	Kind                string `json:"kind"`
+	Source              string `json:"source,omitempty"`
+	CurrentVersion      string `json:"current_version"`
+	CurrentSHA256       string `json:"current_sha256"`
+	LatestVersion       string `json:"latest_version"`
+	LatestSHA256        string `json:"latest_sha256"`
+	UpdateStatus        string `json:"update_status"`
+	UpdateCheckedAt     string `json:"update_checked_at,omitempty"`
+	UpdateMessage       string `json:"update_message,omitempty"`
+	ReleaseRoot         string `json:"release_root"`
+	ReleaseBundleDir    string `json:"release_bundle_dir"`
+	ReleaseManifestPath string `json:"release_manifest_path"`
+	ReleasePayloadPath  string `json:"release_payload_path,omitempty"`
+	Path                string `json:"path,omitempty"`
+	RequestedBy         string `json:"requested_by,omitempty"`
+	RequestedAt         string `json:"requested_at,omitempty"`
+	Reason              string `json:"reason,omitempty"`
+}
+
+type ManagedToolBundleUpdateRequestSummary struct {
+	Total   int `json:"total"`
+	Pending int `json:"pending"`
+}
+
+type ManagedToolBundleUpdateDownloadPlanOptions struct {
+	Plan                  bool
+	SourceURL             string
+	ExpectedSHA256        string
+	ArchiveFormat         string
+	ArchiveExpectedSHA256 string
+	PlannedBy             string
+	Reason                string
+}
+
+type ManagedToolBundleUpdateDownloadPlan struct {
+	Status                      string `json:"status"`
+	Mode                        string `json:"mode"`
+	Name                        string `json:"name"`
+	Kind                        string `json:"kind"`
+	Source                      string `json:"source,omitempty"`
+	CurrentVersion              string `json:"current_version"`
+	CurrentSHA256               string `json:"current_sha256"`
+	LatestVersion               string `json:"latest_version"`
+	LatestSHA256                string `json:"latest_sha256"`
+	UpdateStatus                string `json:"update_status"`
+	UpdateCheckedAt             string `json:"update_checked_at,omitempty"`
+	UpdateMessage               string `json:"update_message,omitempty"`
+	ExpectedSHA256              string `json:"expected_sha256"`
+	ExpectedSHA256Status        string `json:"expected_sha256_status"`
+	ArchiveFormat               string `json:"archive_format,omitempty"`
+	ArchiveExpectedSHA256       string `json:"archive_expected_sha256,omitempty"`
+	ArchiveExpectedSHA256Status string `json:"archive_expected_sha256_status,omitempty"`
+	SourceURL                   string `json:"source_url"`
+	RequestPath                 string `json:"request_path"`
+	ReleaseRoot                 string `json:"release_root"`
+	ReleaseBundleDir            string `json:"release_bundle_dir"`
+	ReleaseManifestPath         string `json:"release_manifest_path"`
+	ReleasePayloadPath          string `json:"release_payload_path,omitempty"`
+	Path                        string `json:"path,omitempty"`
+	PlannedBy                   string `json:"planned_by,omitempty"`
+	PlannedAt                   string `json:"planned_at,omitempty"`
+	Reason                      string `json:"reason,omitempty"`
+}
+
+type ManagedToolBundleUpdateDownloadPlanSummary struct {
+	Total   int `json:"total"`
+	Pending int `json:"pending"`
+}
+
+type ManagedToolBundleUpdateDownloadExecutionOptions struct {
+	Execute    bool
+	HTTPClient *http.Client
+	Actor      string
+	Reason     string
+}
+
+type ManagedToolBundleUpdateDownloadExecution struct {
+	Status                 string `json:"status"`
+	Mode                   string `json:"mode"`
+	Action                 string `json:"action"`
+	Name                   string `json:"name"`
+	Kind                   string `json:"kind"`
+	Source                 string `json:"source,omitempty"`
+	CurrentVersion         string `json:"current_version"`
+	CurrentSHA256          string `json:"current_sha256"`
+	LatestVersion          string `json:"latest_version"`
+	LatestSHA256           string `json:"latest_sha256"`
+	UpdateStatus           string `json:"update_status"`
+	UpdateCheckedAt        string `json:"update_checked_at,omitempty"`
+	UpdateMessage          string `json:"update_message,omitempty"`
+	SourceURL              string `json:"source_url"`
+	ExpectedSHA256         string `json:"expected_sha256"`
+	ActualSHA256           string `json:"actual_sha256,omitempty"`
+	DigestStatus           string `json:"digest_status"`
+	DigestAlgorithm        string `json:"digest_algorithm,omitempty"`
+	DigestScope            string `json:"digest_scope,omitempty"`
+	ArchiveFormat          string `json:"archive_format,omitempty"`
+	ArchivePath            string `json:"archive_path,omitempty"`
+	ArchiveExpectedSHA256  string `json:"archive_expected_sha256,omitempty"`
+	ArchiveActualSHA256    string `json:"archive_actual_sha256,omitempty"`
+	ArchiveDigestStatus    string `json:"archive_digest_status,omitempty"`
+	ArchiveDigestAlgorithm string `json:"archive_digest_algorithm,omitempty"`
+	ArchiveDigestScope     string `json:"archive_digest_scope,omitempty"`
+	HTTPStatus             int    `json:"http_status,omitempty"`
+	ContentLength          int64  `json:"content_length,omitempty"`
+	BytesWritten           int64  `json:"bytes_written,omitempty"`
+	RedirectPolicy         string `json:"redirect_policy,omitempty"`
+	RedirectLocation       string `json:"redirect_location,omitempty"`
+	RedirectLocationStatus string `json:"redirect_location_status,omitempty"`
+	PlanPath               string `json:"plan_path"`
+	RequestPath            string `json:"request_path"`
+	ReleaseRoot            string `json:"release_root"`
+	ReleaseBundleDir       string `json:"release_bundle_dir"`
+	ReleaseManifestPath    string `json:"release_manifest_path"`
+	ReleasePayloadPath     string `json:"release_payload_path,omitempty"`
+	PayloadPath            string `json:"payload_path,omitempty"`
+	Path                   string `json:"path,omitempty"`
+	Actor                  string `json:"actor,omitempty"`
+	ExecutedAt             string `json:"executed_at,omitempty"`
+	Reason                 string `json:"reason,omitempty"`
+	Error                  string `json:"error,omitempty"`
+}
+
+type ManagedToolBundleUpdateDownloadExecutionSummary struct {
+	Total     int `json:"total"`
+	Completed int `json:"completed"`
+	Failed    int `json:"failed"`
+}
+
+type ManagedToolBundleUpdateApplyOptions struct {
+	Apply  bool
+	Actor  string
+	Reason string
+}
+
+type ManagedToolBundleUpdateApplyExecution struct {
+	Status                string `json:"status"`
+	Mode                  string `json:"mode"`
+	Action                string `json:"action"`
+	Name                  string `json:"name"`
+	Kind                  string `json:"kind"`
+	Source                string `json:"source,omitempty"`
+	CurrentVersion        string `json:"current_version"`
+	CurrentSHA256         string `json:"current_sha256"`
+	LatestVersion         string `json:"latest_version"`
+	LatestSHA256          string `json:"latest_sha256"`
+	UpdateStatus          string `json:"update_status"`
+	UpdateCheckedAt       string `json:"update_checked_at,omitempty"`
+	UpdateMessage         string `json:"update_message,omitempty"`
+	SourceURL             string `json:"source_url"`
+	ExpectedSHA256        string `json:"expected_sha256"`
+	ActualSHA256          string `json:"actual_sha256"`
+	DigestStatus          string `json:"digest_status"`
+	DigestAlgorithm       string `json:"digest_algorithm"`
+	DigestScope           string `json:"digest_scope"`
+	DownloadExecutionPath string `json:"download_execution_path"`
+	PlanPath              string `json:"plan_path"`
+	RequestPath           string `json:"request_path"`
+	ReleaseRoot           string `json:"release_root"`
+	ReleaseBundleDir      string `json:"release_bundle_dir"`
+	ReleaseManifestPath   string `json:"release_manifest_path"`
+	ReleasePayloadPath    string `json:"release_payload_path,omitempty"`
+	StagedPayloadPath     string `json:"staged_payload_path"`
+	WorkspaceBundleDir    string `json:"workspace_bundle_dir"`
+	WorkspaceManifestPath string `json:"workspace_manifest_path"`
+	WorkspacePayloadPath  string `json:"workspace_payload_path"`
+	InstallPath           string `json:"install_path"`
+	Path                  string `json:"path,omitempty"`
+	Actor                 string `json:"actor,omitempty"`
+	AppliedAt             string `json:"applied_at,omitempty"`
+	Reason                string `json:"reason,omitempty"`
+	Error                 string `json:"error,omitempty"`
+}
+
+type ManagedToolBundleUpdateApplyExecutionSummary struct {
+	Total     int `json:"total"`
+	Completed int `json:"completed"`
+	Failed    int `json:"failed"`
+}
+
+type ReleaseManagedToolBundleInstallPlanOptions struct {
+	ExpectedSHA256         string
+	ExpectedSHA256Provided bool
+}
+
+type ReleaseManagedToolBundleInstallOptions struct {
+	Execute                bool
+	ExpectedSHA256         string
+	ExpectedSHA256Provided bool
 }
 
 type ManagedToolBundleInstallPlan struct {
-	Status      string `json:"status"`
-	Mode        string `json:"mode"`
-	Action      string `json:"action"`
-	Pack        string `json:"pack"`
-	Dependency  string `json:"dependency"`
-	Kind        string `json:"kind"`
-	Version     string `json:"version"`
-	Source      string `json:"source"`
-	SHA256      string `json:"sha256"`
-	PayloadPath string `json:"payload_path"`
-	InstallPath string `json:"install_path"`
+	Status                    string `json:"status"`
+	Mode                      string `json:"mode"`
+	Action                    string `json:"action"`
+	Pack                      string `json:"pack"`
+	Dependency                string `json:"dependency"`
+	Kind                      string `json:"kind"`
+	Version                   string `json:"version"`
+	Source                    string `json:"source"`
+	SHA256                    string `json:"sha256"`
+	ProvenanceStatus          string `json:"provenance_status"`
+	ProvenanceSourceURL       string `json:"provenance_source_url,omitempty"`
+	ProvenanceUpstreamVersion string `json:"provenance_upstream_version,omitempty"`
+	ProvenanceRetrievedAt     string `json:"provenance_retrieved_at,omitempty"`
+	ProvenanceVerifiedBy      string `json:"provenance_verified_by,omitempty"`
+	CorpusStatus              string `json:"corpus_status,omitempty"`
+	CorpusName                string `json:"corpus_name,omitempty"`
+	CorpusSource              string `json:"corpus_source,omitempty"`
+	CorpusRetrievedAt         string `json:"corpus_retrieved_at,omitempty"`
+	CorpusFileCount           int    `json:"corpus_file_count,omitempty"`
+	CorpusSHA256              string `json:"corpus_sha256,omitempty"`
+	CorpusDigestStatus        string `json:"corpus_digest_status,omitempty"`
+	CorpusDigestAlgorithm     string `json:"corpus_digest_algorithm,omitempty"`
+	CorpusDigestScope         string `json:"corpus_digest_scope,omitempty"`
+	SignatureStatus           string `json:"signature_status"`
+	SignatureAlgorithm        string `json:"signature_algorithm,omitempty"`
+	SignatureKeyID            string `json:"signature_key_id,omitempty"`
+	SignatureSignedAt         string `json:"signature_signed_at,omitempty"`
+	SignatureSignedBy         string `json:"signature_signed_by,omitempty"`
+	UpdateStatus              string `json:"update_status"`
+	UpdateLatestVersion       string `json:"update_latest_version,omitempty"`
+	UpdateLatestSHA256        string `json:"update_latest_sha256,omitempty"`
+	UpdateCheckedAt           string `json:"update_checked_at,omitempty"`
+	UpdateMessage             string `json:"update_message,omitempty"`
+	PayloadPath               string `json:"payload_path"`
+	InstallPath               string `json:"install_path"`
 }
 
 type ManagedToolBundleInstallOptions struct {
@@ -95,51 +511,127 @@ type ManagedToolBundleInstallOptions struct {
 }
 
 type ManagedToolBundleInstallResult struct {
-	Status      string `json:"status"`
-	Mode        string `json:"mode"`
-	Action      string `json:"action"`
-	Pack        string `json:"pack"`
-	Dependency  string `json:"dependency"`
-	Kind        string `json:"kind"`
-	Version     string `json:"version"`
-	Source      string `json:"source"`
-	SHA256      string `json:"sha256"`
-	PayloadPath string `json:"payload_path"`
-	InstallPath string `json:"install_path"`
+	Status                    string `json:"status"`
+	Mode                      string `json:"mode"`
+	Action                    string `json:"action"`
+	Pack                      string `json:"pack"`
+	Dependency                string `json:"dependency"`
+	Kind                      string `json:"kind"`
+	Version                   string `json:"version"`
+	Source                    string `json:"source"`
+	SHA256                    string `json:"sha256"`
+	ProvenanceStatus          string `json:"provenance_status"`
+	ProvenanceSourceURL       string `json:"provenance_source_url,omitempty"`
+	ProvenanceUpstreamVersion string `json:"provenance_upstream_version,omitempty"`
+	ProvenanceRetrievedAt     string `json:"provenance_retrieved_at,omitempty"`
+	ProvenanceVerifiedBy      string `json:"provenance_verified_by,omitempty"`
+	CorpusStatus              string `json:"corpus_status,omitempty"`
+	CorpusName                string `json:"corpus_name,omitempty"`
+	CorpusSource              string `json:"corpus_source,omitempty"`
+	CorpusRetrievedAt         string `json:"corpus_retrieved_at,omitempty"`
+	CorpusFileCount           int    `json:"corpus_file_count,omitempty"`
+	CorpusSHA256              string `json:"corpus_sha256,omitempty"`
+	CorpusDigestStatus        string `json:"corpus_digest_status,omitempty"`
+	CorpusDigestAlgorithm     string `json:"corpus_digest_algorithm,omitempty"`
+	CorpusDigestScope         string `json:"corpus_digest_scope,omitempty"`
+	SignatureStatus           string `json:"signature_status"`
+	SignatureAlgorithm        string `json:"signature_algorithm,omitempty"`
+	SignatureKeyID            string `json:"signature_key_id,omitempty"`
+	SignatureSignedAt         string `json:"signature_signed_at,omitempty"`
+	SignatureSignedBy         string `json:"signature_signed_by,omitempty"`
+	UpdateStatus              string `json:"update_status"`
+	UpdateLatestVersion       string `json:"update_latest_version,omitempty"`
+	UpdateLatestSHA256        string `json:"update_latest_sha256,omitempty"`
+	UpdateCheckedAt           string `json:"update_checked_at,omitempty"`
+	UpdateMessage             string `json:"update_message,omitempty"`
+	PayloadPath               string `json:"payload_path"`
+	InstallPath               string `json:"install_path"`
 }
 
 type ReleaseManagedToolBundleInstallPlan struct {
-	Status               string `json:"status"`
-	Mode                 string `json:"mode"`
-	Action               string `json:"action"`
-	Pack                 string `json:"pack"`
-	Dependency           string `json:"dependency"`
-	Kind                 string `json:"kind"`
-	Version              string `json:"version"`
-	Source               string `json:"source"`
-	SHA256               string `json:"sha256"`
-	ReleaseBundleDir     string `json:"release_bundle_dir"`
-	ReleasePayloadPath   string `json:"release_payload_path"`
-	WorkspaceBundleDir   string `json:"workspace_bundle_dir"`
-	WorkspacePayloadPath string `json:"workspace_payload_path"`
-	InstallPath          string `json:"install_path"`
+	Status                    string `json:"status"`
+	Mode                      string `json:"mode"`
+	Action                    string `json:"action"`
+	Pack                      string `json:"pack"`
+	Dependency                string `json:"dependency"`
+	Kind                      string `json:"kind"`
+	Version                   string `json:"version"`
+	Source                    string `json:"source"`
+	SHA256                    string `json:"sha256"`
+	ExpectedSHA256            string `json:"expected_sha256,omitempty"`
+	ExpectedSHA256Status      string `json:"expected_sha256_status,omitempty"`
+	ProvenanceStatus          string `json:"provenance_status"`
+	ProvenanceSourceURL       string `json:"provenance_source_url,omitempty"`
+	ProvenanceUpstreamVersion string `json:"provenance_upstream_version,omitempty"`
+	ProvenanceRetrievedAt     string `json:"provenance_retrieved_at,omitempty"`
+	ProvenanceVerifiedBy      string `json:"provenance_verified_by,omitempty"`
+	CorpusStatus              string `json:"corpus_status,omitempty"`
+	CorpusName                string `json:"corpus_name,omitempty"`
+	CorpusSource              string `json:"corpus_source,omitempty"`
+	CorpusRetrievedAt         string `json:"corpus_retrieved_at,omitempty"`
+	CorpusFileCount           int    `json:"corpus_file_count,omitempty"`
+	CorpusSHA256              string `json:"corpus_sha256,omitempty"`
+	CorpusDigestStatus        string `json:"corpus_digest_status,omitempty"`
+	CorpusDigestAlgorithm     string `json:"corpus_digest_algorithm,omitempty"`
+	CorpusDigestScope         string `json:"corpus_digest_scope,omitempty"`
+	SignatureStatus           string `json:"signature_status"`
+	SignatureAlgorithm        string `json:"signature_algorithm,omitempty"`
+	SignatureKeyID            string `json:"signature_key_id,omitempty"`
+	SignatureSignedAt         string `json:"signature_signed_at,omitempty"`
+	SignatureSignedBy         string `json:"signature_signed_by,omitempty"`
+	UpdateStatus              string `json:"update_status"`
+	UpdateLatestVersion       string `json:"update_latest_version,omitempty"`
+	UpdateLatestSHA256        string `json:"update_latest_sha256,omitempty"`
+	UpdateCheckedAt           string `json:"update_checked_at,omitempty"`
+	UpdateMessage             string `json:"update_message,omitempty"`
+	ReleaseBundleDir          string `json:"release_bundle_dir"`
+	ReleasePayloadPath        string `json:"release_payload_path"`
+	WorkspaceBundleDir        string `json:"workspace_bundle_dir"`
+	WorkspacePayloadPath      string `json:"workspace_payload_path"`
+	InstallPath               string `json:"install_path"`
 }
 
 type ReleaseManagedToolBundleInstallResult struct {
-	Status               string `json:"status"`
-	Mode                 string `json:"mode"`
-	Action               string `json:"action"`
-	Pack                 string `json:"pack"`
-	Dependency           string `json:"dependency"`
-	Kind                 string `json:"kind"`
-	Version              string `json:"version"`
-	Source               string `json:"source"`
-	SHA256               string `json:"sha256"`
-	ReleaseBundleDir     string `json:"release_bundle_dir"`
-	ReleasePayloadPath   string `json:"release_payload_path"`
-	WorkspaceBundleDir   string `json:"workspace_bundle_dir"`
-	WorkspacePayloadPath string `json:"workspace_payload_path"`
-	InstallPath          string `json:"install_path"`
+	Status                    string `json:"status"`
+	Mode                      string `json:"mode"`
+	Action                    string `json:"action"`
+	Pack                      string `json:"pack"`
+	Dependency                string `json:"dependency"`
+	Kind                      string `json:"kind"`
+	Version                   string `json:"version"`
+	Source                    string `json:"source"`
+	SHA256                    string `json:"sha256"`
+	ExpectedSHA256            string `json:"expected_sha256,omitempty"`
+	ExpectedSHA256Status      string `json:"expected_sha256_status,omitempty"`
+	ProvenanceStatus          string `json:"provenance_status"`
+	ProvenanceSourceURL       string `json:"provenance_source_url,omitempty"`
+	ProvenanceUpstreamVersion string `json:"provenance_upstream_version,omitempty"`
+	ProvenanceRetrievedAt     string `json:"provenance_retrieved_at,omitempty"`
+	ProvenanceVerifiedBy      string `json:"provenance_verified_by,omitempty"`
+	CorpusStatus              string `json:"corpus_status,omitempty"`
+	CorpusName                string `json:"corpus_name,omitempty"`
+	CorpusSource              string `json:"corpus_source,omitempty"`
+	CorpusRetrievedAt         string `json:"corpus_retrieved_at,omitempty"`
+	CorpusFileCount           int    `json:"corpus_file_count,omitempty"`
+	CorpusSHA256              string `json:"corpus_sha256,omitempty"`
+	CorpusDigestStatus        string `json:"corpus_digest_status,omitempty"`
+	CorpusDigestAlgorithm     string `json:"corpus_digest_algorithm,omitempty"`
+	CorpusDigestScope         string `json:"corpus_digest_scope,omitempty"`
+	SignatureStatus           string `json:"signature_status"`
+	SignatureAlgorithm        string `json:"signature_algorithm,omitempty"`
+	SignatureKeyID            string `json:"signature_key_id,omitempty"`
+	SignatureSignedAt         string `json:"signature_signed_at,omitempty"`
+	SignatureSignedBy         string `json:"signature_signed_by,omitempty"`
+	UpdateStatus              string `json:"update_status"`
+	UpdateLatestVersion       string `json:"update_latest_version,omitempty"`
+	UpdateLatestSHA256        string `json:"update_latest_sha256,omitempty"`
+	UpdateCheckedAt           string `json:"update_checked_at,omitempty"`
+	UpdateMessage             string `json:"update_message,omitempty"`
+	ReleaseBundleDir          string `json:"release_bundle_dir"`
+	ReleasePayloadPath        string `json:"release_payload_path"`
+	WorkspaceBundleDir        string `json:"workspace_bundle_dir"`
+	WorkspacePayloadPath      string `json:"workspace_payload_path"`
+	InstallPath               string `json:"install_path"`
 }
 
 type ToolCompilePreviewOptions struct {
@@ -263,11 +755,32 @@ type ToolCompilePreviewReviewSelectionClearOptions struct {
 	Reason    string
 }
 
+type ToolCompilePreviewReviewExecutionDispatch struct {
+	Path           string                  `json:"path,omitempty"`
+	Status         string                  `json:"status"`
+	Mode           string                  `json:"mode"`
+	ReviewPath     string                  `json:"review_path"`
+	SelectionPath  string                  `json:"selection_path"`
+	Action         compiler.SemanticAction `json:"action"`
+	ReviewNodes    int                     `json:"review_nodes"`
+	ReviewWarnings int                     `json:"review_warnings"`
+	CreatedAt      string                  `json:"created_at,omitempty"`
+	Actor          string                  `json:"actor,omitempty"`
+	Reason         string                  `json:"reason,omitempty"`
+}
+
+type ToolCompilePreviewReviewExecutionDispatchOptions struct {
+	Actor     string
+	Reason    string
+	CreatedAt time.Time
+}
+
 type ToolCompilePreviewReviewExecution struct {
 	Path           string                  `json:"path,omitempty"`
 	Status         string                  `json:"status"`
 	Mode           string                  `json:"mode"`
 	RunID          string                  `json:"run_id"`
+	DispatchPath   string                  `json:"dispatch_path,omitempty"`
 	ReviewPath     string                  `json:"review_path"`
 	SelectionPath  string                  `json:"selection_path,omitempty"`
 	Action         compiler.SemanticAction `json:"action"`
@@ -288,6 +801,7 @@ type ToolCompilePreviewReviewExecutionOptions struct {
 	ExecutedAt      time.Time
 	ToolRunner      ToolExecutionRunner
 	ToolConcurrency int
+	DispatchPath    string
 }
 
 type ToolCompilePreviewSignalArtifact struct {
@@ -912,6 +1426,64 @@ func ReadToolCompilePreviewReviewSelection(root string) (ToolCompilePreviewRevie
 	return selection, true, nil
 }
 
+func CreateToolCompilePreviewReviewExecutionDispatch(root, reviewPath string, options ToolCompilePreviewReviewExecutionDispatchOptions) (ToolCompilePreviewReviewExecutionDispatch, error) {
+	doctor, err := doctorWorkspaceMetadataOnly(root)
+	if err != nil {
+		return ToolCompilePreviewReviewExecutionDispatch{}, err
+	}
+	if !doctor.Ready {
+		return ToolCompilePreviewReviewExecutionDispatch{}, fmt.Errorf("workspace is not ready: %v", doctor.Errors)
+	}
+	resolvedReviewPath, err := resolveToolCompilePreviewReviewPath(root, reviewPath)
+	if err != nil {
+		return ToolCompilePreviewReviewExecutionDispatch{}, err
+	}
+	review, err := readToolCompilePreviewReviewFile(resolvedReviewPath)
+	if err != nil {
+		return ToolCompilePreviewReviewExecutionDispatch{}, err
+	}
+	if strings.TrimSpace(review.Status) != "dry-run" || strings.TrimSpace(review.Mode) != "metadata-only" {
+		return ToolCompilePreviewReviewExecutionDispatch{}, fmt.Errorf("compile preview review must be dry-run metadata-only before dispatch")
+	}
+	if len(review.Preview.Nodes) == 0 {
+		return ToolCompilePreviewReviewExecutionDispatch{}, fmt.Errorf("compile preview review has no nodes to dispatch")
+	}
+	selection, selectionFound, err := readToolCompilePreviewReviewSelectionForExecution(root)
+	if err != nil {
+		return ToolCompilePreviewReviewExecutionDispatch{}, err
+	}
+	if !selectionFound || !toolCompilePreviewReviewSelectionIsCurrent(selection) {
+		return ToolCompilePreviewReviewExecutionDispatch{}, fmt.Errorf("compile preview review execution dispatch requires a current review selection")
+	}
+	if strings.TrimSpace(selection.ReviewPath) != strings.TrimSpace(review.Path) {
+		return ToolCompilePreviewReviewExecutionDispatch{}, fmt.Errorf("compile preview review is not the current selection: selected=%s review=%s", selection.ReviewPath, review.Path)
+	}
+	createdAt := options.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = time.Now().UTC()
+	}
+	actor := strings.TrimSpace(options.Actor)
+	if actor == "" {
+		actor = "operator"
+	}
+	dispatch := ToolCompilePreviewReviewExecutionDispatch{
+		Status:         "dry-run",
+		Mode:           "metadata-only",
+		ReviewPath:     review.Path,
+		SelectionPath:  selection.Path,
+		Action:         review.Preview.Action,
+		ReviewNodes:    len(review.Preview.Nodes),
+		ReviewWarnings: len(review.Preview.Warnings),
+		CreatedAt:      createdAt.UTC().Format(time.RFC3339),
+		Actor:          actor,
+		Reason:         strings.TrimSpace(options.Reason),
+	}
+	if err := writeToolCompilePreviewReviewExecutionDispatch(root, &dispatch); err != nil {
+		return dispatch, err
+	}
+	return dispatch, nil
+}
+
 func ExecuteToolCompilePreviewReview(ctx context.Context, root, reviewPath string, options ToolCompilePreviewReviewExecutionOptions) (ToolCompilePreviewReviewExecution, error) {
 	if !options.Execute {
 		return ToolCompilePreviewReviewExecution{}, fmt.Errorf("compile preview review execution requires explicit execute")
@@ -975,6 +1547,7 @@ func ExecuteToolCompilePreviewReview(ctx context.Context, root, reviewPath strin
 		Status:         "completed",
 		Mode:           "execute",
 		RunID:          runID,
+		DispatchPath:   strings.TrimSpace(options.DispatchPath),
 		ReviewPath:     review.Path,
 		Action:         review.Preview.Action,
 		ReviewNodes:    len(review.Preview.Nodes),
@@ -1022,6 +1595,129 @@ func ExecuteToolCompilePreviewReview(ctx context.Context, root, reviewPath strin
 		return execution, err
 	}
 	return execution, nil
+}
+
+func ExecuteToolCompilePreviewReviewExecutionDispatch(ctx context.Context, root, dispatchPath string, options ToolCompilePreviewReviewExecutionOptions) (ToolCompilePreviewReviewExecution, error) {
+	if !options.Execute {
+		return ToolCompilePreviewReviewExecution{}, fmt.Errorf("compile preview review execution dispatch requires explicit execute")
+	}
+	dispatch, err := ReadToolCompilePreviewReviewExecutionDispatch(root, dispatchPath)
+	if err != nil {
+		return ToolCompilePreviewReviewExecution{}, err
+	}
+	if strings.TrimSpace(dispatch.Status) != "dry-run" || strings.TrimSpace(dispatch.Mode) != "metadata-only" {
+		return ToolCompilePreviewReviewExecution{}, fmt.Errorf("compile preview review execution dispatch must be dry-run metadata-only before execution")
+	}
+	review, err := ReadToolCompilePreviewReview(root, dispatch.ReviewPath)
+	if err != nil {
+		return ToolCompilePreviewReviewExecution{}, err
+	}
+	if strings.TrimSpace(review.Status) != "dry-run" || strings.TrimSpace(review.Mode) != "metadata-only" {
+		return ToolCompilePreviewReviewExecution{}, fmt.Errorf("compile preview review must be dry-run metadata-only before execution")
+	}
+	if dispatch.Action != review.Preview.Action || dispatch.ReviewNodes != len(review.Preview.Nodes) || dispatch.ReviewWarnings != len(review.Preview.Warnings) {
+		return ToolCompilePreviewReviewExecution{}, fmt.Errorf("compile preview review execution dispatch is stale: dispatch nodes=%d warnings=%d action=%s review nodes=%d warnings=%d action=%s", dispatch.ReviewNodes, dispatch.ReviewWarnings, dispatch.Action, len(review.Preview.Nodes), len(review.Preview.Warnings), review.Preview.Action)
+	}
+	options.DispatchPath = dispatch.Path
+	return ExecuteToolCompilePreviewReview(ctx, root, review.Path, options)
+}
+
+func ListToolCompilePreviewReviewExecutionDispatches(root string) ([]ToolCompilePreviewReviewExecutionDispatch, error) {
+	doctor, err := doctorWorkspaceMetadataOnly(root)
+	if err != nil {
+		return nil, err
+	}
+	if !doctor.Ready {
+		return nil, fmt.Errorf("workspace is not ready: %v", doctor.Errors)
+	}
+	if err := rejectUnsafeAuthoredToolDirectory(toolCompilePreviewReviewExecutionDispatchDir(root), "compile preview review execution dispatch directory"); err != nil {
+		return nil, err
+	}
+	paths, err := filepath.Glob(filepath.Join(toolCompilePreviewReviewExecutionDispatchDir(root), "*.json"))
+	if err != nil {
+		return nil, fmt.Errorf("glob compile preview review execution dispatches: %w", err)
+	}
+	sort.Strings(paths)
+	dispatches := make([]ToolCompilePreviewReviewExecutionDispatch, 0, len(paths))
+	for _, path := range paths {
+		dispatch, err := readToolCompilePreviewReviewExecutionDispatchFile(path)
+		if err != nil {
+			return nil, err
+		}
+		dispatches = append(dispatches, dispatch)
+	}
+	return dispatches, nil
+}
+
+func ReadToolCompilePreviewReviewExecutionDispatch(root, dispatchPath string) (ToolCompilePreviewReviewExecutionDispatch, error) {
+	doctor, err := doctorWorkspaceMetadataOnly(root)
+	if err != nil {
+		return ToolCompilePreviewReviewExecutionDispatch{}, err
+	}
+	if !doctor.Ready {
+		return ToolCompilePreviewReviewExecutionDispatch{}, fmt.Errorf("workspace is not ready: %v", doctor.Errors)
+	}
+	path, err := resolveToolCompilePreviewReviewExecutionDispatchPath(root, dispatchPath)
+	if err != nil {
+		return ToolCompilePreviewReviewExecutionDispatch{}, err
+	}
+	return readToolCompilePreviewReviewExecutionDispatchFile(path)
+}
+
+func writeToolCompilePreviewReviewExecutionDispatch(root string, dispatch *ToolCompilePreviewReviewExecutionDispatch) error {
+	dir, err := ensureToolCompilePreviewReviewExecutionDispatchDirectory(root)
+	if err != nil {
+		return err
+	}
+	name := safeInstallRequestName(strings.Join([]string{
+		"compile-preview-review-execution-dispatch",
+		dispatch.ReviewPath,
+		dispatch.SelectionPath,
+		dispatch.CreatedAt,
+	}, "|"))
+	dispatch.Path = filepath.Join(dir, name+".json")
+	data, err := json.MarshalIndent(dispatch, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode compile preview review execution dispatch: %w", err)
+	}
+	data = append(data, '\n')
+	if err := rejectUnsafeAuthoredToolFile(dispatch.Path, "compile preview review execution dispatch file"); err != nil {
+		return err
+	}
+	if err := os.WriteFile(dispatch.Path, data, 0o644); err != nil {
+		return fmt.Errorf("write compile preview review execution dispatch: %w", err)
+	}
+	return nil
+}
+
+func readToolCompilePreviewReviewExecutionDispatchFile(path string) (ToolCompilePreviewReviewExecutionDispatch, error) {
+	if err := rejectUnsafeAuthoredToolFile(path, "compile preview review execution dispatch file"); err != nil {
+		return ToolCompilePreviewReviewExecutionDispatch{}, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ToolCompilePreviewReviewExecutionDispatch{}, fmt.Errorf("read compile preview review execution dispatch %s: %w", path, err)
+	}
+	var dispatch ToolCompilePreviewReviewExecutionDispatch
+	if err := json.Unmarshal(data, &dispatch); err != nil {
+		return ToolCompilePreviewReviewExecutionDispatch{}, fmt.Errorf("decode compile preview review execution dispatch %s: %w", path, err)
+	}
+	dispatch.Path = path
+	return dispatch, nil
+}
+
+func ensureToolCompilePreviewReviewExecutionDispatchDirectory(root string) (string, error) {
+	if err := requireAuthoredToolDirectory(filepath.Join(root, "toolchain"), "toolchain directory"); err != nil {
+		return "", err
+	}
+	dir := toolCompilePreviewReviewExecutionDispatchDir(root)
+	if err := rejectUnsafeAuthoredToolDirectory(dir, "compile preview review execution dispatch directory"); err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("create compile preview review execution dispatch directory: %w", err)
+	}
+	return dir, nil
 }
 
 func readToolCompilePreviewReviewSelectionForExecution(root string) (ToolCompilePreviewReviewSelection, bool, error) {
@@ -1857,6 +2553,40 @@ func PlanApprovedToolchainInstalls(root string) (ToolchainInstallDispatchPlan, e
 	return toolchainInstallDispatchPlanFromRequests(requests), nil
 }
 
+func planToolchainInstallsForExecution(root string) (ToolchainInstallDispatchPlan, error) {
+	requests, err := ListToolchainInstallRequests(root)
+	if err != nil {
+		return ToolchainInstallDispatchPlan{}, err
+	}
+	return toolchainInstallDispatchPlanFromRequestsForExecution(requests), nil
+}
+
+func doctorToolchainInstallRuntime(root string) (DoctorReport, error) {
+	report, err := DoctorWorkspaceWithOptions(root, DoctorOptions{SkipContainerRuntimeCheck: true})
+	if err != nil {
+		return DoctorReport{}, err
+	}
+	blocking := make([]string, 0, len(report.Errors))
+	for _, problem := range report.Errors {
+		if toolchainInstallCompatibilityMetadataError(problem) {
+			report.Warnings = append(report.Warnings, "toolchain install ignored compatibility metadata and is using unrestricted process defaults: "+problem)
+			continue
+		}
+		blocking = append(blocking, problem)
+	}
+	report.Errors = blocking
+	report.Ready = len(blocking) == 0
+	return report, nil
+}
+
+func toolchainInstallCompatibilityMetadataError(problem string) bool {
+	problem = strings.TrimSpace(problem)
+	return problem == "required file missing: scope.yaml" ||
+		problem == "required file is a directory: scope.yaml" ||
+		strings.HasPrefix(problem, "invalid scope.yaml:") ||
+		strings.HasPrefix(problem, "invalid authorization.yaml:")
+}
+
 func PlanFailedToolchainInstallRetries(root string) (ToolchainInstallRetryPlan, error) {
 	executions, err := ListToolchainInstallDispatchExecutions(root)
 	if err != nil {
@@ -2145,6 +2875,10 @@ func CreateToolchainInstallDispatch(root string) (ToolchainInstallDispatch, erro
 	if err != nil {
 		return ToolchainInstallDispatch{}, err
 	}
+	return createToolchainInstallDispatch(root, plan)
+}
+
+func createToolchainInstallDispatch(root string, plan ToolchainInstallDispatchPlan) (ToolchainInstallDispatch, error) {
 	dispatch := ToolchainInstallDispatch{
 		Status:  "dry-run",
 		Mode:    "metadata-only",
@@ -2194,7 +2928,7 @@ func ListToolchainInstallDispatches(root string) ([]ToolchainInstallDispatch, er
 }
 
 func ReadToolchainInstallDispatch(root, dispatchPath string) (ToolchainInstallDispatch, error) {
-	doctor, err := doctorWorkspaceMetadataOnly(root)
+	doctor, err := doctorToolchainInstallRuntime(root)
 	if err != nil {
 		return ToolchainInstallDispatch{}, err
 	}
@@ -2222,10 +2956,7 @@ func readToolchainInstallDispatchFile(path string) (ToolchainInstallDispatch, er
 }
 
 func ExecuteToolchainInstallDispatch(root, dispatchPath string, options ToolchainInstallDispatchExecutionOptions) (ToolchainInstallDispatchExecution, error) {
-	if !options.Execute {
-		return ToolchainInstallDispatchExecution{}, fmt.Errorf("install dispatch execution requires explicit execute")
-	}
-	doctor, err := DoctorWorkspaceWithOptions(root, DoctorOptions{RequireSafetyAuthorization: true})
+	doctor, err := doctorToolchainInstallRuntime(root)
 	if err != nil {
 		return ToolchainInstallDispatchExecution{}, err
 	}
@@ -2247,9 +2978,6 @@ func ExecuteToolchainInstallDispatch(root, dispatchPath string, options Toolchai
 		Skipped:      append([]ToolchainInstallDispatchSkip(nil), dispatch.Skipped...),
 	}
 	for _, request := range dispatch.Ready {
-		if installRequestDisplayStatus(request.Status) != "approved" {
-			return execution, fmt.Errorf("install dispatch ready request must be approved: %s/%s status=%s", request.Pack, request.Dependency, installRequestDisplayStatus(request.Status))
-		}
 		result := ToolchainInstallDispatchExecutionResult{
 			RequestPath: request.Path,
 			Pack:        request.Pack,
@@ -2322,7 +3050,7 @@ func writeToolchainInstallDispatchExecution(root string, execution *ToolchainIns
 }
 
 func ListToolchainInstallDispatchExecutions(root string) ([]ToolchainInstallDispatchExecution, error) {
-	doctor, err := doctorWorkspaceMetadataOnly(root)
+	doctor, err := doctorToolchainInstallRuntime(root)
 	if err != nil {
 		return nil, err
 	}
@@ -2375,6 +3103,14 @@ func readToolchainInstallDispatchExecutionFile(path string) (ToolchainInstallDis
 }
 
 func toolchainInstallDispatchPlanFromRequests(requests []ToolchainInstallRequest) ToolchainInstallDispatchPlan {
+	return toolchainInstallDispatchPlanFromRequestsWithApproval(requests, true)
+}
+
+func toolchainInstallDispatchPlanFromRequestsForExecution(requests []ToolchainInstallRequest) ToolchainInstallDispatchPlan {
+	return toolchainInstallDispatchPlanFromRequestsWithApproval(requests, false)
+}
+
+func toolchainInstallDispatchPlanFromRequestsWithApproval(requests []ToolchainInstallRequest, requireApproval bool) ToolchainInstallDispatchPlan {
 	plan := ToolchainInstallDispatchPlan{
 		Summary: SummarizeToolchainInstallRequests(requests),
 	}
@@ -2388,7 +3124,7 @@ func toolchainInstallDispatchPlanFromRequests(requests []ToolchainInstallRequest
 	for _, request := range requests {
 		status := installRequestDisplayStatus(request.Status)
 		key := toolchainInstallRequestKey(request)
-		if status != "approved" {
+		if requireApproval && status != "approved" {
 			plan.Skipped = append(plan.Skipped, ToolchainInstallDispatchSkip{
 				Request: request,
 				Reason:  "not-approved: " + status,
@@ -2396,7 +3132,7 @@ func toolchainInstallDispatchPlanFromRequests(requests []ToolchainInstallRequest
 			skipped[key] = true
 			continue
 		}
-		if reason := toolchainInstallMissingOrUnapprovedDependencyReason(request, requestByDependency); reason != "" {
+		if reason := toolchainInstallMissingOrUnapprovedDependencyReason(request, requestByDependency, requireApproval); reason != "" {
 			plan.Skipped = append(plan.Skipped, ToolchainInstallDispatchSkip{Request: request, Reason: reason})
 			skipped[key] = true
 			continue
@@ -2410,7 +3146,7 @@ func toolchainInstallDispatchPlanFromRequests(requests []ToolchainInstallRequest
 			if _, ok := waiting[key]; !ok {
 				continue
 			}
-			if reason := toolchainInstallBlockedDependencyReason(request, requestByDependency, skipped, emitted); reason != "" {
+			if reason := toolchainInstallBlockedDependencyReason(request, requestByDependency, skipped, emitted, requireApproval); reason != "" {
 				plan.Skipped = append(plan.Skipped, ToolchainInstallDispatchSkip{Request: request, Reason: reason})
 				skipped[key] = true
 				delete(waiting, key)
@@ -2433,9 +3169,16 @@ func toolchainInstallDispatchPlanFromRequests(requests []ToolchainInstallRequest
 			if _, ok := waiting[key]; !ok {
 				continue
 			}
-			reason := "dependency-not-approved: unresolved status=blocked"
+			reason := "dependency-unresolved: cycle"
+			if requireApproval {
+				reason = "dependency-not-approved: unresolved status=blocked"
+			}
 			if len(request.DependsOn) > 0 {
-				reason = fmt.Sprintf("dependency-not-approved: %s status=blocked", strings.TrimSpace(request.DependsOn[0]))
+				if requireApproval {
+					reason = fmt.Sprintf("dependency-not-approved: %s status=blocked", strings.TrimSpace(request.DependsOn[0]))
+				} else {
+					reason = fmt.Sprintf("dependency-unresolved: %s status=blocked", strings.TrimSpace(request.DependsOn[0]))
+				}
 			}
 			plan.Skipped = append(plan.Skipped, ToolchainInstallDispatchSkip{Request: request, Reason: reason})
 			skipped[key] = true
@@ -2445,7 +3188,7 @@ func toolchainInstallDispatchPlanFromRequests(requests []ToolchainInstallRequest
 	return plan
 }
 
-func toolchainInstallMissingOrUnapprovedDependencyReason(request ToolchainInstallRequest, requestsByDependency map[string]ToolchainInstallRequest) string {
+func toolchainInstallMissingOrUnapprovedDependencyReason(request ToolchainInstallRequest, requestsByDependency map[string]ToolchainInstallRequest, requireApproval bool) string {
 	for _, dependency := range request.DependsOn {
 		dependency = strings.TrimSpace(dependency)
 		if dependency == "" {
@@ -2456,14 +3199,14 @@ func toolchainInstallMissingOrUnapprovedDependencyReason(request ToolchainInstal
 			return fmt.Sprintf("dependency-not-approved: %s status=missing-request", dependency)
 		}
 		status := installRequestDisplayStatus(prerequisite.Status)
-		if status != "approved" {
+		if requireApproval && status != "approved" {
 			return fmt.Sprintf("dependency-not-approved: %s status=%s", dependency, status)
 		}
 	}
 	return ""
 }
 
-func toolchainInstallBlockedDependencyReason(request ToolchainInstallRequest, requestsByDependency map[string]ToolchainInstallRequest, skipped map[string]bool, emitted map[string]bool) string {
+func toolchainInstallBlockedDependencyReason(request ToolchainInstallRequest, requestsByDependency map[string]ToolchainInstallRequest, skipped map[string]bool, emitted map[string]bool, requireApproval bool) string {
 	for _, dependency := range request.DependsOn {
 		dependency = strings.TrimSpace(dependency)
 		if dependency == "" {
@@ -2476,7 +3219,7 @@ func toolchainInstallBlockedDependencyReason(request ToolchainInstallRequest, re
 		prerequisiteKey := toolchainInstallRequestKey(prerequisite)
 		status := installRequestDisplayStatus(prerequisite.Status)
 		switch {
-		case status != "approved":
+		case requireApproval && status != "approved":
 			return fmt.Sprintf("dependency-not-approved: %s status=%s", dependency, status)
 		case skipped[prerequisiteKey]:
 			return fmt.Sprintf("dependency-not-approved: %s status=blocked", dependency)
@@ -2904,27 +3647,120 @@ func writeAuthoredToolArtifactFile(path string, data []byte, label string) error
 		return err
 	}
 	data = append(append([]byte(nil), data...), '\n')
-	tmpPath := path + ".tmp"
-	if err := rejectUnsafeAuthoredToolFile(tmpPath, label+" temp file"); err != nil {
-		return err
+	tmpFile, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return fmt.Errorf("create %s temp file: %w", label, err)
 	}
-	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
+	tmpPath := tmpFile.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmpFile.Write(data); err != nil {
+		_ = tmpFile.Close()
 		return fmt.Errorf("write %s: %w", label, err)
 	}
+	if err := tmpFile.Chmod(0o644); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("chmod %s temp file: %w", label, err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("close %s temp file: %w", label, err)
+	}
+	if err := rejectUnsafeAuthoredToolFile(path, label); err != nil {
+		return err
+	}
 	if err := os.Rename(tmpPath, path); err != nil {
-		_ = os.Remove(tmpPath)
 		return fmt.Errorf("publish %s: %w", label, err)
 	}
+	cleanup = false
 	return nil
 }
 
 type managedToolBundleManifest struct {
-	Name    string `yaml:"name"`
-	Kind    string `yaml:"kind"`
-	Version string `yaml:"version"`
-	Source  string `yaml:"source"`
-	Payload string `yaml:"payload"`
-	SHA256  string `yaml:"sha256"`
+	Name       string                               `yaml:"name"`
+	Kind       string                               `yaml:"kind"`
+	Version    string                               `yaml:"version"`
+	Source     string                               `yaml:"source"`
+	Payload    string                               `yaml:"payload"`
+	SHA256     string                               `yaml:"sha256"`
+	Provenance *managedToolBundleManifestProvenance `yaml:"provenance"`
+	Corpus     *managedToolBundleManifestCorpus     `yaml:"corpus"`
+	Signature  *managedToolBundleManifestSignature  `yaml:"signature"`
+	Update     *managedToolBundleManifestUpdate     `yaml:"update"`
+}
+
+type managedToolBundleManifestProvenance struct {
+	SourceURL       string `yaml:"source_url"`
+	UpstreamVersion string `yaml:"upstream_version"`
+	RetrievedAt     string `yaml:"retrieved_at"`
+	VerifiedBy      string `yaml:"verified_by"`
+}
+
+type managedToolBundleManifestCorpus struct {
+	Schema          string `yaml:"schema"`
+	Name            string `yaml:"name"`
+	Source          string `yaml:"source"`
+	RetrievedAt     string `yaml:"retrieved_at"`
+	FileCount       int    `yaml:"file_count"`
+	SHA256          string `yaml:"sha256"`
+	DigestAlgorithm string `yaml:"digest_algorithm"`
+	DigestScope     string `yaml:"digest_scope"`
+}
+
+type managedToolBundleManifestUpdate struct {
+	LatestVersion string `yaml:"latest_version"`
+	LatestSHA256  string `yaml:"latest_sha256"`
+	CheckedAt     string `yaml:"checked_at"`
+	Message       string `yaml:"message"`
+}
+
+type managedToolBundleManifestSignature struct {
+	Algorithm     string `yaml:"algorithm"`
+	KeyID         string `yaml:"key_id"`
+	PublicKey     string `yaml:"public_key"`
+	PayloadSHA256 string `yaml:"payload_sha256"`
+	Signature     string `yaml:"signature"`
+	SignedAt      string `yaml:"signed_at"`
+	SignedBy      string `yaml:"signed_by"`
+}
+
+type managedToolBundleProvenanceMetadata struct {
+	Status          string
+	SourceURL       string
+	UpstreamVersion string
+	RetrievedAt     string
+	VerifiedBy      string
+}
+
+type managedToolBundleCorpusMetadata struct {
+	Status          string
+	Name            string
+	Source          string
+	RetrievedAt     string
+	FileCount       int
+	SHA256          string
+	DigestStatus    string
+	DigestAlgorithm string
+	DigestScope     string
+}
+
+type managedToolBundleSignatureMetadata struct {
+	Status    string
+	Algorithm string
+	KeyID     string
+	SignedAt  string
+	SignedBy  string
+}
+
+type managedToolBundleUpdateMetadata struct {
+	Status        string
+	LatestVersion string
+	LatestSHA256  string
+	CheckedAt     string
+	Message       string
 }
 
 func ListManagedToolBundles(root string) ([]ManagedToolBundle, error) {
@@ -2950,11 +3786,1864 @@ func ListManagedToolBundles(root string) ([]ManagedToolBundle, error) {
 	for _, path := range paths {
 		bundle, err := readManagedToolBundle(root, filepath.Dir(path))
 		if err != nil {
-			return nil, err
+			bundles = append(bundles, managedToolBundleStatusFromError(filepath.Dir(path), path, err))
+			continue
 		}
 		bundles = append(bundles, bundle)
 	}
 	return bundles, nil
+}
+
+func managedToolBundleStatusFromError(dir string, manifestPath string, err error) ManagedToolBundle {
+	name := filepath.Base(dir)
+	if strings.TrimSpace(name) == "." || strings.TrimSpace(name) == string(os.PathSeparator) {
+		name = "unknown"
+	}
+	return ManagedToolBundle{
+		Status:             "blocked",
+		Name:               name,
+		ProvenanceStatus:   "blocked",
+		CorpusStatus:       "blocked",
+		CorpusDigestStatus: "blocked",
+		SignatureStatus:    "blocked",
+		UpdateStatus:       "blocked",
+		BundleDir:          dir,
+		ManifestPath:       manifestPath,
+		Error:              err.Error(),
+	}
+}
+
+func ListReleaseManagedToolBundles(releaseRoot string) ([]ReleaseManagedToolBundle, error) {
+	dir, err := releaseManagedToolBundleRoot(releaseRoot)
+	if err != nil {
+		return nil, err
+	}
+	if err := rejectUnsafeAuthoredToolDirectory(dir, "release managed bundle root"); err != nil {
+		return nil, err
+	}
+	if _, err := os.Lstat(dir); os.IsNotExist(err) {
+		return []ReleaseManagedToolBundle{}, nil
+	}
+	paths, err := filepath.Glob(filepath.Join(dir, "*", "bundle.yaml"))
+	if err != nil {
+		return nil, fmt.Errorf("glob release managed tool bundles: %w", err)
+	}
+	sort.Strings(paths)
+	bundles := make([]ReleaseManagedToolBundle, 0, len(paths))
+	for _, path := range paths {
+		bundle, err := readReleaseManagedToolBundle(filepath.Dir(path))
+		if err != nil {
+			bundles = append(bundles, releaseManagedToolBundleStatusFromError(filepath.Dir(path), path, err))
+			continue
+		}
+		bundles = append(bundles, bundle)
+	}
+	return bundles, nil
+}
+
+func ReadReleaseManagedToolBundle(releaseRoot, name string) (ReleaseManagedToolBundle, error) {
+	dir, err := releaseManagedToolBundleDir(releaseRoot, name)
+	if err != nil {
+		return ReleaseManagedToolBundle{}, err
+	}
+	return readReleaseManagedToolBundle(dir)
+}
+
+func ListReleaseManagedToolBundleStatuses(root, releaseRoot string) ([]ReleaseManagedToolBundleStatus, error) {
+	return listReleaseManagedToolBundleStatusesWithExpectedSHA(root, releaseRoot, "", "")
+}
+
+func listReleaseManagedToolBundleStatusesWithExpectedSHA(root, releaseRoot, expectedBundle, expectedSHA string) ([]ReleaseManagedToolBundleStatus, error) {
+	if err := requireAuthoredToolWorkspace(root); err != nil {
+		return nil, err
+	}
+	expectedBundle = strings.TrimSpace(expectedBundle)
+	if expectedBundle != "" {
+		safeName, err := validateAuthoredToolName(expectedBundle)
+		if err != nil {
+			return nil, err
+		}
+		expectedBundle = safeName
+	}
+	expectedSHA = strings.TrimSpace(expectedSHA)
+	if expectedBundle == "" && expectedSHA != "" {
+		return nil, fmt.Errorf("release managed status source expected sha256 requires pin bundle")
+	}
+	if expectedBundle != "" {
+		normalized, err := normalizeManagedToolBundleExpectedSHA256(expectedSHA, true)
+		if err != nil {
+			return nil, err
+		}
+		expectedSHA = normalized
+	}
+	bundles, err := ListReleaseManagedToolBundles(releaseRoot)
+	if err != nil {
+		return nil, err
+	}
+	statuses := make([]ReleaseManagedToolBundleStatus, 0, len(bundles))
+	pinFound := expectedBundle == ""
+	for _, bundle := range bundles {
+		statusExpectedSHA := ""
+		if expectedBundle != "" && bundle.Name == expectedBundle {
+			statusExpectedSHA = expectedSHA
+			pinFound = true
+		}
+		statuses = append(statuses, releaseManagedToolBundleStatusForWorkspaceWithExpectedSHA(root, bundle, statusExpectedSHA))
+	}
+	if !pinFound {
+		return nil, fmt.Errorf("release managed status source pin bundle not found: %s", expectedBundle)
+	}
+	sort.SliceStable(statuses, func(i, j int) bool {
+		return statuses[i].Name < statuses[j].Name
+	})
+	return statuses, nil
+}
+
+func ReadReleaseManagedToolBundleStatus(root, releaseRoot, name string) (ReleaseManagedToolBundleStatus, error) {
+	return ReadReleaseManagedToolBundleStatusWithOptions(root, releaseRoot, name, ReleaseManagedToolBundleStatusOptions{})
+}
+
+func ReadReleaseManagedToolBundleStatusWithOptions(root, releaseRoot, name string, options ReleaseManagedToolBundleStatusOptions) (ReleaseManagedToolBundleStatus, error) {
+	if err := requireAuthoredToolWorkspace(root); err != nil {
+		return ReleaseManagedToolBundleStatus{}, err
+	}
+	expectedSHA, err := normalizeManagedToolBundleExpectedSHA256(options.ExpectedSHA256, options.ExpectedSHA256Provided)
+	if err != nil {
+		return ReleaseManagedToolBundleStatus{}, err
+	}
+	dir, err := releaseManagedToolBundleDir(releaseRoot, name)
+	if err != nil {
+		return ReleaseManagedToolBundleStatus{}, err
+	}
+	bundle, err := readReleaseManagedToolBundle(dir)
+	if err != nil {
+		bundle = releaseManagedToolBundleStatusFromError(dir, filepath.Join(dir, "bundle.yaml"), err)
+	}
+	return releaseManagedToolBundleStatusForWorkspaceWithExpectedSHA(root, bundle, expectedSHA), nil
+}
+
+func releaseManagedStatusSourceExpectedPin(expectedBundle, expectedSHA string, expectedSHAProvided bool) (string, string, error) {
+	expectedBundle = strings.TrimSpace(expectedBundle)
+	expectedSHA = strings.TrimSpace(expectedSHA)
+	hasExpectedSHA := expectedSHAProvided || expectedSHA != ""
+	if expectedBundle == "" && !hasExpectedSHA {
+		return "", "", nil
+	}
+	if expectedBundle == "" {
+		return "", "", fmt.Errorf("release managed status source --expected-sha256 requires --pin-bundle")
+	}
+	if !hasExpectedSHA {
+		return "", "", fmt.Errorf("release managed status source --pin-bundle requires --expected-sha256")
+	}
+	safeName, err := validateAuthoredToolName(expectedBundle)
+	if err != nil {
+		return "", "", err
+	}
+	normalizedSHA, err := normalizeManagedToolBundleExpectedSHA256(expectedSHA, true)
+	if err != nil {
+		return "", "", err
+	}
+	return safeName, normalizedSHA, nil
+}
+
+func releaseManagedStatusSourceExpectedSHAStatus(statuses []ReleaseManagedToolBundleStatus, expectedBundle string) string {
+	expectedBundle = strings.TrimSpace(expectedBundle)
+	if expectedBundle == "" {
+		return ""
+	}
+	for _, status := range statuses {
+		if status.Name == expectedBundle {
+			return status.ExpectedSHA256Status
+		}
+	}
+	return ""
+}
+
+func SetReleaseManagedToolBundleStatusSource(root, releaseRoot string, options ReleaseManagedToolBundleStatusSourceOptions) (ReleaseManagedToolBundleStatusSource, error) {
+	if !options.Set {
+		return ReleaseManagedToolBundleStatusSource{}, fmt.Errorf("release managed status source set requires --set")
+	}
+	expectedBundle, expectedSHA, err := releaseManagedStatusSourceExpectedPin(options.ExpectedSHA256Bundle, options.ExpectedSHA256, options.ExpectedSHA256Provided)
+	if err != nil {
+		return ReleaseManagedToolBundleStatusSource{}, err
+	}
+	statuses, err := listReleaseManagedToolBundleStatusesWithExpectedSHA(root, releaseRoot, expectedBundle, expectedSHA)
+	if err != nil {
+		return ReleaseManagedToolBundleStatusSource{}, err
+	}
+	path, err := releaseManagedToolBundleStatusSourcePath(root)
+	if err != nil {
+		return ReleaseManagedToolBundleStatusSource{}, err
+	}
+	source := releaseManagedToolBundleStatusSourceFromStatuses(path, releaseRoot, statuses)
+	source.Status = "current"
+	source.Mode = "metadata-only"
+	source.ExpectedSHA256Bundle = expectedBundle
+	source.ExpectedSHA256 = expectedSHA
+	source.ExpectedSHA256Status = releaseManagedStatusSourceExpectedSHAStatus(statuses, expectedBundle)
+	source.SetBy = installRequestDisplayValue(strings.TrimSpace(options.SetBy), "operator")
+	source.SetAt = time.Now().UTC().Format(time.RFC3339)
+	source.Reason = strings.TrimSpace(options.Reason)
+	if err := writeReleaseManagedToolBundleStatusSource(source); err != nil {
+		return ReleaseManagedToolBundleStatusSource{}, err
+	}
+	return source, nil
+}
+
+func ClearReleaseManagedToolBundleStatusSource(root string, options ReleaseManagedToolBundleStatusSourceClearOptions) (ReleaseManagedToolBundleStatusSource, error) {
+	if !options.Clear {
+		return ReleaseManagedToolBundleStatusSource{}, fmt.Errorf("release managed status source clear requires --clear")
+	}
+	path, err := releaseManagedToolBundleStatusSourcePath(root)
+	if err != nil {
+		return ReleaseManagedToolBundleStatusSource{}, err
+	}
+	source, found, err := ReadReleaseManagedToolBundleStatusSource(root)
+	if err != nil {
+		return ReleaseManagedToolBundleStatusSource{}, err
+	}
+	if !found {
+		source = ReleaseManagedToolBundleStatusSource{
+			Path: path,
+			Mode: "metadata-only",
+		}
+	}
+	source.Status = "cleared"
+	source.Mode = "metadata-only"
+	source.Path = path
+	source.ClearedBy = installRequestDisplayValue(strings.TrimSpace(options.ClearedBy), "operator")
+	source.ClearedAt = time.Now().UTC().Format(time.RFC3339)
+	source.Reason = strings.TrimSpace(options.Reason)
+	if err := writeReleaseManagedToolBundleStatusSource(source); err != nil {
+		return ReleaseManagedToolBundleStatusSource{}, err
+	}
+	return source, nil
+}
+
+func ReadReleaseManagedToolBundleStatusSource(root string) (ReleaseManagedToolBundleStatusSource, bool, error) {
+	if err := requireAuthoredToolWorkspace(root); err != nil {
+		return ReleaseManagedToolBundleStatusSource{}, false, err
+	}
+	path, err := releaseManagedToolBundleStatusSourcePath(root)
+	if err != nil {
+		return ReleaseManagedToolBundleStatusSource{}, false, err
+	}
+	if err := rejectUnsafeAuthoredToolFile(path, "release managed status source marker"); err != nil {
+		return ReleaseManagedToolBundleStatusSource{}, false, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return ReleaseManagedToolBundleStatusSource{}, false, nil
+		}
+		return ReleaseManagedToolBundleStatusSource{}, false, fmt.Errorf("read release managed status source marker %s: %w", path, err)
+	}
+	var source ReleaseManagedToolBundleStatusSource
+	if err := json.Unmarshal(data, &source); err != nil {
+		return ReleaseManagedToolBundleStatusSource{}, false, fmt.Errorf("parse release managed status source marker %s: %w", path, err)
+	}
+	if strings.TrimSpace(source.Path) == "" {
+		source.Path = path
+	}
+	if strings.TrimSpace(source.Mode) == "" {
+		source.Mode = "metadata-only"
+	}
+	return source, true, nil
+}
+
+func CreateManagedToolBundleUpdateRequest(root, releaseRoot, name string, options ManagedToolBundleUpdateRequestOptions) (ManagedToolBundleUpdateRequest, error) {
+	if !options.Request {
+		return ManagedToolBundleUpdateRequest{}, fmt.Errorf("managed bundle update request requires --request")
+	}
+	if err := requireAuthoredToolWorkspace(root); err != nil {
+		return ManagedToolBundleUpdateRequest{}, err
+	}
+	safeName, err := validateAuthoredToolName(name)
+	if err != nil {
+		return ManagedToolBundleUpdateRequest{}, err
+	}
+	bundle, err := ReadReleaseManagedToolBundle(releaseRoot, safeName)
+	if err != nil {
+		return ManagedToolBundleUpdateRequest{}, err
+	}
+	if bundle.Status != "available" {
+		return ManagedToolBundleUpdateRequest{}, fmt.Errorf("managed bundle update request requires available release bundle, got %s", installRequestDisplayValue(bundle.Status, "unknown"))
+	}
+	if strings.TrimSpace(bundle.UpdateStatus) != "update_available" {
+		return ManagedToolBundleUpdateRequest{}, fmt.Errorf("managed bundle update request requires update_status=update_available, got %s", installRequestDisplayValue(bundle.UpdateStatus, "unknown"))
+	}
+	releaseRootAbs, err := filepath.Abs(releaseRoot)
+	if err != nil {
+		return ManagedToolBundleUpdateRequest{}, fmt.Errorf("resolve release root: %w", err)
+	}
+	request := ManagedToolBundleUpdateRequest{
+		Status:              "pending",
+		Mode:                "metadata-only",
+		Name:                bundle.Name,
+		Kind:                bundle.Kind,
+		Source:              bundle.Source,
+		CurrentVersion:      bundle.Version,
+		CurrentSHA256:       bundle.SHA256,
+		LatestVersion:       bundle.UpdateLatestVersion,
+		LatestSHA256:        bundle.UpdateLatestSHA256,
+		UpdateStatus:        bundle.UpdateStatus,
+		UpdateCheckedAt:     bundle.UpdateCheckedAt,
+		UpdateMessage:       bundle.UpdateMessage,
+		ReleaseRoot:         releaseRootAbs,
+		ReleaseBundleDir:    bundle.ReleaseBundleDir,
+		ReleaseManifestPath: bundle.ReleaseManifestPath,
+		ReleasePayloadPath:  bundle.ReleasePayloadPath,
+		RequestedBy:         installRequestDisplayValue(strings.TrimSpace(options.RequestedBy), "operator"),
+		RequestedAt:         time.Now().UTC().Format(time.RFC3339),
+		Reason:              strings.TrimSpace(options.Reason),
+	}
+	dir := managedToolBundleUpdateRequestDir(root)
+	if err := ensureAuthoredToolDirectory(dir, "managed bundle update request directory"); err != nil {
+		return ManagedToolBundleUpdateRequest{}, err
+	}
+	request.Path = filepath.Join(dir, safeManagedToolBundleUpdateRequestName(request)+".json")
+	data, err := json.MarshalIndent(request, "", "  ")
+	if err != nil {
+		return ManagedToolBundleUpdateRequest{}, fmt.Errorf("encode managed bundle update request: %w", err)
+	}
+	if err := writeAuthoredToolArtifactFile(request.Path, data, "managed bundle update request"); err != nil {
+		return ManagedToolBundleUpdateRequest{}, err
+	}
+	return request, nil
+}
+
+func ListManagedToolBundleUpdateRequests(root string) ([]ManagedToolBundleUpdateRequest, error) {
+	if err := requireAuthoredToolWorkspace(root); err != nil {
+		return nil, err
+	}
+	if err := rejectUnsafeAuthoredToolDirectory(managedToolBundleUpdateRequestDir(root), "managed bundle update request directory"); err != nil {
+		return nil, err
+	}
+	paths, err := filepath.Glob(filepath.Join(managedToolBundleUpdateRequestDir(root), "*.json"))
+	if err != nil {
+		return nil, fmt.Errorf("glob managed bundle update requests: %w", err)
+	}
+	sort.Strings(paths)
+	requests := make([]ManagedToolBundleUpdateRequest, 0, len(paths))
+	for _, path := range paths {
+		request, err := readManagedToolBundleUpdateRequestPath(path)
+		if err != nil {
+			return nil, err
+		}
+		request.Path = path
+		requests = append(requests, request)
+	}
+	return requests, nil
+}
+
+func ReadManagedToolBundleUpdateRequest(root, requestPath string) (ManagedToolBundleUpdateRequest, error) {
+	if err := requireAuthoredToolWorkspace(root); err != nil {
+		return ManagedToolBundleUpdateRequest{}, err
+	}
+	path, err := resolveManagedToolBundleUpdateRequestPath(root, requestPath)
+	if err != nil {
+		return ManagedToolBundleUpdateRequest{}, err
+	}
+	request, err := readManagedToolBundleUpdateRequestPath(path)
+	if err != nil {
+		return ManagedToolBundleUpdateRequest{}, err
+	}
+	request.Path = path
+	return request, nil
+}
+
+func SummarizeManagedToolBundleUpdateRequests(requests []ManagedToolBundleUpdateRequest) ManagedToolBundleUpdateRequestSummary {
+	summary := ManagedToolBundleUpdateRequestSummary{Total: len(requests)}
+	for _, request := range requests {
+		if strings.TrimSpace(request.Status) == "pending" {
+			summary.Pending++
+		}
+	}
+	return summary
+}
+
+func (summary ManagedToolBundleUpdateRequestSummary) Line() string {
+	return fmt.Sprintf("total=%d pending=%d", summary.Total, summary.Pending)
+}
+
+func readManagedToolBundleUpdateRequestPath(path string) (ManagedToolBundleUpdateRequest, error) {
+	if err := rejectUnsafeAuthoredToolFile(path, "managed bundle update request"); err != nil {
+		return ManagedToolBundleUpdateRequest{}, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ManagedToolBundleUpdateRequest{}, fmt.Errorf("read managed bundle update request %s: %w", path, err)
+	}
+	var request ManagedToolBundleUpdateRequest
+	if err := json.Unmarshal(data, &request); err != nil {
+		return ManagedToolBundleUpdateRequest{}, fmt.Errorf("decode managed bundle update request %s: %w", path, err)
+	}
+	if strings.TrimSpace(request.Mode) == "" {
+		request.Mode = "metadata-only"
+	}
+	return request, nil
+}
+
+func CreateManagedToolBundleUpdateDownloadPlan(root, requestPath string, options ManagedToolBundleUpdateDownloadPlanOptions) (ManagedToolBundleUpdateDownloadPlan, error) {
+	if !options.Plan {
+		return ManagedToolBundleUpdateDownloadPlan{}, fmt.Errorf("managed bundle update download plan requires --plan")
+	}
+	if err := requireAuthoredToolWorkspace(root); err != nil {
+		return ManagedToolBundleUpdateDownloadPlan{}, err
+	}
+	request, err := ReadManagedToolBundleUpdateRequest(root, requestPath)
+	if err != nil {
+		return ManagedToolBundleUpdateDownloadPlan{}, err
+	}
+	if strings.TrimSpace(request.Status) != "pending" {
+		return ManagedToolBundleUpdateDownloadPlan{}, fmt.Errorf("managed bundle update download plan requires pending request, got %s", installRequestDisplayValue(request.Status, "unknown"))
+	}
+	if strings.TrimSpace(request.Mode) != "" && strings.TrimSpace(request.Mode) != "metadata-only" {
+		return ManagedToolBundleUpdateDownloadPlan{}, fmt.Errorf("managed bundle update download plan requires metadata-only request, got %s", request.Mode)
+	}
+	if strings.TrimSpace(request.UpdateStatus) != "update_available" {
+		return ManagedToolBundleUpdateDownloadPlan{}, fmt.Errorf("managed bundle update download plan requires update_status=update_available, got %s", installRequestDisplayValue(request.UpdateStatus, "unknown"))
+	}
+	sourceURL, err := normalizeManagedToolBundleUpdateDownloadSourceURL(options.SourceURL)
+	if err != nil {
+		return ManagedToolBundleUpdateDownloadPlan{}, err
+	}
+	expectedSHA, err := normalizeManagedToolBundleUpdateDownloadExpectedSHA256(options.ExpectedSHA256)
+	if err != nil {
+		return ManagedToolBundleUpdateDownloadPlan{}, err
+	}
+	latestSHA := strings.ToLower(strings.TrimSpace(request.LatestSHA256))
+	if latestSHA != "" && expectedSHA != latestSHA {
+		return ManagedToolBundleUpdateDownloadPlan{}, fmt.Errorf("managed bundle update download plan expected sha256 mismatch: expected %s latest %s", expectedSHA, latestSHA)
+	}
+	archiveFormat, archiveExpectedSHA, archiveExpectedStatus, err := normalizeManagedToolBundleUpdateArchivePlanMetadata(request.Kind, options.ArchiveFormat, options.ArchiveExpectedSHA256)
+	if err != nil {
+		return ManagedToolBundleUpdateDownloadPlan{}, err
+	}
+	plan := ManagedToolBundleUpdateDownloadPlan{
+		Status:                      "pending",
+		Mode:                        "metadata-only",
+		Name:                        request.Name,
+		Kind:                        request.Kind,
+		Source:                      request.Source,
+		CurrentVersion:              request.CurrentVersion,
+		CurrentSHA256:               request.CurrentSHA256,
+		LatestVersion:               request.LatestVersion,
+		LatestSHA256:                request.LatestSHA256,
+		UpdateStatus:                request.UpdateStatus,
+		UpdateCheckedAt:             request.UpdateCheckedAt,
+		UpdateMessage:               request.UpdateMessage,
+		ExpectedSHA256:              expectedSHA,
+		ExpectedSHA256Status:        releaseManagedExpectedSHA256Status(expectedSHA, latestSHA),
+		ArchiveFormat:               archiveFormat,
+		ArchiveExpectedSHA256:       archiveExpectedSHA,
+		ArchiveExpectedSHA256Status: archiveExpectedStatus,
+		SourceURL:                   sourceURL,
+		RequestPath:                 request.Path,
+		ReleaseRoot:                 request.ReleaseRoot,
+		ReleaseBundleDir:            request.ReleaseBundleDir,
+		ReleaseManifestPath:         request.ReleaseManifestPath,
+		ReleasePayloadPath:          request.ReleasePayloadPath,
+		PlannedBy:                   installRequestDisplayValue(strings.TrimSpace(options.PlannedBy), "operator"),
+		PlannedAt:                   time.Now().UTC().Format(time.RFC3339),
+		Reason:                      strings.TrimSpace(options.Reason),
+	}
+	dir := managedToolBundleUpdateDownloadPlanDir(root)
+	if err := ensureAuthoredToolDirectory(dir, "managed bundle update download plan directory"); err != nil {
+		return ManagedToolBundleUpdateDownloadPlan{}, err
+	}
+	plan.Path = filepath.Join(dir, safeManagedToolBundleUpdateDownloadPlanName(plan)+".json")
+	data, err := json.MarshalIndent(plan, "", "  ")
+	if err != nil {
+		return ManagedToolBundleUpdateDownloadPlan{}, fmt.Errorf("encode managed bundle update download plan: %w", err)
+	}
+	if err := writeAuthoredToolArtifactFile(plan.Path, data, "managed bundle update download plan"); err != nil {
+		return ManagedToolBundleUpdateDownloadPlan{}, err
+	}
+	return plan, nil
+}
+
+func ListManagedToolBundleUpdateDownloadPlans(root string) ([]ManagedToolBundleUpdateDownloadPlan, error) {
+	if err := requireAuthoredToolWorkspace(root); err != nil {
+		return nil, err
+	}
+	if err := rejectUnsafeAuthoredToolDirectory(managedToolBundleUpdateDownloadPlanDir(root), "managed bundle update download plan directory"); err != nil {
+		return nil, err
+	}
+	paths, err := filepath.Glob(filepath.Join(managedToolBundleUpdateDownloadPlanDir(root), "*.json"))
+	if err != nil {
+		return nil, fmt.Errorf("glob managed bundle update download plans: %w", err)
+	}
+	sort.Strings(paths)
+	plans := make([]ManagedToolBundleUpdateDownloadPlan, 0, len(paths))
+	for _, path := range paths {
+		plan, err := readManagedToolBundleUpdateDownloadPlanPath(path)
+		if err != nil {
+			return nil, err
+		}
+		plan.Path = path
+		plans = append(plans, plan)
+	}
+	return plans, nil
+}
+
+func ReadManagedToolBundleUpdateDownloadPlan(root, planPath string) (ManagedToolBundleUpdateDownloadPlan, error) {
+	if err := requireAuthoredToolWorkspace(root); err != nil {
+		return ManagedToolBundleUpdateDownloadPlan{}, err
+	}
+	path, err := resolveManagedToolBundleUpdateDownloadPlanPath(root, planPath)
+	if err != nil {
+		return ManagedToolBundleUpdateDownloadPlan{}, err
+	}
+	plan, err := readManagedToolBundleUpdateDownloadPlanPath(path)
+	if err != nil {
+		return ManagedToolBundleUpdateDownloadPlan{}, err
+	}
+	plan.Path = path
+	return plan, nil
+}
+
+func SummarizeManagedToolBundleUpdateDownloadPlans(plans []ManagedToolBundleUpdateDownloadPlan) ManagedToolBundleUpdateDownloadPlanSummary {
+	summary := ManagedToolBundleUpdateDownloadPlanSummary{Total: len(plans)}
+	for _, plan := range plans {
+		if strings.TrimSpace(plan.Status) == "pending" {
+			summary.Pending++
+		}
+	}
+	return summary
+}
+
+func (summary ManagedToolBundleUpdateDownloadPlanSummary) Line() string {
+	return fmt.Sprintf("total=%d pending=%d", summary.Total, summary.Pending)
+}
+
+func readManagedToolBundleUpdateDownloadPlanPath(path string) (ManagedToolBundleUpdateDownloadPlan, error) {
+	if err := rejectUnsafeAuthoredToolFile(path, "managed bundle update download plan"); err != nil {
+		return ManagedToolBundleUpdateDownloadPlan{}, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ManagedToolBundleUpdateDownloadPlan{}, fmt.Errorf("read managed bundle update download plan %s: %w", path, err)
+	}
+	var plan ManagedToolBundleUpdateDownloadPlan
+	if err := json.Unmarshal(data, &plan); err != nil {
+		return ManagedToolBundleUpdateDownloadPlan{}, fmt.Errorf("decode managed bundle update download plan %s: %w", path, err)
+	}
+	if strings.TrimSpace(plan.Mode) == "" {
+		plan.Mode = "metadata-only"
+	}
+	return plan, nil
+}
+
+func normalizeManagedToolBundleUpdateDownloadSourceURL(value string) (string, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return "", fmt.Errorf("managed bundle update download plan source url is required")
+	}
+	if strings.ContainsAny(trimmed, " \t\r\n") {
+		return "", fmt.Errorf("managed bundle update download plan source url must not contain whitespace")
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return "", fmt.Errorf("managed bundle update download plan source url is invalid: %w", err)
+	}
+	if !strings.EqualFold(parsed.Scheme, "https") {
+		return "", fmt.Errorf("managed bundle update download plan source url must use https")
+	}
+	if strings.TrimSpace(parsed.Hostname()) == "" {
+		return "", fmt.Errorf("managed bundle update download plan source url requires host")
+	}
+	if parsed.User != nil {
+		return "", fmt.Errorf("managed bundle update download plan source url must not include userinfo")
+	}
+	if strings.TrimSpace(parsed.RawQuery) != "" {
+		return "", fmt.Errorf("managed bundle update download plan source url must not include query")
+	}
+	if strings.TrimSpace(parsed.Fragment) != "" {
+		return "", fmt.Errorf("managed bundle update download plan source url must not include fragment")
+	}
+	return parsed.String(), nil
+}
+
+func normalizeManagedToolBundleUpdateDownloadExpectedSHA256(value string) (string, error) {
+	normalized, err := normalizeManagedToolBundleExpectedSHA256(value, true)
+	if err != nil {
+		return "", fmt.Errorf("managed bundle update download plan expected sha256 is invalid")
+	}
+	return normalized, nil
+}
+
+func normalizeManagedToolBundleUpdateArchivePlanMetadata(kind, archiveFormat, archiveExpectedSHA string) (string, string, string, error) {
+	format := strings.ToLower(strings.TrimSpace(archiveFormat))
+	expected := strings.TrimSpace(archiveExpectedSHA)
+	if format == "" && expected == "" {
+		return "", "", "none", nil
+	}
+	switch strings.TrimSpace(kind) {
+	case "binary", "rule_bundle":
+	default:
+		return "", "", "", fmt.Errorf("managed bundle update archive metadata is supported only for binary or rule_bundle updates")
+	}
+	if format == "" {
+		return "", "", "", fmt.Errorf("managed bundle update archive format is required")
+	}
+	if format != "tar.gz" && format != "zip" {
+		return "", "", "", fmt.Errorf("managed bundle update archive format is unsupported: %s", format)
+	}
+	normalizedExpected, err := normalizeManagedToolBundleExpectedSHA256(expected, true)
+	if err != nil {
+		return "", "", "", fmt.Errorf("managed bundle update archive expected sha256 is invalid")
+	}
+	return format, normalizedExpected, "matched", nil
+}
+
+const managedToolBundleUpdateDownloadMaxBytes int64 = 512 * 1024 * 1024
+
+func ExecuteManagedToolBundleUpdateDownloadPlan(root, planPath string, options ManagedToolBundleUpdateDownloadExecutionOptions) (ManagedToolBundleUpdateDownloadExecution, error) {
+	if !options.Execute {
+		return ManagedToolBundleUpdateDownloadExecution{}, fmt.Errorf("managed bundle update download execution requires explicit execute")
+	}
+	doctor, err := DoctorWorkspaceWithOptions(root, DoctorOptions{RequireSafetyAuthorization: true})
+	if err != nil {
+		return ManagedToolBundleUpdateDownloadExecution{}, err
+	}
+	if !doctor.Ready {
+		return ManagedToolBundleUpdateDownloadExecution{}, fmt.Errorf("workspace is not ready: %v", doctor.Errors)
+	}
+	plan, err := ReadManagedToolBundleUpdateDownloadPlan(root, planPath)
+	if err != nil {
+		return ManagedToolBundleUpdateDownloadExecution{}, err
+	}
+	if strings.TrimSpace(plan.Status) != "pending" {
+		return ManagedToolBundleUpdateDownloadExecution{}, fmt.Errorf("managed bundle update download execution requires pending plan, got %s", installRequestDisplayValue(plan.Status, "unknown"))
+	}
+	if strings.TrimSpace(plan.Mode) != "" && strings.TrimSpace(plan.Mode) != "metadata-only" {
+		return ManagedToolBundleUpdateDownloadExecution{}, fmt.Errorf("managed bundle update download execution requires metadata-only plan, got %s", plan.Mode)
+	}
+	sourceURL, err := normalizeManagedToolBundleUpdateDownloadSourceURL(plan.SourceURL)
+	if err != nil {
+		return ManagedToolBundleUpdateDownloadExecution{}, err
+	}
+	expectedSHA, err := normalizeManagedToolBundleUpdateDownloadExpectedSHA256(plan.ExpectedSHA256)
+	if err != nil {
+		return ManagedToolBundleUpdateDownloadExecution{}, err
+	}
+	archiveFormat, archiveExpectedSHA, _, err := normalizeManagedToolBundleUpdateArchivePlanMetadata(plan.Kind, plan.ArchiveFormat, plan.ArchiveExpectedSHA256)
+	if err != nil {
+		return ManagedToolBundleUpdateDownloadExecution{}, err
+	}
+	if strings.TrimSpace(plan.Kind) == "rule_bundle" && archiveFormat == "" {
+		return ManagedToolBundleUpdateDownloadExecution{}, fmt.Errorf("managed bundle update download execution for rule_bundle requires archive metadata")
+	}
+	latestSHA := strings.ToLower(strings.TrimSpace(plan.LatestSHA256))
+	if latestSHA != "" && expectedSHA != latestSHA {
+		return ManagedToolBundleUpdateDownloadExecution{}, fmt.Errorf("managed bundle update download execution expected sha256 mismatch: expected %s latest %s", expectedSHA, latestSHA)
+	}
+	request, err := ReadManagedToolBundleUpdateRequest(root, plan.RequestPath)
+	if err != nil {
+		return ManagedToolBundleUpdateDownloadExecution{}, err
+	}
+	if err := validateManagedToolBundleUpdateDownloadPlanRequestStillMatches(plan, request, expectedSHA); err != nil {
+		return ManagedToolBundleUpdateDownloadExecution{}, err
+	}
+
+	execution := ManagedToolBundleUpdateDownloadExecution{
+		Status:                 "failed",
+		Mode:                   "execute",
+		Action:                 "download",
+		Name:                   plan.Name,
+		Kind:                   plan.Kind,
+		Source:                 plan.Source,
+		CurrentVersion:         plan.CurrentVersion,
+		CurrentSHA256:          plan.CurrentSHA256,
+		LatestVersion:          plan.LatestVersion,
+		LatestSHA256:           plan.LatestSHA256,
+		UpdateStatus:           plan.UpdateStatus,
+		UpdateCheckedAt:        plan.UpdateCheckedAt,
+		UpdateMessage:          plan.UpdateMessage,
+		SourceURL:              sourceURL,
+		ExpectedSHA256:         expectedSHA,
+		DigestStatus:           "unknown",
+		DigestAlgorithm:        "sha256",
+		DigestScope:            managedBundleDigestScope(plan.Kind),
+		ArchiveFormat:          archiveFormat,
+		ArchiveExpectedSHA256:  archiveExpectedSHA,
+		ArchiveDigestStatus:    archiveDigestStatusForDownloadExecution(archiveFormat),
+		ArchiveDigestAlgorithm: archiveDigestAlgorithmForDownloadExecution(archiveFormat),
+		ArchiveDigestScope:     archiveDigestScopeForDownloadExecution(archiveFormat),
+		PlanPath:               plan.Path,
+		RequestPath:            request.Path,
+		ReleaseRoot:            plan.ReleaseRoot,
+		ReleaseBundleDir:       plan.ReleaseBundleDir,
+		ReleaseManifestPath:    plan.ReleaseManifestPath,
+		ReleasePayloadPath:     plan.ReleasePayloadPath,
+		Actor:                  installRequestDisplayValue(strings.TrimSpace(options.Actor), "operator"),
+		ExecutedAt:             time.Now().UTC().Format(time.RFC3339),
+		Reason:                 strings.TrimSpace(options.Reason),
+	}
+
+	client := http.DefaultClient
+	if options.HTTPClient != nil {
+		client = options.HTTPClient
+	}
+	requestContext, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	httpRequest, err := http.NewRequestWithContext(requestContext, http.MethodGet, sourceURL, nil)
+	if err != nil {
+		return execution, err
+	}
+	httpRequest.Header.Set("Accept-Encoding", "identity")
+	response, err := managedToolBundleUpdateDownloadHTTPClient(client).Do(httpRequest)
+	if err != nil {
+		return writeManagedToolBundleUpdateDownloadExecutionError(root, &execution, fmt.Errorf("download managed bundle update payload: %w", err))
+	}
+	defer response.Body.Close()
+	execution.HTTPStatus = response.StatusCode
+	if response.ContentLength >= 0 {
+		execution.ContentLength = response.ContentLength
+		if response.ContentLength > managedToolBundleUpdateDownloadMaxBytes {
+			return writeManagedToolBundleUpdateDownloadExecutionError(root, &execution, fmt.Errorf("managed bundle update download payload is too large: content_length=%d max=%d", response.ContentLength, managedToolBundleUpdateDownloadMaxBytes))
+		}
+	}
+	if response.StatusCode != http.StatusOK {
+		if managedToolBundleUpdateDownloadHTTPStatusIsRedirect(response.StatusCode) {
+			execution.RedirectPolicy = "rejected"
+			execution.RedirectLocation, execution.RedirectLocationStatus = sanitizeManagedToolBundleUpdateRedirectLocation(response.Header.Get("Location"))
+			return writeManagedToolBundleUpdateDownloadExecutionError(root, &execution, fmt.Errorf("managed bundle update download redirect rejected: HTTP %d", response.StatusCode))
+		}
+		return writeManagedToolBundleUpdateDownloadExecutionError(root, &execution, fmt.Errorf("managed bundle update download expected HTTP 200, got %d", response.StatusCode))
+	}
+	if archiveFormat != "" {
+		archivePath, tmpPath, archiveActualSHA, bytesWritten, err := streamManagedToolBundleUpdateDownloadArchive(root, execution, response.Body)
+		execution.ArchiveActualSHA256 = archiveActualSHA
+		execution.BytesWritten = bytesWritten
+		if err != nil {
+			return writeManagedToolBundleUpdateDownloadExecutionError(root, &execution, err)
+		}
+		if archiveActualSHA != archiveExpectedSHA {
+			execution.ArchiveDigestStatus = "mismatch"
+			if tmpPath != "" {
+				_ = os.Remove(tmpPath)
+			}
+			return writeManagedToolBundleUpdateDownloadExecutionError(root, &execution, fmt.Errorf("managed bundle update download archive sha256 mismatch: expected %s actual %s", archiveExpectedSHA, archiveActualSHA))
+		}
+		if _, err := os.Lstat(archivePath); err == nil {
+			_ = os.Remove(tmpPath)
+			return writeManagedToolBundleUpdateDownloadExecutionError(root, &execution, fmt.Errorf("managed bundle update download archive already exists: %s", archivePath))
+		} else if err != nil && !os.IsNotExist(err) {
+			_ = os.Remove(tmpPath)
+			return writeManagedToolBundleUpdateDownloadExecutionError(root, &execution, fmt.Errorf("inspect managed bundle update download archive: %w", err))
+		}
+		if err := os.Rename(tmpPath, archivePath); err != nil {
+			_ = os.Remove(tmpPath)
+			return writeManagedToolBundleUpdateDownloadExecutionError(root, &execution, fmt.Errorf("publish managed bundle update download archive: %w", err))
+		}
+		execution.ArchivePath = archivePath
+		execution.ArchiveDigestStatus = "matched"
+		var payloadPath string
+		var actualSHA string
+		switch strings.TrimSpace(plan.Kind) {
+		case "binary":
+			payloadPath, actualSHA, err = extractManagedToolBundleUpdateBinaryArchive(root, execution, archivePath, expectedSHA)
+		case "rule_bundle":
+			payloadPath, actualSHA, err = extractManagedToolBundleUpdateRuleBundleArchive(root, execution, archivePath, expectedSHA)
+		default:
+			err = fmt.Errorf("managed bundle update archive kind is unsupported: %s", installRequestDisplayValue(plan.Kind, "unknown"))
+		}
+		execution.ActualSHA256 = actualSHA
+		if err != nil {
+			if actualSHA != "" && actualSHA != expectedSHA {
+				execution.DigestStatus = "mismatch"
+			}
+			return writeManagedToolBundleUpdateDownloadExecutionError(root, &execution, err)
+		}
+		execution.Status = "completed"
+		execution.DigestStatus = "matched"
+		execution.PayloadPath = payloadPath
+		if err := writeManagedToolBundleUpdateDownloadExecution(root, &execution); err != nil {
+			return execution, err
+		}
+		return execution, nil
+	}
+	payloadPath, tmpPath, actualSHA, bytesWritten, err := streamManagedToolBundleUpdateDownloadPayload(root, execution, response.Body)
+	execution.ActualSHA256 = actualSHA
+	execution.BytesWritten = bytesWritten
+	if err != nil {
+		return writeManagedToolBundleUpdateDownloadExecutionError(root, &execution, err)
+	}
+	if actualSHA != expectedSHA {
+		execution.DigestStatus = "mismatch"
+		if tmpPath != "" {
+			_ = os.Remove(tmpPath)
+		}
+		return writeManagedToolBundleUpdateDownloadExecutionError(root, &execution, fmt.Errorf("managed bundle update download sha256 mismatch: expected %s actual %s", expectedSHA, actualSHA))
+	}
+	if _, err := os.Lstat(payloadPath); err == nil {
+		_ = os.Remove(tmpPath)
+		return writeManagedToolBundleUpdateDownloadExecutionError(root, &execution, fmt.Errorf("managed bundle update download payload already exists: %s", payloadPath))
+	} else if err != nil && !os.IsNotExist(err) {
+		_ = os.Remove(tmpPath)
+		return writeManagedToolBundleUpdateDownloadExecutionError(root, &execution, fmt.Errorf("inspect managed bundle update download payload: %w", err))
+	}
+	if err := os.Rename(tmpPath, payloadPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return writeManagedToolBundleUpdateDownloadExecutionError(root, &execution, fmt.Errorf("publish managed bundle update download payload: %w", err))
+	}
+	execution.Status = "completed"
+	execution.DigestStatus = "matched"
+	execution.PayloadPath = payloadPath
+	if err := writeManagedToolBundleUpdateDownloadExecution(root, &execution); err != nil {
+		return execution, err
+	}
+	return execution, nil
+}
+
+func validateManagedToolBundleUpdateDownloadPlanRequestStillMatches(plan ManagedToolBundleUpdateDownloadPlan, request ManagedToolBundleUpdateRequest, expectedSHA string) error {
+	if strings.TrimSpace(request.Status) != "pending" {
+		return fmt.Errorf("managed bundle update download execution requires pending request, got %s", installRequestDisplayValue(request.Status, "unknown"))
+	}
+	if strings.TrimSpace(request.Mode) != "" && strings.TrimSpace(request.Mode) != "metadata-only" {
+		return fmt.Errorf("managed bundle update download execution requires metadata-only request, got %s", request.Mode)
+	}
+	if strings.TrimSpace(request.UpdateStatus) != "update_available" {
+		return fmt.Errorf("managed bundle update download execution requires update_status=update_available, got %s", installRequestDisplayValue(request.UpdateStatus, "unknown"))
+	}
+	if request.Name != plan.Name || request.Kind != plan.Kind || request.Source != plan.Source || request.CurrentVersion != plan.CurrentVersion || request.CurrentSHA256 != plan.CurrentSHA256 || request.LatestVersion != plan.LatestVersion || request.LatestSHA256 != plan.LatestSHA256 || request.UpdateCheckedAt != plan.UpdateCheckedAt || request.UpdateMessage != plan.UpdateMessage {
+		return fmt.Errorf("managed bundle update download execution plan no longer matches request metadata")
+	}
+	if request.ReleaseRoot != plan.ReleaseRoot || request.ReleaseBundleDir != plan.ReleaseBundleDir || request.ReleaseManifestPath != plan.ReleaseManifestPath || request.ReleasePayloadPath != plan.ReleasePayloadPath {
+		return fmt.Errorf("managed bundle update download execution plan no longer matches request release references")
+	}
+	latestSHA := strings.ToLower(strings.TrimSpace(request.LatestSHA256))
+	if latestSHA != "" && expectedSHA != latestSHA {
+		return fmt.Errorf("managed bundle update download execution expected sha256 mismatch: expected %s latest %s", expectedSHA, latestSHA)
+	}
+	return nil
+}
+
+func managedToolBundleUpdateDownloadHTTPClient(client *http.Client) *http.Client {
+	if client == nil {
+		client = http.DefaultClient
+	}
+	copyClient := *client
+	copyClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return &copyClient
+}
+
+func managedToolBundleUpdateDownloadHTTPStatusIsRedirect(status int) bool {
+	return status >= http.StatusMultipleChoices && status < http.StatusBadRequest
+}
+
+func sanitizeManagedToolBundleUpdateRedirectLocation(location string) (string, string) {
+	trimmed := strings.TrimSpace(location)
+	if trimmed == "" {
+		return "", "missing"
+	}
+	if strings.ContainsAny(trimmed, " \t\r\n") {
+		return "", "invalid"
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "", "invalid"
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", "invalid"
+	}
+	sanitized := *parsed
+	redacted := parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != ""
+	sanitized.User = nil
+	sanitized.RawQuery = ""
+	sanitized.ForceQuery = false
+	sanitized.Fragment = ""
+	return sanitized.String(), map[bool]string{true: "redacted", false: "recorded"}[redacted]
+}
+
+func archiveDigestStatusForDownloadExecution(format string) string {
+	if strings.TrimSpace(format) == "" {
+		return "none"
+	}
+	return "unknown"
+}
+
+func archiveDigestAlgorithmForDownloadExecution(format string) string {
+	if strings.TrimSpace(format) == "" {
+		return "none"
+	}
+	return "sha256"
+}
+
+func archiveDigestScopeForDownloadExecution(format string) string {
+	if strings.TrimSpace(format) == "" {
+		return "none"
+	}
+	return "file"
+}
+
+func streamManagedToolBundleUpdateDownloadPayload(root string, execution ManagedToolBundleUpdateDownloadExecution, body io.Reader) (string, string, string, int64, error) {
+	return streamManagedToolBundleUpdateDownloadFile(root, execution, body, "payload")
+}
+
+func streamManagedToolBundleUpdateDownloadArchive(root string, execution ManagedToolBundleUpdateDownloadExecution, body io.Reader) (string, string, string, int64, error) {
+	return streamManagedToolBundleUpdateDownloadFile(root, execution, body, "archive")
+}
+
+func streamManagedToolBundleUpdateDownloadFile(root string, execution ManagedToolBundleUpdateDownloadExecution, body io.Reader, finalName string) (string, string, string, int64, error) {
+	payloadDir := filepath.Join(managedToolBundleUpdateDownloadStagingDir(root), safeManagedToolBundleUpdateDownloadExecutionName(execution))
+	if err := ensureAuthoredToolDirectory(payloadDir, "managed bundle update download staging directory"); err != nil {
+		return "", "", "", 0, err
+	}
+	payloadPath := filepath.Join(payloadDir, finalName)
+	if _, err := os.Lstat(payloadPath); err == nil {
+		return "", "", "", 0, fmt.Errorf("managed bundle update download %s already exists: %s", finalName, payloadPath)
+	} else if err != nil && !os.IsNotExist(err) {
+		return "", "", "", 0, fmt.Errorf("inspect managed bundle update download %s: %w", finalName, err)
+	}
+	tmpFile, err := os.CreateTemp(payloadDir, finalName+"-*.tmp")
+	if err != nil {
+		return "", "", "", 0, fmt.Errorf("create managed bundle update download %s temp file: %w", finalName, err)
+	}
+	tmpPath := tmpFile.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	hash := sha256.New()
+	limited := &io.LimitedReader{R: body, N: managedToolBundleUpdateDownloadMaxBytes + 1}
+	bytesWritten, copyErr := io.Copy(io.MultiWriter(tmpFile, hash), limited)
+	if copyErr != nil {
+		_ = tmpFile.Close()
+		return "", "", "", bytesWritten, fmt.Errorf("write managed bundle update download %s: %w", finalName, copyErr)
+	}
+	actualSHA := hex.EncodeToString(hash.Sum(nil))
+	if bytesWritten > managedToolBundleUpdateDownloadMaxBytes {
+		_ = tmpFile.Close()
+		return "", "", actualSHA, bytesWritten, fmt.Errorf("managed bundle update download payload is too large: bytes=%d max=%d", bytesWritten, managedToolBundleUpdateDownloadMaxBytes)
+	}
+	if err := tmpFile.Chmod(0o644); err != nil {
+		_ = tmpFile.Close()
+		return "", "", "", bytesWritten, fmt.Errorf("chmod managed bundle update download %s temp file: %w", finalName, err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return "", "", "", bytesWritten, fmt.Errorf("close managed bundle update download %s temp file: %w", finalName, err)
+	}
+	cleanup = false
+	return payloadPath, tmpPath, actualSHA, bytesWritten, nil
+}
+
+func extractManagedToolBundleUpdateRuleBundleArchive(root string, execution ManagedToolBundleUpdateDownloadExecution, archivePath, expectedSHA string) (string, string, error) {
+	payloadDir := filepath.Join(managedToolBundleUpdateDownloadStagingDir(root), safeManagedToolBundleUpdateDownloadExecutionName(execution))
+	if err := ensureAuthoredToolDirectory(payloadDir, "managed bundle update download staging directory"); err != nil {
+		return "", "", err
+	}
+	payloadPath := filepath.Join(payloadDir, "payload")
+	if _, err := os.Lstat(payloadPath); err == nil {
+		return "", "", fmt.Errorf("managed bundle update download payload already exists: %s", payloadPath)
+	} else if err != nil && !os.IsNotExist(err) {
+		return "", "", fmt.Errorf("inspect managed bundle update download payload: %w", err)
+	}
+	extractDir, err := os.MkdirTemp(payloadDir, "payload-extract-*.tmp")
+	if err != nil {
+		return "", "", fmt.Errorf("create managed bundle update archive extract directory: %w", err)
+	}
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.RemoveAll(extractDir)
+		}
+	}()
+	if err := extractManagedToolBundleUpdateArchiveByFormat(execution.ArchiveFormat, archivePath, extractDir); err != nil {
+		return "", "", err
+	}
+	actualSHA, err := digestManagedBundleDirectory(extractDir)
+	if err != nil {
+		return "", "", err
+	}
+	if actualSHA != expectedSHA {
+		return "", actualSHA, fmt.Errorf("managed bundle update archive extracted rule_bundle sha256 mismatch: expected %s actual %s", expectedSHA, actualSHA)
+	}
+	if err := os.Rename(extractDir, payloadPath); err != nil {
+		return "", actualSHA, fmt.Errorf("publish managed bundle update archive extracted payload: %w", err)
+	}
+	cleanup = false
+	return payloadPath, actualSHA, nil
+}
+
+func extractManagedToolBundleUpdateBinaryArchive(root string, execution ManagedToolBundleUpdateDownloadExecution, archivePath, expectedSHA string) (string, string, error) {
+	payloadDir := filepath.Join(managedToolBundleUpdateDownloadStagingDir(root), safeManagedToolBundleUpdateDownloadExecutionName(execution))
+	if err := ensureAuthoredToolDirectory(payloadDir, "managed bundle update download staging directory"); err != nil {
+		return "", "", err
+	}
+	payloadPath := filepath.Join(payloadDir, "payload")
+	if _, err := os.Lstat(payloadPath); err == nil {
+		return "", "", fmt.Errorf("managed bundle update download payload already exists: %s", payloadPath)
+	} else if err != nil && !os.IsNotExist(err) {
+		return "", "", fmt.Errorf("inspect managed bundle update download payload: %w", err)
+	}
+	extractDir, err := os.MkdirTemp(payloadDir, "payload-extract-*.tmp")
+	if err != nil {
+		return "", "", fmt.Errorf("create managed bundle update archive extract directory: %w", err)
+	}
+	defer func() {
+		_ = os.RemoveAll(extractDir)
+	}()
+	if err := extractManagedToolBundleUpdateArchiveByFormat(execution.ArchiveFormat, archivePath, extractDir); err != nil {
+		return "", "", err
+	}
+	sourcePath, sourceInfo, err := singleManagedToolBundleUpdateBinaryArchivePayload(extractDir)
+	if err != nil {
+		return "", "", err
+	}
+	actualSHA, err := digestManagedToolBundleImportFile(sourcePath, sourceInfo)
+	if err != nil {
+		return "", "", err
+	}
+	if actualSHA != expectedSHA {
+		return "", actualSHA, fmt.Errorf("managed bundle update archive extracted binary sha256 mismatch: expected %s actual %s", expectedSHA, actualSHA)
+	}
+	if err := os.Rename(sourcePath, payloadPath); err != nil {
+		return "", actualSHA, fmt.Errorf("publish managed bundle update archive extracted payload: %w", err)
+	}
+	if err := os.Chmod(payloadPath, 0o644); err != nil {
+		return "", actualSHA, fmt.Errorf("chmod managed bundle update archive extracted payload: %w", err)
+	}
+	return payloadPath, actualSHA, nil
+}
+
+func singleManagedToolBundleUpdateBinaryArchivePayload(root string) (string, os.FileInfo, error) {
+	var filePath string
+	var fileInfo os.FileInfo
+	regularFiles := 0
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return fmt.Errorf("inspect managed bundle update archive entry: %w", walkErr)
+		}
+		if path == root {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return fmt.Errorf("inspect managed bundle update archive entry: %w", err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("managed bundle update archive entry must not be a symlink: %s", path)
+		}
+		if info.IsDir() {
+			return nil
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("managed bundle update archive entry type is unsupported: %s", path)
+		}
+		regularFiles++
+		if regularFiles > 1 {
+			return fmt.Errorf("managed bundle update binary archive must contain exactly one regular file")
+		}
+		filePath = path
+		fileInfo = info
+		return nil
+	})
+	if err != nil {
+		return "", nil, err
+	}
+	if regularFiles != 1 {
+		return "", nil, fmt.Errorf("managed bundle update binary archive must contain exactly one regular file")
+	}
+	return filePath, fileInfo, nil
+}
+
+func extractManagedToolBundleUpdateArchiveByFormat(format, archivePath, dst string) error {
+	switch strings.ToLower(strings.TrimSpace(format)) {
+	case "tar.gz":
+		return extractManagedToolBundleUpdateTarGzipArchive(archivePath, dst)
+	case "zip":
+		return extractManagedToolBundleUpdateZipArchive(archivePath, dst)
+	default:
+		return fmt.Errorf("managed bundle update archive format is unsupported: %s", format)
+	}
+}
+
+func extractManagedToolBundleUpdateTarGzipArchive(archivePath, dst string) error {
+	file, err := os.Open(archivePath)
+	if err != nil {
+		return fmt.Errorf("open managed bundle update archive: %w", err)
+	}
+	defer file.Close()
+	gzipReader, err := gzip.NewReader(file)
+	if err != nil {
+		return fmt.Errorf("open managed bundle update gzip archive: %w", err)
+	}
+	defer gzipReader.Close()
+	tarReader := tar.NewReader(gzipReader)
+	var extractedBytes int64
+	for {
+		header, err := tarReader.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("read managed bundle update archive entry: %w", err)
+		}
+		cleanName, err := cleanManagedToolBundleUpdateArchiveEntryName(header.Name)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, filepath.FromSlash(cleanName))
+		if err := ensurePathWithinDirectory(dst, target, "managed bundle update archive entry"); err != nil {
+			return err
+		}
+		switch header.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				return fmt.Errorf("create managed bundle update archive directory: %w", err)
+			}
+		case tar.TypeReg, tar.TypeRegA:
+			if header.Size < 0 {
+				return fmt.Errorf("managed bundle update archive file has negative size: %s", cleanName)
+			}
+			extractedBytes += header.Size
+			if extractedBytes > managedToolBundleUpdateDownloadMaxBytes {
+				return fmt.Errorf("managed bundle update archive extracted payload is too large: bytes=%d max=%d", extractedBytes, managedToolBundleUpdateDownloadMaxBytes)
+			}
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return fmt.Errorf("create managed bundle update archive file directory: %w", err)
+			}
+			out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+			if err != nil {
+				return fmt.Errorf("create managed bundle update archive file: %w", err)
+			}
+			_, copyErr := io.Copy(out, tarReader)
+			closeErr := out.Close()
+			if copyErr != nil {
+				return fmt.Errorf("copy managed bundle update archive file: %w", copyErr)
+			}
+			if closeErr != nil {
+				return fmt.Errorf("close managed bundle update archive file: %w", closeErr)
+			}
+			if err := os.Chmod(target, 0o644); err != nil {
+				return fmt.Errorf("chmod managed bundle update archive file: %w", err)
+			}
+		case tar.TypeSymlink:
+			return fmt.Errorf("managed bundle update archive entry must not be a symlink: %s", header.Name)
+		case tar.TypeLink:
+			return fmt.Errorf("managed bundle update archive entry must not be a hardlink: %s", header.Name)
+		default:
+			return fmt.Errorf("managed bundle update archive entry type is unsupported: %s", header.Name)
+		}
+	}
+	return nil
+}
+
+func extractManagedToolBundleUpdateZipArchive(archivePath, dst string) error {
+	reader, err := zip.OpenReader(archivePath)
+	if err != nil {
+		return fmt.Errorf("open managed bundle update zip archive: %w", err)
+	}
+	defer reader.Close()
+	var extractedBytes int64
+	for _, file := range reader.File {
+		cleanName, err := cleanManagedToolBundleUpdateArchiveEntryName(file.Name)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, filepath.FromSlash(cleanName))
+		if err := ensurePathWithinDirectory(dst, target, "managed bundle update archive entry"); err != nil {
+			return err
+		}
+		info := file.FileInfo()
+		mode := info.Mode()
+		if mode&os.ModeSymlink != 0 {
+			return fmt.Errorf("managed bundle update archive entry must not be a symlink: %s", file.Name)
+		}
+		if info.IsDir() || strings.HasSuffix(file.Name, "/") {
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				return fmt.Errorf("create managed bundle update archive directory: %w", err)
+			}
+			continue
+		}
+		if !mode.IsRegular() {
+			return fmt.Errorf("managed bundle update archive entry type is unsupported: %s", file.Name)
+		}
+		if file.UncompressedSize64 > uint64(managedToolBundleUpdateDownloadMaxBytes) {
+			return fmt.Errorf("managed bundle update archive extracted payload is too large: bytes=%d max=%d", file.UncompressedSize64, managedToolBundleUpdateDownloadMaxBytes)
+		}
+		if extractedBytes > managedToolBundleUpdateDownloadMaxBytes-int64(file.UncompressedSize64) {
+			return fmt.Errorf("managed bundle update archive extracted payload is too large: bytes=%d max=%d", extractedBytes+int64(file.UncompressedSize64), managedToolBundleUpdateDownloadMaxBytes)
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return fmt.Errorf("create managed bundle update archive file directory: %w", err)
+		}
+		in, err := file.Open()
+		if err != nil {
+			return fmt.Errorf("open managed bundle update archive file: %w", err)
+		}
+		out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+		if err != nil {
+			_ = in.Close()
+			return fmt.Errorf("create managed bundle update archive file: %w", err)
+		}
+		remaining := managedToolBundleUpdateDownloadMaxBytes - extractedBytes
+		limited := &io.LimitedReader{R: in, N: remaining + 1}
+		copied, copyErr := io.Copy(out, limited)
+		closeOutErr := out.Close()
+		closeInErr := in.Close()
+		if copyErr != nil {
+			return fmt.Errorf("copy managed bundle update archive file: %w", copyErr)
+		}
+		if closeOutErr != nil {
+			return fmt.Errorf("close managed bundle update archive file: %w", closeOutErr)
+		}
+		if closeInErr != nil {
+			return fmt.Errorf("close managed bundle update archive file input: %w", closeInErr)
+		}
+		if copied > remaining {
+			return fmt.Errorf("managed bundle update archive extracted payload is too large: bytes=%d max=%d", extractedBytes+copied, managedToolBundleUpdateDownloadMaxBytes)
+		}
+		extractedBytes += copied
+		if err := os.Chmod(target, 0o644); err != nil {
+			return fmt.Errorf("chmod managed bundle update archive file: %w", err)
+		}
+	}
+	return nil
+}
+
+func cleanManagedToolBundleUpdateArchiveEntryName(name string) (string, error) {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" {
+		return "", fmt.Errorf("managed bundle update archive entry name is required")
+	}
+	if strings.Contains(trimmed, "\\") {
+		return "", fmt.Errorf("managed bundle update archive path traversal is not allowed: %s", name)
+	}
+	if path.IsAbs(trimmed) || filepath.IsAbs(trimmed) || hasWindowsDriveArchivePathPrefix(trimmed) {
+		return "", fmt.Errorf("managed bundle update archive path traversal is not allowed: %s", name)
+	}
+	if hasParentDirectoryArchivePathSegment(trimmed) {
+		return "", fmt.Errorf("managed bundle update archive path traversal is not allowed: %s", name)
+	}
+	cleaned := path.Clean(trimmed)
+	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") {
+		return "", fmt.Errorf("managed bundle update archive path traversal is not allowed: %s", name)
+	}
+	return cleaned, nil
+}
+
+func hasParentDirectoryArchivePathSegment(value string) bool {
+	for _, segment := range strings.Split(value, "/") {
+		if segment == ".." {
+			return true
+		}
+	}
+	return false
+}
+
+func hasWindowsDriveArchivePathPrefix(value string) bool {
+	if len(value) < 2 || value[1] != ':' {
+		return false
+	}
+	first := value[0]
+	return first >= 'A' && first <= 'Z' || first >= 'a' && first <= 'z'
+}
+
+func ensurePathWithinDirectory(root, candidate, context string) error {
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return fmt.Errorf("resolve %s root: %w", context, err)
+	}
+	candidateAbs, err := filepath.Abs(candidate)
+	if err != nil {
+		return fmt.Errorf("resolve %s path: %w", context, err)
+	}
+	rel, err := filepath.Rel(rootAbs, candidateAbs)
+	if err != nil {
+		return fmt.Errorf("resolve %s relative path: %w", context, err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+		return fmt.Errorf("%s must stay inside %s: %s", context, rootAbs, candidateAbs)
+	}
+	return nil
+}
+
+func writeManagedToolBundleUpdateDownloadExecutionError(root string, execution *ManagedToolBundleUpdateDownloadExecution, err error) (ManagedToolBundleUpdateDownloadExecution, error) {
+	execution.Status = "failed"
+	execution.Error = err.Error()
+	if strings.TrimSpace(execution.DigestStatus) == "" {
+		execution.DigestStatus = "unknown"
+	}
+	if writeErr := writeManagedToolBundleUpdateDownloadExecution(root, execution); writeErr != nil {
+		return *execution, writeErr
+	}
+	return *execution, err
+}
+
+func writeManagedToolBundleUpdateDownloadExecution(root string, execution *ManagedToolBundleUpdateDownloadExecution) error {
+	dir := managedToolBundleUpdateDownloadExecutionDir(root)
+	if err := ensureAuthoredToolDirectory(dir, "managed bundle update download execution directory"); err != nil {
+		return err
+	}
+	name := safeManagedToolBundleUpdateDownloadExecutionName(*execution)
+	execution.Path = filepath.Join(dir, name+".json")
+	data, err := json.MarshalIndent(execution, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode managed bundle update download execution: %w", err)
+	}
+	if err := writeAuthoredToolArtifactFile(execution.Path, data, "managed bundle update download execution"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func ListManagedToolBundleUpdateDownloadExecutions(root string) ([]ManagedToolBundleUpdateDownloadExecution, error) {
+	if err := requireAuthoredToolWorkspace(root); err != nil {
+		return nil, err
+	}
+	if err := rejectUnsafeAuthoredToolDirectory(managedToolBundleUpdateDownloadExecutionDir(root), "managed bundle update download execution directory"); err != nil {
+		return nil, err
+	}
+	paths, err := filepath.Glob(filepath.Join(managedToolBundleUpdateDownloadExecutionDir(root), "*.json"))
+	if err != nil {
+		return nil, fmt.Errorf("glob managed bundle update download executions: %w", err)
+	}
+	sort.Strings(paths)
+	executions := make([]ManagedToolBundleUpdateDownloadExecution, 0, len(paths))
+	for _, path := range paths {
+		execution, err := readManagedToolBundleUpdateDownloadExecutionPath(path)
+		if err != nil {
+			return nil, err
+		}
+		execution.Path = path
+		executions = append(executions, execution)
+	}
+	return executions, nil
+}
+
+func ReadManagedToolBundleUpdateDownloadExecution(root, executionPath string) (ManagedToolBundleUpdateDownloadExecution, error) {
+	if err := requireAuthoredToolWorkspace(root); err != nil {
+		return ManagedToolBundleUpdateDownloadExecution{}, err
+	}
+	path, err := resolveManagedToolBundleUpdateDownloadExecutionPath(root, executionPath)
+	if err != nil {
+		return ManagedToolBundleUpdateDownloadExecution{}, err
+	}
+	execution, err := readManagedToolBundleUpdateDownloadExecutionPath(path)
+	if err != nil {
+		return ManagedToolBundleUpdateDownloadExecution{}, err
+	}
+	execution.Path = path
+	return execution, nil
+}
+
+func SummarizeManagedToolBundleUpdateDownloadExecutions(executions []ManagedToolBundleUpdateDownloadExecution) ManagedToolBundleUpdateDownloadExecutionSummary {
+	summary := ManagedToolBundleUpdateDownloadExecutionSummary{Total: len(executions)}
+	for _, execution := range executions {
+		switch strings.TrimSpace(execution.Status) {
+		case "completed":
+			summary.Completed++
+		case "failed":
+			summary.Failed++
+		}
+	}
+	return summary
+}
+
+func (summary ManagedToolBundleUpdateDownloadExecutionSummary) Line() string {
+	return fmt.Sprintf("total=%d completed=%d failed=%d", summary.Total, summary.Completed, summary.Failed)
+}
+
+func readManagedToolBundleUpdateDownloadExecutionPath(path string) (ManagedToolBundleUpdateDownloadExecution, error) {
+	if err := rejectUnsafeAuthoredToolFile(path, "managed bundle update download execution"); err != nil {
+		return ManagedToolBundleUpdateDownloadExecution{}, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ManagedToolBundleUpdateDownloadExecution{}, fmt.Errorf("read managed bundle update download execution %s: %w", path, err)
+	}
+	var execution ManagedToolBundleUpdateDownloadExecution
+	if err := json.Unmarshal(data, &execution); err != nil {
+		return ManagedToolBundleUpdateDownloadExecution{}, fmt.Errorf("decode managed bundle update download execution %s: %w", path, err)
+	}
+	return execution, nil
+}
+
+func ApplyManagedToolBundleUpdateDownloadExecution(root, executionPath string, options ManagedToolBundleUpdateApplyOptions) (ManagedToolBundleUpdateApplyExecution, error) {
+	if !options.Apply {
+		return ManagedToolBundleUpdateApplyExecution{}, fmt.Errorf("managed bundle update apply requires --apply")
+	}
+	doctor, err := DoctorWorkspaceWithOptions(root, DoctorOptions{RequireSafetyAuthorization: true})
+	if err != nil {
+		return ManagedToolBundleUpdateApplyExecution{}, err
+	}
+	if !doctor.Ready {
+		return ManagedToolBundleUpdateApplyExecution{}, fmt.Errorf("workspace is not ready: %v", doctor.Errors)
+	}
+	download, err := ReadManagedToolBundleUpdateDownloadExecution(root, executionPath)
+	if err != nil {
+		return ManagedToolBundleUpdateApplyExecution{}, err
+	}
+	if strings.TrimSpace(download.Status) != "completed" || strings.TrimSpace(download.DigestStatus) != "matched" {
+		return ManagedToolBundleUpdateApplyExecution{}, fmt.Errorf("managed bundle update apply requires completed download execution with matched digest, got status=%s digest_status=%s", installRequestDisplayValue(download.Status, "unknown"), installRequestDisplayValue(download.DigestStatus, "unknown"))
+	}
+	if strings.TrimSpace(download.Mode) != "execute" || strings.TrimSpace(download.Action) != "download" {
+		return ManagedToolBundleUpdateApplyExecution{}, fmt.Errorf("managed bundle update apply requires download execution audit, got mode=%s action=%s", installRequestDisplayValue(download.Mode, "unknown"), installRequestDisplayValue(download.Action, "unknown"))
+	}
+	kind := strings.TrimSpace(download.Kind)
+	switch kind {
+	case "binary", "rule_bundle":
+	default:
+		return ManagedToolBundleUpdateApplyExecution{}, fmt.Errorf("managed bundle update apply kind is unsupported: %s", installRequestDisplayValue(download.Kind, "unknown"))
+	}
+	expectedSHA, err := normalizeManagedToolBundleUpdateDownloadExpectedSHA256(download.ExpectedSHA256)
+	if err != nil {
+		return ManagedToolBundleUpdateApplyExecution{}, err
+	}
+	if actual := strings.ToLower(strings.TrimSpace(download.ActualSHA256)); actual != expectedSHA {
+		return ManagedToolBundleUpdateApplyExecution{}, fmt.Errorf("managed bundle update apply download audit sha256 mismatch: expected %s actual %s", expectedSHA, actual)
+	}
+	stagedPayloadPath, err := resolveManagedToolBundleUpdateDownloadPayloadPath(root, download.PayloadPath)
+	if err != nil {
+		return ManagedToolBundleUpdateApplyExecution{}, err
+	}
+	sourcePayload, sourceInfo, err := inspectManagedToolBundleImportPayload(stagedPayloadPath, kind)
+	if err != nil {
+		return ManagedToolBundleUpdateApplyExecution{}, err
+	}
+	actualSHA, err := digestManagedToolBundleImportPayload(sourcePayload, sourceInfo)
+	if err != nil {
+		return ManagedToolBundleUpdateApplyExecution{}, err
+	}
+	if actualSHA != expectedSHA {
+		return ManagedToolBundleUpdateApplyExecution{}, fmt.Errorf("managed bundle update apply sha256 mismatch: expected %s actual %s", expectedSHA, actualSHA)
+	}
+	plan, err := ReadManagedToolBundleUpdateDownloadPlan(root, download.PlanPath)
+	if err != nil {
+		return ManagedToolBundleUpdateApplyExecution{}, err
+	}
+	request, err := ReadManagedToolBundleUpdateRequest(root, download.RequestPath)
+	if err != nil {
+		return ManagedToolBundleUpdateApplyExecution{}, err
+	}
+	if err := validateManagedToolBundleUpdateDownloadPlanRequestStillMatches(plan, request, expectedSHA); err != nil {
+		return ManagedToolBundleUpdateApplyExecution{}, err
+	}
+	if err := validateManagedToolBundleUpdateDownloadExecutionStillMatchesPlan(download, plan, request, expectedSHA); err != nil {
+		return ManagedToolBundleUpdateApplyExecution{}, err
+	}
+	if strings.TrimSpace(download.LatestVersion) == "" {
+		return ManagedToolBundleUpdateApplyExecution{}, fmt.Errorf("managed bundle update apply latest version is required")
+	}
+	if strings.TrimSpace(download.Source) == "" {
+		return ManagedToolBundleUpdateApplyExecution{}, fmt.Errorf("managed bundle update apply source is required")
+	}
+
+	rootDir, err := managedToolBundleRoot(root)
+	if err != nil {
+		return ManagedToolBundleUpdateApplyExecution{}, err
+	}
+	if err := ensureAuthoredToolDirectory(rootDir, "managed bundle directory"); err != nil {
+		return ManagedToolBundleUpdateApplyExecution{}, err
+	}
+	name, err := validateAuthoredToolName(download.Name)
+	if err != nil {
+		return ManagedToolBundleUpdateApplyExecution{}, err
+	}
+	bundleDir := filepath.Join(rootDir, name)
+	if err := rejectUnsafeAuthoredToolDirectory(bundleDir, "workspace managed bundle directory"); err != nil {
+		return ManagedToolBundleUpdateApplyExecution{}, err
+	}
+	workspacePayloadPath := filepath.Join(bundleDir, "payload", name)
+	if kind == "rule_bundle" {
+		workspacePayloadPath = filepath.Join(bundleDir, "payload")
+	}
+	workspaceManifestPath := filepath.Join(bundleDir, "bundle.yaml")
+	installPath, err := managedToolBundleInstallPath(root, managedToolBundleManifest{Name: name, Kind: kind})
+	if err != nil {
+		return ManagedToolBundleUpdateApplyExecution{}, err
+	}
+
+	tmpParent, tmpBundleDir, err := buildManagedToolBundleUpdateApplyBundle(root, rootDir, name, kind, download.LatestVersion, download.Source, expectedSHA, sourcePayload, sourceInfo)
+	if err != nil {
+		return ManagedToolBundleUpdateApplyExecution{}, err
+	}
+	cleanupTmp := true
+	defer func() {
+		if cleanupTmp {
+			_ = os.RemoveAll(tmpParent)
+		}
+	}()
+	if err := replaceManagedToolBundleDirectory(bundleDir, tmpBundleDir); err != nil {
+		return ManagedToolBundleUpdateApplyExecution{}, err
+	}
+	cleanupTmp = false
+	_ = os.RemoveAll(tmpParent)
+	bundle, err := ReadManagedToolBundle(root, name)
+	if err != nil {
+		return ManagedToolBundleUpdateApplyExecution{}, err
+	}
+
+	apply := ManagedToolBundleUpdateApplyExecution{
+		Status:                "completed",
+		Mode:                  "apply",
+		Action:                "workspace-copy",
+		Name:                  bundle.Name,
+		Kind:                  bundle.Kind,
+		Source:                bundle.Source,
+		CurrentVersion:        download.CurrentVersion,
+		CurrentSHA256:         download.CurrentSHA256,
+		LatestVersion:         download.LatestVersion,
+		LatestSHA256:          download.LatestSHA256,
+		UpdateStatus:          download.UpdateStatus,
+		UpdateCheckedAt:       download.UpdateCheckedAt,
+		UpdateMessage:         download.UpdateMessage,
+		SourceURL:             download.SourceURL,
+		ExpectedSHA256:        expectedSHA,
+		ActualSHA256:          actualSHA,
+		DigestStatus:          "matched",
+		DigestAlgorithm:       "sha256",
+		DigestScope:           managedBundleDigestScope(kind),
+		DownloadExecutionPath: download.Path,
+		PlanPath:              plan.Path,
+		RequestPath:           request.Path,
+		ReleaseRoot:           download.ReleaseRoot,
+		ReleaseBundleDir:      download.ReleaseBundleDir,
+		ReleaseManifestPath:   download.ReleaseManifestPath,
+		ReleasePayloadPath:    download.ReleasePayloadPath,
+		StagedPayloadPath:     stagedPayloadPath,
+		WorkspaceBundleDir:    bundle.BundleDir,
+		WorkspaceManifestPath: bundle.ManifestPath,
+		WorkspacePayloadPath:  bundle.PayloadPath,
+		InstallPath:           installPath,
+		Actor:                 installRequestDisplayValue(strings.TrimSpace(options.Actor), "operator"),
+		AppliedAt:             time.Now().UTC().Format(time.RFC3339),
+		Reason:                strings.TrimSpace(options.Reason),
+	}
+	if apply.WorkspaceBundleDir != bundleDir || apply.WorkspaceManifestPath != workspaceManifestPath || apply.WorkspacePayloadPath != workspacePayloadPath || bundle.InstallPath != installPath {
+		return ManagedToolBundleUpdateApplyExecution{}, fmt.Errorf("managed bundle update apply workspace paths changed during readback")
+	}
+	if err := writeManagedToolBundleUpdateApplyExecution(root, &apply); err != nil {
+		return apply, err
+	}
+	return apply, nil
+}
+
+func validateManagedToolBundleUpdateDownloadExecutionStillMatchesPlan(download ManagedToolBundleUpdateDownloadExecution, plan ManagedToolBundleUpdateDownloadPlan, request ManagedToolBundleUpdateRequest, expectedSHA string) error {
+	if download.Name != plan.Name || download.Kind != plan.Kind || download.Source != plan.Source || download.CurrentVersion != plan.CurrentVersion || download.CurrentSHA256 != plan.CurrentSHA256 || download.LatestVersion != plan.LatestVersion || download.LatestSHA256 != plan.LatestSHA256 || download.UpdateCheckedAt != plan.UpdateCheckedAt || download.UpdateMessage != plan.UpdateMessage {
+		return fmt.Errorf("managed bundle update apply download execution no longer matches plan metadata")
+	}
+	if download.PlanPath != plan.Path || download.RequestPath != request.Path {
+		return fmt.Errorf("managed bundle update apply download execution no longer matches plan/request references")
+	}
+	if download.ReleaseRoot != plan.ReleaseRoot || download.ReleaseBundleDir != plan.ReleaseBundleDir || download.ReleaseManifestPath != plan.ReleaseManifestPath || download.ReleasePayloadPath != plan.ReleasePayloadPath {
+		return fmt.Errorf("managed bundle update apply download execution no longer matches release references")
+	}
+	sourceURL, err := normalizeManagedToolBundleUpdateDownloadSourceURL(download.SourceURL)
+	if err != nil {
+		return err
+	}
+	if sourceURL != plan.SourceURL {
+		return fmt.Errorf("managed bundle update apply download execution source url no longer matches plan")
+	}
+	if strings.ToLower(strings.TrimSpace(download.ExpectedSHA256)) != expectedSHA || strings.ToLower(strings.TrimSpace(plan.ExpectedSHA256)) != expectedSHA {
+		return fmt.Errorf("managed bundle update apply expected sha256 no longer matches plan")
+	}
+	if strings.TrimSpace(plan.ArchiveFormat) != "" || strings.TrimSpace(plan.ArchiveExpectedSHA256) != "" {
+		archiveFormat, archiveExpectedSHA, _, err := normalizeManagedToolBundleUpdateArchivePlanMetadata(plan.Kind, plan.ArchiveFormat, plan.ArchiveExpectedSHA256)
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(download.ArchiveFormat) != archiveFormat {
+			return fmt.Errorf("managed bundle update apply archive format no longer matches plan")
+		}
+		if strings.ToLower(strings.TrimSpace(download.ArchiveExpectedSHA256)) != archiveExpectedSHA || strings.ToLower(strings.TrimSpace(download.ArchiveActualSHA256)) != archiveExpectedSHA {
+			return fmt.Errorf("managed bundle update apply archive sha256 no longer matches plan")
+		}
+		if strings.TrimSpace(download.ArchiveDigestStatus) != "matched" {
+			return fmt.Errorf("managed bundle update apply archive digest status is not matched")
+		}
+		if strings.TrimSpace(download.ArchiveDigestAlgorithm) != "sha256" || strings.TrimSpace(download.ArchiveDigestScope) != "file" {
+			return fmt.Errorf("managed bundle update apply archive digest metadata no longer matches plan")
+		}
+	}
+	latestSHA := strings.ToLower(strings.TrimSpace(download.LatestSHA256))
+	if latestSHA != "" && latestSHA != expectedSHA {
+		return fmt.Errorf("managed bundle update apply expected sha256 mismatch: expected %s latest %s", expectedSHA, latestSHA)
+	}
+	return nil
+}
+
+func buildManagedToolBundleUpdateApplyBundle(root, rootDir, name, kind, version, source, sha, sourcePayload string, sourceInfo os.FileInfo) (string, string, error) {
+	tmpParent, err := os.MkdirTemp(rootDir, "."+name+"-update-apply-*.tmp")
+	if err != nil {
+		return "", "", fmt.Errorf("create managed bundle update apply temp directory: %w", err)
+	}
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.RemoveAll(tmpParent)
+		}
+	}()
+	tmpBundleDir := filepath.Join(tmpParent, name)
+	payloadPath := filepath.Join(tmpBundleDir, "payload", name)
+	if kind == "rule_bundle" {
+		payloadPath = filepath.Join(tmpBundleDir, "payload")
+	}
+	if sourceInfo.IsDir() {
+		if err := copyManagedBundleDirectoryWithFileMode(sourcePayload, payloadPath, 0o644); err != nil {
+			return "", "", err
+		}
+	} else {
+		if err := copyManagedBundleFile(sourcePayload, payloadPath, 0o644, sourceInfo); err != nil {
+			return "", "", err
+		}
+	}
+	manifestPath := filepath.Join(tmpBundleDir, "bundle.yaml")
+	manifestData := managedToolBundleImportManifest(name, kind, version, source, sha)
+	if err := writeAuthoredToolArtifactFile(manifestPath, manifestData, "managed bundle manifest"); err != nil {
+		return "", "", err
+	}
+	if _, err := readManagedToolBundle(root, tmpBundleDir); err != nil {
+		return "", "", fmt.Errorf("validate managed bundle update apply bundle: %w", err)
+	}
+	cleanup = false
+	return tmpParent, tmpBundleDir, nil
+}
+
+func replaceManagedToolBundleDirectory(targetDir, stagedDir string) error {
+	parent := filepath.Dir(targetDir)
+	if err := requireAuthoredToolDirectory(parent, "managed bundle directory"); err != nil {
+		return err
+	}
+	if err := rejectUnsafeAuthoredToolDirectory(targetDir, "workspace managed bundle directory"); err != nil {
+		return err
+	}
+	backupDir := ""
+	if _, err := os.Lstat(targetDir); err == nil {
+		backupDir, err = os.MkdirTemp(parent, "."+filepath.Base(targetDir)+"-update-backup-*.tmp")
+		if err != nil {
+			return fmt.Errorf("create managed bundle update backup directory: %w", err)
+		}
+		if err := os.Remove(backupDir); err != nil {
+			return fmt.Errorf("prepare managed bundle update backup directory: %w", err)
+		}
+		if err := os.Rename(targetDir, backupDir); err != nil {
+			return fmt.Errorf("backup workspace managed bundle: %w", err)
+		}
+	} else if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("inspect workspace managed bundle: %w", err)
+	}
+	if err := os.Rename(stagedDir, targetDir); err != nil {
+		if backupDir != "" {
+			_ = os.Rename(backupDir, targetDir)
+		}
+		return fmt.Errorf("publish managed bundle update apply bundle: %w", err)
+	}
+	if backupDir != "" {
+		_ = os.RemoveAll(backupDir)
+	}
+	return nil
+}
+
+func ListManagedToolBundleUpdateApplyExecutions(root string) ([]ManagedToolBundleUpdateApplyExecution, error) {
+	if err := requireAuthoredToolWorkspace(root); err != nil {
+		return nil, err
+	}
+	if err := rejectUnsafeAuthoredToolDirectory(managedToolBundleUpdateApplyExecutionDir(root), "managed bundle update apply execution directory"); err != nil {
+		return nil, err
+	}
+	paths, err := filepath.Glob(filepath.Join(managedToolBundleUpdateApplyExecutionDir(root), "*.json"))
+	if err != nil {
+		return nil, fmt.Errorf("glob managed bundle update apply executions: %w", err)
+	}
+	sort.Strings(paths)
+	executions := make([]ManagedToolBundleUpdateApplyExecution, 0, len(paths))
+	for _, path := range paths {
+		execution, err := readManagedToolBundleUpdateApplyExecutionPath(path)
+		if err != nil {
+			return nil, err
+		}
+		execution.Path = path
+		executions = append(executions, execution)
+	}
+	return executions, nil
+}
+
+func ReadManagedToolBundleUpdateApplyExecution(root, executionPath string) (ManagedToolBundleUpdateApplyExecution, error) {
+	if err := requireAuthoredToolWorkspace(root); err != nil {
+		return ManagedToolBundleUpdateApplyExecution{}, err
+	}
+	path, err := resolveManagedToolBundleUpdateApplyExecutionPath(root, executionPath)
+	if err != nil {
+		return ManagedToolBundleUpdateApplyExecution{}, err
+	}
+	execution, err := readManagedToolBundleUpdateApplyExecutionPath(path)
+	if err != nil {
+		return ManagedToolBundleUpdateApplyExecution{}, err
+	}
+	execution.Path = path
+	return execution, nil
+}
+
+func SummarizeManagedToolBundleUpdateApplyExecutions(executions []ManagedToolBundleUpdateApplyExecution) ManagedToolBundleUpdateApplyExecutionSummary {
+	summary := ManagedToolBundleUpdateApplyExecutionSummary{Total: len(executions)}
+	for _, execution := range executions {
+		switch strings.TrimSpace(execution.Status) {
+		case "completed":
+			summary.Completed++
+		case "failed":
+			summary.Failed++
+		}
+	}
+	return summary
+}
+
+func (summary ManagedToolBundleUpdateApplyExecutionSummary) Line() string {
+	return fmt.Sprintf("total=%d completed=%d failed=%d", summary.Total, summary.Completed, summary.Failed)
+}
+
+func readManagedToolBundleUpdateApplyExecutionPath(path string) (ManagedToolBundleUpdateApplyExecution, error) {
+	if err := rejectUnsafeAuthoredToolFile(path, "managed bundle update apply execution"); err != nil {
+		return ManagedToolBundleUpdateApplyExecution{}, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ManagedToolBundleUpdateApplyExecution{}, fmt.Errorf("read managed bundle update apply execution %s: %w", path, err)
+	}
+	var execution ManagedToolBundleUpdateApplyExecution
+	if err := json.Unmarshal(data, &execution); err != nil {
+		return ManagedToolBundleUpdateApplyExecution{}, fmt.Errorf("decode managed bundle update apply execution %s: %w", path, err)
+	}
+	return execution, nil
+}
+
+func writeManagedToolBundleUpdateApplyExecution(root string, execution *ManagedToolBundleUpdateApplyExecution) error {
+	dir := managedToolBundleUpdateApplyExecutionDir(root)
+	if err := ensureAuthoredToolDirectory(dir, "managed bundle update apply execution directory"); err != nil {
+		return err
+	}
+	name := safeManagedToolBundleUpdateApplyExecutionName(*execution)
+	execution.Path = filepath.Join(dir, name+".json")
+	data, err := json.MarshalIndent(execution, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode managed bundle update apply execution: %w", err)
+	}
+	if err := writeAuthoredToolArtifactFile(execution.Path, data, "managed bundle update apply execution"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func ImportManagedToolBundle(root string, options ManagedToolBundleImportOptions) (ManagedToolBundleImportResult, error) {
+	if !options.Import {
+		return ManagedToolBundleImportResult{}, fmt.Errorf("managed tool bundle import requires --import")
+	}
+	if err := requireAuthoredToolWorkspace(root); err != nil {
+		return ManagedToolBundleImportResult{}, err
+	}
+	name, err := validateAuthoredToolName(options.Name)
+	if err != nil {
+		return ManagedToolBundleImportResult{}, err
+	}
+	kind := strings.TrimSpace(options.Kind)
+	if kind == "" {
+		kind = "binary"
+	}
+	switch kind {
+	case "binary", "rule_bundle":
+	default:
+		return ManagedToolBundleImportResult{}, fmt.Errorf("managed bundle import kind is unsupported: %s", kind)
+	}
+	version := strings.TrimSpace(options.Version)
+	if version == "" {
+		return ManagedToolBundleImportResult{}, fmt.Errorf("managed bundle import version is required")
+	}
+	source := strings.TrimSpace(options.Source)
+	if source == "" {
+		return ManagedToolBundleImportResult{}, fmt.Errorf("managed bundle import source is required")
+	}
+	if strings.ContainsAny(source, "\r\n") {
+		return ManagedToolBundleImportResult{}, fmt.Errorf("managed bundle import source must be a single line")
+	}
+	sourcePayload, sourceInfo, err := inspectManagedToolBundleImportPayload(options.PayloadPath, kind)
+	if err != nil {
+		return ManagedToolBundleImportResult{}, err
+	}
+	sha, err := digestManagedToolBundleImportPayload(sourcePayload, sourceInfo)
+	if err != nil {
+		return ManagedToolBundleImportResult{}, err
+	}
+	expectedSHA, err := normalizeManagedToolBundleExpectedSHA256(options.ExpectedSHA256, options.ExpectedSHA256Provided)
+	if err != nil {
+		return ManagedToolBundleImportResult{}, err
+	}
+	if expectedSHA != "" && expectedSHA != sha {
+		return ManagedToolBundleImportResult{}, fmt.Errorf("managed bundle import expected sha256 mismatch: expected %s actual %s", expectedSHA, sha)
+	}
+	rootDir, err := managedToolBundleRoot(root)
+	if err != nil {
+		return ManagedToolBundleImportResult{}, err
+	}
+	if err := ensureAuthoredToolDirectory(rootDir, "managed bundle directory"); err != nil {
+		return ManagedToolBundleImportResult{}, err
+	}
+	bundleDir := filepath.Join(rootDir, name)
+	if err := rejectUnsafeAuthoredToolDirectory(bundleDir, "workspace managed bundle directory"); err != nil {
+		return ManagedToolBundleImportResult{}, err
+	}
+	if _, err := os.Lstat(bundleDir); err == nil {
+		return ManagedToolBundleImportResult{}, fmt.Errorf("workspace managed bundle already exists: %s", bundleDir)
+	} else if !os.IsNotExist(err) {
+		return ManagedToolBundleImportResult{}, fmt.Errorf("inspect workspace managed bundle: %w", err)
+	}
+	payloadPath := filepath.Join(bundleDir, "payload", name)
+	if kind == "rule_bundle" {
+		payloadPath = filepath.Join(bundleDir, "payload")
+	}
+	manifestPath := filepath.Join(bundleDir, "bundle.yaml")
+	installPath, err := managedToolBundleInstallPath(root, managedToolBundleManifest{Name: name, Kind: kind})
+	if err != nil {
+		return ManagedToolBundleImportResult{}, err
+	}
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.RemoveAll(bundleDir)
+		}
+	}()
+	if sourceInfo.IsDir() {
+		if err := copyManagedBundleDirectoryWithFileMode(sourcePayload, payloadPath, 0o644); err != nil {
+			return ManagedToolBundleImportResult{}, err
+		}
+	} else {
+		if err := copyManagedBundleFile(sourcePayload, payloadPath, sourceInfo.Mode().Perm(), sourceInfo); err != nil {
+			return ManagedToolBundleImportResult{}, err
+		}
+	}
+	manifestData := managedToolBundleImportManifest(name, kind, version, source, sha)
+	if err := writeAuthoredToolArtifactFile(manifestPath, manifestData, "managed bundle manifest"); err != nil {
+		return ManagedToolBundleImportResult{}, err
+	}
+	bundle, err := ReadManagedToolBundle(root, name)
+	if err != nil {
+		return ManagedToolBundleImportResult{}, err
+	}
+	cleanup = false
+	return ManagedToolBundleImportResult{
+		Status:            "imported",
+		Mode:              "workspace-copy",
+		Action:            "copy",
+		Name:              bundle.Name,
+		Kind:              bundle.Kind,
+		Version:           bundle.Version,
+		Source:            bundle.Source,
+		SHA256:            bundle.SHA256,
+		ExpectedSHA256:    expectedSHA,
+		SourcePayloadPath: sourcePayload,
+		BundleDir:         bundle.BundleDir,
+		ManifestPath:      bundle.ManifestPath,
+		PayloadPath:       bundle.PayloadPath,
+		InstallPath:       installPath,
+	}, nil
 }
 
 func CreateManagedToolBundleInstallPlan(root, pack, dependency string) (ManagedToolBundleInstallPlan, error) {
@@ -2973,17 +5662,41 @@ func CreateManagedToolBundleInstallPlan(root, pack, dependency string) (ManagedT
 		return ManagedToolBundleInstallPlan{}, fmt.Errorf("managed bundle kind %s does not match dependency kind %s", bundle.Kind, dependencyKindForManagedInstall(declared))
 	}
 	return ManagedToolBundleInstallPlan{
-		Status:      "ready",
-		Mode:        "metadata-only",
-		Action:      "link",
-		Pack:        strings.TrimSpace(pack),
-		Dependency:  strings.TrimSpace(dependency),
-		Kind:        bundle.Kind,
-		Version:     bundle.Version,
-		Source:      bundle.Source,
-		SHA256:      bundle.SHA256,
-		PayloadPath: bundle.PayloadPath,
-		InstallPath: bundle.InstallPath,
+		Status:                    "ready",
+		Mode:                      "metadata-only",
+		Action:                    "link",
+		Pack:                      strings.TrimSpace(pack),
+		Dependency:                strings.TrimSpace(dependency),
+		Kind:                      bundle.Kind,
+		Version:                   bundle.Version,
+		Source:                    bundle.Source,
+		SHA256:                    bundle.SHA256,
+		ProvenanceStatus:          bundle.ProvenanceStatus,
+		ProvenanceSourceURL:       bundle.ProvenanceSourceURL,
+		ProvenanceUpstreamVersion: bundle.ProvenanceUpstreamVersion,
+		ProvenanceRetrievedAt:     bundle.ProvenanceRetrievedAt,
+		ProvenanceVerifiedBy:      bundle.ProvenanceVerifiedBy,
+		CorpusStatus:              bundle.CorpusStatus,
+		CorpusName:                bundle.CorpusName,
+		CorpusSource:              bundle.CorpusSource,
+		CorpusRetrievedAt:         bundle.CorpusRetrievedAt,
+		CorpusFileCount:           bundle.CorpusFileCount,
+		CorpusSHA256:              bundle.CorpusSHA256,
+		CorpusDigestStatus:        bundle.CorpusDigestStatus,
+		CorpusDigestAlgorithm:     bundle.CorpusDigestAlgorithm,
+		CorpusDigestScope:         bundle.CorpusDigestScope,
+		SignatureStatus:           bundle.SignatureStatus,
+		SignatureAlgorithm:        bundle.SignatureAlgorithm,
+		SignatureKeyID:            bundle.SignatureKeyID,
+		SignatureSignedAt:         bundle.SignatureSignedAt,
+		SignatureSignedBy:         bundle.SignatureSignedBy,
+		UpdateStatus:              bundle.UpdateStatus,
+		UpdateLatestVersion:       bundle.UpdateLatestVersion,
+		UpdateLatestSHA256:        bundle.UpdateLatestSHA256,
+		UpdateCheckedAt:           bundle.UpdateCheckedAt,
+		UpdateMessage:             bundle.UpdateMessage,
+		PayloadPath:               bundle.PayloadPath,
+		InstallPath:               bundle.InstallPath,
 	}, nil
 }
 
@@ -3011,22 +5724,54 @@ func ExecuteManagedToolBundleInstall(root, pack, dependency string, options Mana
 		return ManagedToolBundleInstallResult{}, fmt.Errorf("link managed tool bundle payload: %w", err)
 	}
 	return ManagedToolBundleInstallResult{
-		Status:      "installed",
-		Mode:        "workspace-link",
-		Action:      plan.Action,
-		Pack:        plan.Pack,
-		Dependency:  plan.Dependency,
-		Kind:        plan.Kind,
-		Version:     plan.Version,
-		Source:      plan.Source,
-		SHA256:      plan.SHA256,
-		PayloadPath: plan.PayloadPath,
-		InstallPath: plan.InstallPath,
+		Status:                    "installed",
+		Mode:                      "workspace-link",
+		Action:                    plan.Action,
+		Pack:                      plan.Pack,
+		Dependency:                plan.Dependency,
+		Kind:                      plan.Kind,
+		Version:                   plan.Version,
+		Source:                    plan.Source,
+		SHA256:                    plan.SHA256,
+		ProvenanceStatus:          plan.ProvenanceStatus,
+		ProvenanceSourceURL:       plan.ProvenanceSourceURL,
+		ProvenanceUpstreamVersion: plan.ProvenanceUpstreamVersion,
+		ProvenanceRetrievedAt:     plan.ProvenanceRetrievedAt,
+		ProvenanceVerifiedBy:      plan.ProvenanceVerifiedBy,
+		CorpusStatus:              plan.CorpusStatus,
+		CorpusName:                plan.CorpusName,
+		CorpusSource:              plan.CorpusSource,
+		CorpusRetrievedAt:         plan.CorpusRetrievedAt,
+		CorpusFileCount:           plan.CorpusFileCount,
+		CorpusSHA256:              plan.CorpusSHA256,
+		CorpusDigestStatus:        plan.CorpusDigestStatus,
+		CorpusDigestAlgorithm:     plan.CorpusDigestAlgorithm,
+		CorpusDigestScope:         plan.CorpusDigestScope,
+		SignatureStatus:           plan.SignatureStatus,
+		SignatureAlgorithm:        plan.SignatureAlgorithm,
+		SignatureKeyID:            plan.SignatureKeyID,
+		SignatureSignedAt:         plan.SignatureSignedAt,
+		SignatureSignedBy:         plan.SignatureSignedBy,
+		UpdateStatus:              plan.UpdateStatus,
+		UpdateLatestVersion:       plan.UpdateLatestVersion,
+		UpdateLatestSHA256:        plan.UpdateLatestSHA256,
+		UpdateCheckedAt:           plan.UpdateCheckedAt,
+		UpdateMessage:             plan.UpdateMessage,
+		PayloadPath:               plan.PayloadPath,
+		InstallPath:               plan.InstallPath,
 	}, nil
 }
 
 func CreateReleaseManagedToolBundleInstallPlan(root, releaseRoot, pack, dependency string) (ReleaseManagedToolBundleInstallPlan, error) {
+	return CreateReleaseManagedToolBundleInstallPlanWithOptions(root, releaseRoot, pack, dependency, ReleaseManagedToolBundleInstallPlanOptions{})
+}
+
+func CreateReleaseManagedToolBundleInstallPlanWithOptions(root, releaseRoot, pack, dependency string, options ReleaseManagedToolBundleInstallPlanOptions) (ReleaseManagedToolBundleInstallPlan, error) {
 	if err := requireAuthoredToolWorkspace(root); err != nil {
+		return ReleaseManagedToolBundleInstallPlan{}, err
+	}
+	expectedSHA, err := normalizeManagedToolBundleExpectedSHA256(options.ExpectedSHA256, options.ExpectedSHA256Provided)
+	if err != nil {
 		return ReleaseManagedToolBundleInstallPlan{}, err
 	}
 	declared, err := findManagedInstallDependency(root, pack, dependency)
@@ -3044,36 +5789,80 @@ func CreateReleaseManagedToolBundleInstallPlan(root, releaseRoot, pack, dependen
 	if bundle.Kind != dependencyKindForManagedInstall(declared) {
 		return ReleaseManagedToolBundleInstallPlan{}, fmt.Errorf("release managed bundle kind %s does not match dependency kind %s", bundle.Kind, dependencyKindForManagedInstall(declared))
 	}
+	if expectedSHA != "" && expectedSHA != bundle.SHA256 {
+		return ReleaseManagedToolBundleInstallPlan{}, fmt.Errorf("release managed bundle expected sha256 mismatch: expected %s actual %s", expectedSHA, bundle.SHA256)
+	}
 	workspaceBundleDir := filepath.Join(root, "toolchain", "managed-bundles", bundle.Name)
 	workspacePayloadPath, err := releaseWorkspacePayloadPath(bundle.BundleDir, bundle.PayloadPath, workspaceBundleDir)
 	if err != nil {
 		return ReleaseManagedToolBundleInstallPlan{}, err
 	}
 	return ReleaseManagedToolBundleInstallPlan{
-		Status:               "ready",
-		Mode:                 "metadata-only",
-		Action:               "copy-and-link",
-		Pack:                 strings.TrimSpace(pack),
-		Dependency:           strings.TrimSpace(dependency),
-		Kind:                 bundle.Kind,
-		Version:              bundle.Version,
-		Source:               bundle.Source,
-		SHA256:               bundle.SHA256,
-		ReleaseBundleDir:     bundle.BundleDir,
-		ReleasePayloadPath:   bundle.PayloadPath,
-		WorkspaceBundleDir:   workspaceBundleDir,
-		WorkspacePayloadPath: workspacePayloadPath,
-		InstallPath:          bundle.InstallPath,
+		Status:                    "ready",
+		Mode:                      "metadata-only",
+		Action:                    "copy-and-link",
+		Pack:                      strings.TrimSpace(pack),
+		Dependency:                strings.TrimSpace(dependency),
+		Kind:                      bundle.Kind,
+		Version:                   bundle.Version,
+		Source:                    bundle.Source,
+		SHA256:                    bundle.SHA256,
+		ExpectedSHA256:            expectedSHA,
+		ExpectedSHA256Status:      releaseManagedExpectedSHA256Status(expectedSHA, bundle.SHA256),
+		ProvenanceStatus:          bundle.ProvenanceStatus,
+		ProvenanceSourceURL:       bundle.ProvenanceSourceURL,
+		ProvenanceUpstreamVersion: bundle.ProvenanceUpstreamVersion,
+		ProvenanceRetrievedAt:     bundle.ProvenanceRetrievedAt,
+		ProvenanceVerifiedBy:      bundle.ProvenanceVerifiedBy,
+		CorpusStatus:              bundle.CorpusStatus,
+		CorpusName:                bundle.CorpusName,
+		CorpusSource:              bundle.CorpusSource,
+		CorpusRetrievedAt:         bundle.CorpusRetrievedAt,
+		CorpusFileCount:           bundle.CorpusFileCount,
+		CorpusSHA256:              bundle.CorpusSHA256,
+		CorpusDigestStatus:        bundle.CorpusDigestStatus,
+		CorpusDigestAlgorithm:     bundle.CorpusDigestAlgorithm,
+		CorpusDigestScope:         bundle.CorpusDigestScope,
+		SignatureStatus:           bundle.SignatureStatus,
+		SignatureAlgorithm:        bundle.SignatureAlgorithm,
+		SignatureKeyID:            bundle.SignatureKeyID,
+		SignatureSignedAt:         bundle.SignatureSignedAt,
+		SignatureSignedBy:         bundle.SignatureSignedBy,
+		UpdateStatus:              bundle.UpdateStatus,
+		UpdateLatestVersion:       bundle.UpdateLatestVersion,
+		UpdateLatestSHA256:        bundle.UpdateLatestSHA256,
+		UpdateCheckedAt:           bundle.UpdateCheckedAt,
+		UpdateMessage:             bundle.UpdateMessage,
+		ReleaseBundleDir:          bundle.BundleDir,
+		ReleasePayloadPath:        bundle.PayloadPath,
+		WorkspaceBundleDir:        workspaceBundleDir,
+		WorkspacePayloadPath:      workspacePayloadPath,
+		InstallPath:               bundle.InstallPath,
 	}, nil
 }
 
-func ExecuteReleaseManagedToolBundleInstall(root, releaseRoot, pack, dependency string, options ManagedToolBundleInstallOptions) (ReleaseManagedToolBundleInstallResult, error) {
+func ExecuteReleaseManagedToolBundleInstall(root, releaseRoot, pack, dependency string, options ReleaseManagedToolBundleInstallOptions) (ReleaseManagedToolBundleInstallResult, error) {
 	if !options.Execute {
 		return ReleaseManagedToolBundleInstallResult{}, fmt.Errorf("release managed tool bundle install requires --execute")
 	}
-	plan, err := CreateReleaseManagedToolBundleInstallPlan(root, releaseRoot, pack, dependency)
+	plan, err := CreateReleaseManagedToolBundleInstallPlanWithOptions(root, releaseRoot, pack, dependency, ReleaseManagedToolBundleInstallPlanOptions{
+		ExpectedSHA256:         options.ExpectedSHA256,
+		ExpectedSHA256Provided: options.ExpectedSHA256Provided,
+	})
 	if err != nil {
 		return ReleaseManagedToolBundleInstallResult{}, err
+	}
+	installDir := filepath.Dir(plan.InstallPath)
+	if err := ensureAuthoredToolDirectory(installDir, "managed install directory"); err != nil {
+		return ReleaseManagedToolBundleInstallResult{}, err
+	}
+	if err := rejectUnsafeAuthoredToolFile(plan.InstallPath, "managed install link"); err != nil {
+		return ReleaseManagedToolBundleInstallResult{}, err
+	}
+	if _, err := os.Lstat(plan.InstallPath); err == nil {
+		return ReleaseManagedToolBundleInstallResult{}, fmt.Errorf("managed install path already exists: %s", plan.InstallPath)
+	} else if !os.IsNotExist(err) {
+		return ReleaseManagedToolBundleInstallResult{}, fmt.Errorf("inspect managed install path: %w", err)
 	}
 	if err := ensureAuthoredToolDirectory(filepath.Dir(plan.WorkspaceBundleDir), "managed bundle directory"); err != nil {
 		return ReleaseManagedToolBundleInstallResult{}, err
@@ -3089,25 +5878,52 @@ func ExecuteReleaseManagedToolBundleInstall(root, releaseRoot, pack, dependency 
 	if err := copyManagedBundleDirectory(plan.ReleaseBundleDir, plan.WorkspaceBundleDir); err != nil {
 		return ReleaseManagedToolBundleInstallResult{}, err
 	}
-	install, err := ExecuteManagedToolBundleInstall(root, pack, dependency, options)
+	install, err := ExecuteManagedToolBundleInstall(root, pack, dependency, ManagedToolBundleInstallOptions{Execute: options.Execute})
 	if err != nil {
+		_ = os.RemoveAll(plan.WorkspaceBundleDir)
 		return ReleaseManagedToolBundleInstallResult{}, err
 	}
 	return ReleaseManagedToolBundleInstallResult{
-		Status:               install.Status,
-		Mode:                 "workspace-copy-link",
-		Action:               plan.Action,
-		Pack:                 plan.Pack,
-		Dependency:           plan.Dependency,
-		Kind:                 plan.Kind,
-		Version:              plan.Version,
-		Source:               plan.Source,
-		SHA256:               plan.SHA256,
-		ReleaseBundleDir:     plan.ReleaseBundleDir,
-		ReleasePayloadPath:   plan.ReleasePayloadPath,
-		WorkspaceBundleDir:   plan.WorkspaceBundleDir,
-		WorkspacePayloadPath: plan.WorkspacePayloadPath,
-		InstallPath:          install.InstallPath,
+		Status:                    install.Status,
+		Mode:                      "workspace-copy-link",
+		Action:                    plan.Action,
+		Pack:                      plan.Pack,
+		Dependency:                plan.Dependency,
+		Kind:                      plan.Kind,
+		Version:                   plan.Version,
+		Source:                    plan.Source,
+		SHA256:                    plan.SHA256,
+		ExpectedSHA256:            plan.ExpectedSHA256,
+		ExpectedSHA256Status:      plan.ExpectedSHA256Status,
+		ProvenanceStatus:          plan.ProvenanceStatus,
+		ProvenanceSourceURL:       plan.ProvenanceSourceURL,
+		ProvenanceUpstreamVersion: plan.ProvenanceUpstreamVersion,
+		ProvenanceRetrievedAt:     plan.ProvenanceRetrievedAt,
+		ProvenanceVerifiedBy:      plan.ProvenanceVerifiedBy,
+		CorpusStatus:              plan.CorpusStatus,
+		CorpusName:                plan.CorpusName,
+		CorpusSource:              plan.CorpusSource,
+		CorpusRetrievedAt:         plan.CorpusRetrievedAt,
+		CorpusFileCount:           plan.CorpusFileCount,
+		CorpusSHA256:              plan.CorpusSHA256,
+		CorpusDigestStatus:        plan.CorpusDigestStatus,
+		CorpusDigestAlgorithm:     plan.CorpusDigestAlgorithm,
+		CorpusDigestScope:         plan.CorpusDigestScope,
+		SignatureStatus:           plan.SignatureStatus,
+		SignatureAlgorithm:        plan.SignatureAlgorithm,
+		SignatureKeyID:            plan.SignatureKeyID,
+		SignatureSignedAt:         plan.SignatureSignedAt,
+		SignatureSignedBy:         plan.SignatureSignedBy,
+		UpdateStatus:              plan.UpdateStatus,
+		UpdateLatestVersion:       plan.UpdateLatestVersion,
+		UpdateLatestSHA256:        plan.UpdateLatestSHA256,
+		UpdateCheckedAt:           plan.UpdateCheckedAt,
+		UpdateMessage:             plan.UpdateMessage,
+		ReleaseBundleDir:          plan.ReleaseBundleDir,
+		ReleasePayloadPath:        plan.ReleasePayloadPath,
+		WorkspaceBundleDir:        plan.WorkspaceBundleDir,
+		WorkspacePayloadPath:      plan.WorkspacePayloadPath,
+		InstallPath:               install.InstallPath,
 	}, nil
 }
 
@@ -3124,6 +5940,517 @@ func ReadManagedToolBundle(root, name string) (ManagedToolBundle, error) {
 		return ManagedToolBundle{}, err
 	}
 	return readManagedToolBundle(root, filepath.Join(dir, safeName))
+}
+
+func readReleaseManagedToolBundle(dir string) (ReleaseManagedToolBundle, error) {
+	if err := requireAuthoredToolDirectory(dir, "release managed bundle directory"); err != nil {
+		return ReleaseManagedToolBundle{}, err
+	}
+	manifestPath := filepath.Join(dir, "bundle.yaml")
+	if err := rejectUnsafeAuthoredToolFile(manifestPath, "release managed bundle manifest"); err != nil {
+		return ReleaseManagedToolBundle{}, err
+	}
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return ReleaseManagedToolBundle{}, fmt.Errorf("read release managed bundle manifest %s: %w", manifestPath, err)
+	}
+	var manifest managedToolBundleManifest
+	if err := yaml.Unmarshal(data, &manifest); err != nil {
+		return ReleaseManagedToolBundle{}, fmt.Errorf("parse release managed bundle manifest %s: %w", manifestPath, err)
+	}
+	if err := validateManagedToolBundleManifest(manifest, filepath.Base(dir)); err != nil {
+		return ReleaseManagedToolBundle{}, err
+	}
+	provenance, err := managedToolBundleProvenanceMetadataFromManifest(manifest)
+	if err != nil {
+		return ReleaseManagedToolBundle{}, err
+	}
+	update, err := managedToolBundleUpdateMetadataFromManifest(manifest)
+	if err != nil {
+		return ReleaseManagedToolBundle{}, err
+	}
+	payloadPath, err := resolveManagedBundlePayloadPath(dir, manifest.Payload)
+	if err != nil {
+		return ReleaseManagedToolBundle{}, err
+	}
+	if err := validateManagedBundlePayload(payloadPath, manifest); err != nil {
+		return ReleaseManagedToolBundle{}, err
+	}
+	corpus, err := managedToolBundleCorpusMetadataFromManifest(manifest, payloadPath)
+	if err != nil {
+		return ReleaseManagedToolBundle{}, err
+	}
+	signature, err := managedToolBundleSignatureMetadataFromManifest(manifest)
+	if err != nil {
+		return ReleaseManagedToolBundle{}, err
+	}
+	return ReleaseManagedToolBundle{
+		Status:                    "available",
+		Mode:                      "metadata-only",
+		Name:                      strings.TrimSpace(manifest.Name),
+		Kind:                      strings.TrimSpace(manifest.Kind),
+		Version:                   strings.TrimSpace(manifest.Version),
+		Source:                    strings.TrimSpace(manifest.Source),
+		SHA256:                    strings.TrimSpace(manifest.SHA256),
+		ProvenanceStatus:          provenance.Status,
+		ProvenanceSourceURL:       provenance.SourceURL,
+		ProvenanceUpstreamVersion: provenance.UpstreamVersion,
+		ProvenanceRetrievedAt:     provenance.RetrievedAt,
+		ProvenanceVerifiedBy:      provenance.VerifiedBy,
+		CorpusStatus:              corpus.Status,
+		CorpusName:                corpus.Name,
+		CorpusSource:              corpus.Source,
+		CorpusRetrievedAt:         corpus.RetrievedAt,
+		CorpusFileCount:           corpus.FileCount,
+		CorpusSHA256:              corpus.SHA256,
+		CorpusDigestStatus:        corpus.DigestStatus,
+		CorpusDigestAlgorithm:     corpus.DigestAlgorithm,
+		CorpusDigestScope:         corpus.DigestScope,
+		SignatureStatus:           signature.Status,
+		SignatureAlgorithm:        signature.Algorithm,
+		SignatureKeyID:            signature.KeyID,
+		SignatureSignedAt:         signature.SignedAt,
+		SignatureSignedBy:         signature.SignedBy,
+		UpdateStatus:              update.Status,
+		UpdateLatestVersion:       update.LatestVersion,
+		UpdateLatestSHA256:        update.LatestSHA256,
+		UpdateCheckedAt:           update.CheckedAt,
+		UpdateMessage:             update.Message,
+		ReleaseBundleDir:          dir,
+		ReleaseManifestPath:       manifestPath,
+		ReleasePayloadPath:        payloadPath,
+	}, nil
+}
+
+func releaseManagedToolBundleStatusFromError(dir string, manifestPath string, err error) ReleaseManagedToolBundle {
+	name := filepath.Base(dir)
+	if strings.TrimSpace(name) == "." || strings.TrimSpace(name) == string(os.PathSeparator) {
+		name = "unknown"
+	}
+	return ReleaseManagedToolBundle{
+		Status:              "blocked",
+		Mode:                "metadata-only",
+		Name:                name,
+		ProvenanceStatus:    "blocked",
+		CorpusStatus:        "blocked",
+		CorpusDigestStatus:  "blocked",
+		SignatureStatus:     "blocked",
+		UpdateStatus:        "blocked",
+		ReleaseBundleDir:    dir,
+		ReleaseManifestPath: manifestPath,
+		Error:               err.Error(),
+	}
+}
+
+func releaseManagedToolBundleStatusForWorkspace(root string, bundle ReleaseManagedToolBundle) ReleaseManagedToolBundleStatus {
+	return releaseManagedToolBundleStatusForWorkspaceWithExpectedSHA(root, bundle, "")
+}
+
+func releaseManagedToolBundleStatusForWorkspaceWithExpectedSHA(root string, bundle ReleaseManagedToolBundle, expectedSHA string) ReleaseManagedToolBundleStatus {
+	status := ReleaseManagedToolBundleStatus{
+		Status:                    bundle.Status,
+		Mode:                      "read-only",
+		Name:                      bundle.Name,
+		Kind:                      bundle.Kind,
+		Version:                   bundle.Version,
+		Source:                    bundle.Source,
+		SHA256:                    bundle.SHA256,
+		ExpectedSHA256:            expectedSHA,
+		ExpectedSHA256Status:      releaseManagedExpectedSHA256Status(expectedSHA, bundle.SHA256),
+		ProvenanceStatus:          bundle.ProvenanceStatus,
+		ProvenanceSourceURL:       bundle.ProvenanceSourceURL,
+		ProvenanceUpstreamVersion: bundle.ProvenanceUpstreamVersion,
+		ProvenanceRetrievedAt:     bundle.ProvenanceRetrievedAt,
+		ProvenanceVerifiedBy:      bundle.ProvenanceVerifiedBy,
+		CorpusStatus:              bundle.CorpusStatus,
+		CorpusName:                bundle.CorpusName,
+		CorpusSource:              bundle.CorpusSource,
+		CorpusRetrievedAt:         bundle.CorpusRetrievedAt,
+		CorpusFileCount:           bundle.CorpusFileCount,
+		CorpusSHA256:              bundle.CorpusSHA256,
+		CorpusDigestStatus:        bundle.CorpusDigestStatus,
+		CorpusDigestAlgorithm:     bundle.CorpusDigestAlgorithm,
+		CorpusDigestScope:         bundle.CorpusDigestScope,
+		SignatureStatus:           bundle.SignatureStatus,
+		SignatureAlgorithm:        bundle.SignatureAlgorithm,
+		SignatureKeyID:            bundle.SignatureKeyID,
+		SignatureSignedAt:         bundle.SignatureSignedAt,
+		SignatureSignedBy:         bundle.SignatureSignedBy,
+		UpdateStatus:              bundle.UpdateStatus,
+		UpdateLatestVersion:       bundle.UpdateLatestVersion,
+		UpdateLatestSHA256:        bundle.UpdateLatestSHA256,
+		UpdateCheckedAt:           bundle.UpdateCheckedAt,
+		UpdateMessage:             bundle.UpdateMessage,
+		DigestAlgorithm:           "sha256",
+		DigestScope:               managedBundleDigestScope(bundle.Kind),
+		ReleaseBundleDir:          bundle.ReleaseBundleDir,
+		ReleaseManifestPath:       bundle.ReleaseManifestPath,
+		ReleasePayloadPath:        bundle.ReleasePayloadPath,
+		Error:                     bundle.Error,
+	}
+	if status.Status == "" {
+		status.Status = "blocked"
+	}
+	if status.Status == "blocked" {
+		if strings.TrimSpace(status.UpdateStatus) == "" {
+			status.UpdateStatus = "blocked"
+		}
+		if strings.TrimSpace(status.CorpusStatus) == "" {
+			status.CorpusStatus = "blocked"
+		}
+		if strings.TrimSpace(status.CorpusDigestStatus) == "" {
+			status.CorpusDigestStatus = "blocked"
+		}
+		status.DigestStatus = "blocked"
+		status.ImportStatus = "blocked"
+		status.LinkStatus = "blocked"
+		return status
+	}
+	if expectedSHA != "" && expectedSHA != bundle.SHA256 {
+		status.Status = "blocked"
+		status.DigestStatus = "verified"
+		status.ImportStatus = "blocked"
+		status.LinkStatus = "blocked"
+		status.Error = fmt.Sprintf("release managed bundle expected sha256 mismatch: expected %s actual %s", expectedSHA, bundle.SHA256)
+		return status
+	}
+	status.DigestStatus = "verified"
+	status.ImportStatus = "not_imported"
+	status.LinkStatus = "missing"
+	status.WorkspaceBundleDir = filepath.Join(root, "toolchain", "managed-bundles", bundle.Name)
+	status.WorkspaceManifestPath = filepath.Join(status.WorkspaceBundleDir, "bundle.yaml")
+	workspacePayloadPath, err := releaseWorkspacePayloadPath(bundle.ReleaseBundleDir, bundle.ReleasePayloadPath, status.WorkspaceBundleDir)
+	if err != nil {
+		status.ImportStatus = "blocked"
+		status.LinkStatus = "blocked"
+		status.Error = err.Error()
+		return status
+	}
+	status.WorkspacePayloadPath = workspacePayloadPath
+	installPath, err := managedToolBundleInstallPath(root, managedToolBundleManifest{Name: bundle.Name, Kind: bundle.Kind})
+	if err != nil {
+		status.ImportStatus = "blocked"
+		status.LinkStatus = "blocked"
+		status.Error = err.Error()
+		return status
+	}
+	status.InstallPath = installPath
+	return inspectReleaseManagedWorkspaceStatus(root, bundle, status)
+}
+
+func releaseManagedExpectedSHA256Status(expectedSHA string, actualSHA string) string {
+	if strings.TrimSpace(expectedSHA) == "" {
+		return ""
+	}
+	if expectedSHA == strings.TrimSpace(actualSHA) {
+		return "matched"
+	}
+	return "mismatch"
+}
+
+func inspectReleaseManagedWorkspaceStatus(root string, releaseBundle ReleaseManagedToolBundle, status ReleaseManagedToolBundleStatus) ReleaseManagedToolBundleStatus {
+	if err := rejectUnsafeAuthoredToolDirectory(filepath.Dir(status.WorkspaceBundleDir), "managed bundle directory"); err != nil {
+		status.ImportStatus = "blocked"
+		status.LinkStatus = "blocked"
+		status.Error = err.Error()
+		return status
+	}
+	info, err := os.Lstat(status.WorkspaceBundleDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return inspectReleaseManagedMissingWorkspaceInstall(status)
+		}
+		status.ImportStatus = "blocked"
+		status.LinkStatus = "blocked"
+		status.Error = fmt.Sprintf("inspect workspace managed bundle: %v", err)
+		return status
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		status.ImportStatus = "blocked"
+		status.LinkStatus = "blocked"
+		status.Error = fmt.Sprintf("workspace managed bundle directory must not be a symlink: %s", status.WorkspaceBundleDir)
+		return status
+	}
+	if !info.IsDir() {
+		status.ImportStatus = "blocked"
+		status.LinkStatus = "blocked"
+		status.Error = fmt.Sprintf("workspace managed bundle is not a directory: %s", status.WorkspaceBundleDir)
+		return status
+	}
+	workspaceBundle, err := readManagedToolBundle(root, status.WorkspaceBundleDir)
+	if err != nil {
+		status.ImportStatus = "blocked"
+		status.LinkStatus = "blocked"
+		status.Error = fmt.Sprintf("workspace managed bundle blocked: %v", err)
+		return status
+	}
+	status.WorkspaceManifestPath = workspaceBundle.ManifestPath
+	status.WorkspacePayloadPath = workspaceBundle.PayloadPath
+	if workspaceBundle.Kind != releaseBundle.Kind ||
+		workspaceBundle.Version != releaseBundle.Version ||
+		workspaceBundle.Source != releaseBundle.Source ||
+		workspaceBundle.SHA256 != releaseBundle.SHA256 {
+		status.ImportStatus = "conflict"
+		status.LinkStatus = "conflict"
+		status.Error = "workspace managed bundle metadata mismatch"
+		return status
+	}
+	return inspectReleaseManagedImportedInstall(status)
+}
+
+func inspectReleaseManagedMissingWorkspaceInstall(status ReleaseManagedToolBundleStatus) ReleaseManagedToolBundleStatus {
+	info, err := os.Lstat(status.InstallPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			status.ImportStatus = "not_imported"
+			status.LinkStatus = "missing"
+			return status
+		}
+		status.ImportStatus = "blocked"
+		status.LinkStatus = "blocked"
+		status.Error = fmt.Sprintf("inspect managed install path: %v", err)
+		return status
+	}
+	status.ImportStatus = "conflict"
+	status.LinkStatus = "conflict"
+	if info.Mode()&os.ModeSymlink != 0 {
+		status.Error = fmt.Sprintf("managed install path already exists: %s", status.InstallPath)
+		return status
+	}
+	status.Error = fmt.Sprintf("managed install path already exists: %s", status.InstallPath)
+	return status
+}
+
+func inspectReleaseManagedImportedInstall(status ReleaseManagedToolBundleStatus) ReleaseManagedToolBundleStatus {
+	if err := rejectUnsafeAuthoredToolDirectory(filepath.Dir(status.InstallPath), "managed install directory"); err != nil {
+		status.ImportStatus = "blocked"
+		status.LinkStatus = "blocked"
+		status.Error = err.Error()
+		return status
+	}
+	info, err := os.Lstat(status.InstallPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			status.ImportStatus = "imported"
+			status.LinkStatus = "missing"
+			status.Error = ""
+			return status
+		}
+		status.ImportStatus = "blocked"
+		status.LinkStatus = "blocked"
+		status.Error = fmt.Sprintf("inspect managed install path: %v", err)
+		return status
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		status.ImportStatus = "conflict"
+		status.LinkStatus = "conflict"
+		status.Error = fmt.Sprintf("managed install path already exists: %s", status.InstallPath)
+		return status
+	}
+	target, err := os.Readlink(status.InstallPath)
+	if err != nil {
+		status.ImportStatus = "blocked"
+		status.LinkStatus = "blocked"
+		status.Error = fmt.Sprintf("read managed install link: %v", err)
+		return status
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(filepath.Dir(status.InstallPath), target)
+	}
+	targetAbs, err := filepath.Abs(target)
+	if err != nil {
+		status.ImportStatus = "blocked"
+		status.LinkStatus = "blocked"
+		status.Error = fmt.Sprintf("resolve managed install link target: %v", err)
+		return status
+	}
+	expectedAbs, err := filepath.Abs(status.WorkspacePayloadPath)
+	if err != nil {
+		status.ImportStatus = "blocked"
+		status.LinkStatus = "blocked"
+		status.Error = fmt.Sprintf("resolve expected managed install link target: %v", err)
+		return status
+	}
+	if targetAbs != expectedAbs {
+		status.ImportStatus = "conflict"
+		status.LinkStatus = "conflict"
+		status.Error = fmt.Sprintf("managed install link target mismatch: %s -> %s", status.InstallPath, targetAbs)
+		return status
+	}
+	status.ImportStatus = "linked"
+	status.LinkStatus = "linked"
+	status.Error = ""
+	return status
+}
+
+func managedBundleDigestScope(kind string) string {
+	switch strings.TrimSpace(kind) {
+	case "binary":
+		return "file"
+	case "rule_bundle":
+		return "directory_canonical_records"
+	default:
+		return ""
+	}
+}
+
+func releaseManagedToolBundleStatusSourcePath(root string) (string, error) {
+	if strings.TrimSpace(root) == "" {
+		return "", fmt.Errorf("workspace root is required")
+	}
+	path, err := filepath.Abs(filepath.Join(root, "toolchain", "release-managed-status-source.json"))
+	if err != nil {
+		return "", fmt.Errorf("resolve release managed status source marker: %w", err)
+	}
+	return path, nil
+}
+
+func writeReleaseManagedToolBundleStatusSource(source ReleaseManagedToolBundleStatusSource) error {
+	if err := ensureAuthoredToolDirectory(filepath.Dir(source.Path), "release managed status source directory"); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(source, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode release managed status source marker: %w", err)
+	}
+	return writeAuthoredToolArtifactFile(source.Path, data, "release managed status source marker")
+}
+
+func releaseManagedToolBundleStatusSourceFromStatuses(path, releaseRoot string, statuses []ReleaseManagedToolBundleStatus) ReleaseManagedToolBundleStatusSource {
+	source := ReleaseManagedToolBundleStatusSource{
+		Path:        path,
+		ReleaseRoot: releaseRoot,
+		Total:       len(statuses),
+	}
+	for _, status := range statuses {
+		switch strings.TrimSpace(status.Status) {
+		case "available":
+			source.Available++
+		case "blocked":
+			source.Blocked++
+		}
+		switch strings.TrimSpace(status.ImportStatus) {
+		case "not_imported":
+			source.NotImported++
+		case "imported":
+			source.Imported++
+		case "linked":
+			source.Linked++
+		case "conflict":
+			source.Conflict++
+		}
+	}
+	return source
+}
+
+func inspectManagedToolBundleImportPayload(path string, kind string) (string, os.FileInfo, error) {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		return "", nil, fmt.Errorf("managed bundle import payload is required")
+	}
+	abs, err := filepath.Abs(trimmed)
+	if err != nil {
+		return "", nil, fmt.Errorf("resolve managed bundle import payload: %w", err)
+	}
+	info, err := os.Lstat(abs)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil, fmt.Errorf("managed bundle import payload missing: %s", abs)
+		}
+		return "", nil, fmt.Errorf("inspect managed bundle import payload: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return "", nil, fmt.Errorf("managed bundle import payload must not be a symlink: %s", abs)
+	}
+	if kind == "binary" && info.IsDir() {
+		return "", nil, fmt.Errorf("managed binary import payload is a directory: %s", abs)
+	}
+	if kind == "rule_bundle" && !info.IsDir() {
+		return "", nil, fmt.Errorf("managed rule_bundle import payload is not a directory: %s", abs)
+	}
+	if kind == "rule_bundle" {
+		return abs, info, nil
+	}
+	if !info.Mode().IsRegular() {
+		return "", nil, fmt.Errorf("managed bundle import payload must be a regular file: %s", abs)
+	}
+	return abs, info, nil
+}
+
+func digestManagedToolBundleImportPayload(path string, info os.FileInfo) (string, error) {
+	if info.IsDir() {
+		return digestManagedBundleDirectory(path)
+	}
+	return digestManagedToolBundleImportFile(path, info)
+}
+
+var managedBundleSourceAfterInspectHook func(path string)
+
+func openManagedBundleSourceFileAfterInspect(path string, inspected os.FileInfo, label string) (*os.File, error) {
+	if managedBundleSourceAfterInspectHook != nil {
+		managedBundleSourceAfterInspectHook(path)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", label, err)
+	}
+	current, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("stat opened %s: %w", label, err)
+	}
+	if !os.SameFile(inspected, current) {
+		_ = file.Close()
+		return nil, fmt.Errorf("%s changed after inspection: %s", label, path)
+	}
+	if !current.Mode().IsRegular() {
+		_ = file.Close()
+		return nil, fmt.Errorf("%s must be a regular file: %s", label, path)
+	}
+	return file, nil
+}
+
+func digestManagedToolBundleImportFile(path string, inspected os.FileInfo) (string, error) {
+	file, err := openManagedBundleSourceFileAfterInspect(path, inspected, "managed bundle import payload")
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return "", fmt.Errorf("read managed bundle import payload for digest: %w", err)
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func normalizeManagedToolBundleExpectedSHA256(value string, provided bool) (string, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" && !provided {
+		return "", nil
+	}
+	if trimmed == "" {
+		return "", fmt.Errorf("managed bundle import expected sha256 is invalid")
+	}
+	decoded, err := hex.DecodeString(trimmed)
+	if err != nil || len(decoded) != sha256.Size {
+		return "", fmt.Errorf("managed bundle import expected sha256 is invalid")
+	}
+	return strings.ToLower(trimmed), nil
+}
+
+func managedToolBundleImportManifest(name, kind, version, source, sha string) []byte {
+	payload := "payload/" + name
+	if kind == "rule_bundle" {
+		payload = "payload"
+	}
+	return []byte(
+		"name: " + name + "\n" +
+			"kind: " + kind + "\n" +
+			"version: " + strconv.Quote(version) + "\n" +
+			"source: " + strconv.Quote(source) + "\n" +
+			"payload: " + payload + "\n" +
+			"sha256: " + sha + "\n",
+	)
 }
 
 func readManagedToolBundle(root, dir string) (ManagedToolBundle, error) {
@@ -3145,6 +6472,14 @@ func readManagedToolBundle(root, dir string) (ManagedToolBundle, error) {
 	if err := validateManagedToolBundleManifest(manifest, filepath.Base(dir)); err != nil {
 		return ManagedToolBundle{}, err
 	}
+	provenance, err := managedToolBundleProvenanceMetadataFromManifest(manifest)
+	if err != nil {
+		return ManagedToolBundle{}, err
+	}
+	update, err := managedToolBundleUpdateMetadataFromManifest(manifest)
+	if err != nil {
+		return ManagedToolBundle{}, err
+	}
 	payloadPath, err := resolveManagedBundlePayloadPath(dir, manifest.Payload)
 	if err != nil {
 		return ManagedToolBundle{}, err
@@ -3152,21 +6487,53 @@ func readManagedToolBundle(root, dir string) (ManagedToolBundle, error) {
 	if err := validateManagedBundlePayload(payloadPath, manifest); err != nil {
 		return ManagedToolBundle{}, err
 	}
+	corpus, err := managedToolBundleCorpusMetadataFromManifest(manifest, payloadPath)
+	if err != nil {
+		return ManagedToolBundle{}, err
+	}
+	signature, err := managedToolBundleSignatureMetadataFromManifest(manifest)
+	if err != nil {
+		return ManagedToolBundle{}, err
+	}
 	installPath, err := managedToolBundleInstallPath(root, manifest)
 	if err != nil {
 		return ManagedToolBundle{}, err
 	}
 	return ManagedToolBundle{
-		Status:       "available",
-		Name:         strings.TrimSpace(manifest.Name),
-		Kind:         strings.TrimSpace(manifest.Kind),
-		Version:      strings.TrimSpace(manifest.Version),
-		Source:       strings.TrimSpace(manifest.Source),
-		SHA256:       strings.TrimSpace(manifest.SHA256),
-		BundleDir:    dir,
-		ManifestPath: manifestPath,
-		PayloadPath:  payloadPath,
-		InstallPath:  installPath,
+		Status:                    "available",
+		Name:                      strings.TrimSpace(manifest.Name),
+		Kind:                      strings.TrimSpace(manifest.Kind),
+		Version:                   strings.TrimSpace(manifest.Version),
+		Source:                    strings.TrimSpace(manifest.Source),
+		SHA256:                    strings.TrimSpace(manifest.SHA256),
+		ProvenanceStatus:          provenance.Status,
+		ProvenanceSourceURL:       provenance.SourceURL,
+		ProvenanceUpstreamVersion: provenance.UpstreamVersion,
+		ProvenanceRetrievedAt:     provenance.RetrievedAt,
+		ProvenanceVerifiedBy:      provenance.VerifiedBy,
+		CorpusStatus:              corpus.Status,
+		CorpusName:                corpus.Name,
+		CorpusSource:              corpus.Source,
+		CorpusRetrievedAt:         corpus.RetrievedAt,
+		CorpusFileCount:           corpus.FileCount,
+		CorpusSHA256:              corpus.SHA256,
+		CorpusDigestStatus:        corpus.DigestStatus,
+		CorpusDigestAlgorithm:     corpus.DigestAlgorithm,
+		CorpusDigestScope:         corpus.DigestScope,
+		SignatureStatus:           signature.Status,
+		SignatureAlgorithm:        signature.Algorithm,
+		SignatureKeyID:            signature.KeyID,
+		SignatureSignedAt:         signature.SignedAt,
+		SignatureSignedBy:         signature.SignedBy,
+		UpdateStatus:              update.Status,
+		UpdateLatestVersion:       update.LatestVersion,
+		UpdateLatestSHA256:        update.LatestSHA256,
+		UpdateCheckedAt:           update.CheckedAt,
+		UpdateMessage:             update.Message,
+		BundleDir:                 dir,
+		ManifestPath:              manifestPath,
+		PayloadPath:               payloadPath,
+		InstallPath:               installPath,
 	}, nil
 }
 
@@ -3197,6 +6564,345 @@ func validateManagedToolBundleManifest(manifest managedToolBundleManifest, dirNa
 		decoded, err := hex.DecodeString(digest)
 		if err != nil || len(decoded) != sha256.Size {
 			return fmt.Errorf("managed %s bundle sha256 is invalid", strings.TrimSpace(manifest.Kind))
+		}
+	}
+	return nil
+}
+
+func managedToolBundleProvenanceMetadataFromManifest(manifest managedToolBundleManifest) (managedToolBundleProvenanceMetadata, error) {
+	if manifest.Provenance == nil {
+		return managedToolBundleProvenanceMetadata{Status: "missing"}, nil
+	}
+	sourceURL := manifest.Provenance.SourceURL
+	upstreamVersion := manifest.Provenance.UpstreamVersion
+	retrievedAt := manifest.Provenance.RetrievedAt
+	verifiedBy := manifest.Provenance.VerifiedBy
+	if err := validateManagedToolBundleProvenanceToken("source_url", sourceURL); err != nil {
+		return managedToolBundleProvenanceMetadata{}, err
+	}
+	if err := validateManagedToolBundleProvenanceToken("upstream_version", upstreamVersion); err != nil {
+		return managedToolBundleProvenanceMetadata{}, err
+	}
+	if err := validateManagedToolBundleProvenanceToken("retrieved_at", retrievedAt); err != nil {
+		return managedToolBundleProvenanceMetadata{}, err
+	}
+	if err := validateManagedToolBundleProvenanceToken("verified_by", verifiedBy); err != nil {
+		return managedToolBundleProvenanceMetadata{}, err
+	}
+	provenance := managedToolBundleProvenanceMetadata{
+		Status:          "recorded",
+		SourceURL:       strings.TrimSpace(sourceURL),
+		UpstreamVersion: strings.TrimSpace(upstreamVersion),
+		RetrievedAt:     strings.TrimSpace(retrievedAt),
+		VerifiedBy:      strings.TrimSpace(verifiedBy),
+	}
+	if provenance.SourceURL == "" && provenance.UpstreamVersion == "" && provenance.RetrievedAt == "" && provenance.VerifiedBy == "" {
+		provenance.Status = "missing"
+		return provenance, nil
+	}
+	if provenance.SourceURL != "" {
+		parsed, err := url.Parse(provenance.SourceURL)
+		if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+			return managedToolBundleProvenanceMetadata{}, fmt.Errorf("managed bundle provenance source_url must be http or https")
+		}
+	}
+	if provenance.RetrievedAt != "" {
+		if _, err := time.Parse(time.RFC3339, provenance.RetrievedAt); err != nil {
+			return managedToolBundleProvenanceMetadata{}, fmt.Errorf("managed bundle provenance retrieved_at must be RFC3339")
+		}
+	}
+	return provenance, nil
+}
+
+func validateManagedToolBundleProvenanceToken(field, value string) error {
+	if value == "" {
+		return nil
+	}
+	if strings.TrimSpace(value) != value {
+		return fmt.Errorf("managed bundle provenance %s must be a single token", field)
+	}
+	for _, r := range value {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return fmt.Errorf("managed bundle provenance %s must be a single token", field)
+		}
+	}
+	return nil
+}
+
+func managedToolBundleCorpusMetadataFromManifest(manifest managedToolBundleManifest, payloadPath string) (managedToolBundleCorpusMetadata, error) {
+	if manifest.Corpus == nil {
+		return managedToolBundleCorpusMetadata{Status: "missing", DigestStatus: "missing"}, nil
+	}
+	if strings.TrimSpace(manifest.Kind) != "rule_bundle" {
+		return managedToolBundleCorpusMetadata{}, fmt.Errorf("managed bundle corpus metadata is supported only for rule_bundle bundles")
+	}
+	corpus := manifest.Corpus
+	schema := strings.TrimSpace(corpus.Schema)
+	name := strings.TrimSpace(corpus.Name)
+	source := strings.TrimSpace(corpus.Source)
+	retrievedAt := strings.TrimSpace(corpus.RetrievedAt)
+	sha := strings.ToLower(strings.TrimSpace(corpus.SHA256))
+	digestAlgorithm := strings.TrimSpace(corpus.DigestAlgorithm)
+	digestScope := strings.TrimSpace(corpus.DigestScope)
+	if schema == "" && name == "" && source == "" && retrievedAt == "" && corpus.FileCount == 0 && sha == "" && digestAlgorithm == "" && digestScope == "" {
+		return managedToolBundleCorpusMetadata{Status: "missing", DigestStatus: "missing"}, nil
+	}
+	for field, value := range map[string]string{
+		"schema":           corpus.Schema,
+		"name":             corpus.Name,
+		"source":           corpus.Source,
+		"retrieved_at":     corpus.RetrievedAt,
+		"sha256":           corpus.SHA256,
+		"digest_algorithm": corpus.DigestAlgorithm,
+		"digest_scope":     corpus.DigestScope,
+	} {
+		if err := validateManagedToolBundleCorpusToken(field, value); err != nil {
+			return managedToolBundleCorpusMetadata{}, err
+		}
+	}
+	if schema != "ouroboros.rule_corpus.v1" {
+		return managedToolBundleCorpusMetadata{}, fmt.Errorf("managed bundle corpus schema must be ouroboros.rule_corpus.v1")
+	}
+	if name == "" {
+		return managedToolBundleCorpusMetadata{}, fmt.Errorf("managed bundle corpus name is required")
+	}
+	if source == "" {
+		return managedToolBundleCorpusMetadata{}, fmt.Errorf("managed bundle corpus source is required")
+	}
+	parsed, err := url.Parse(source)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return managedToolBundleCorpusMetadata{}, fmt.Errorf("managed bundle corpus source must be http or https")
+	}
+	if retrievedAt == "" {
+		return managedToolBundleCorpusMetadata{}, fmt.Errorf("managed bundle corpus retrieved_at is required")
+	}
+	if _, err := time.Parse(time.RFC3339, retrievedAt); err != nil {
+		return managedToolBundleCorpusMetadata{}, fmt.Errorf("managed bundle corpus retrieved_at must be RFC3339")
+	}
+	if corpus.FileCount <= 0 {
+		return managedToolBundleCorpusMetadata{}, fmt.Errorf("managed bundle corpus file_count must be positive")
+	}
+	if digestAlgorithm != "sha256" {
+		return managedToolBundleCorpusMetadata{}, fmt.Errorf("managed bundle corpus digest_algorithm must be sha256")
+	}
+	if digestScope != "directory_canonical_records" {
+		return managedToolBundleCorpusMetadata{}, fmt.Errorf("managed bundle corpus digest_scope must be directory_canonical_records")
+	}
+	decoded, err := hex.DecodeString(sha)
+	if err != nil || len(decoded) != sha256.Size {
+		return managedToolBundleCorpusMetadata{}, fmt.Errorf("managed bundle corpus sha256 must be a SHA-256 hex digest")
+	}
+	expectedSHA := strings.ToLower(strings.TrimSpace(manifest.SHA256))
+	if sha != expectedSHA {
+		return managedToolBundleCorpusMetadata{}, fmt.Errorf("managed bundle corpus sha256 mismatch: expected %s actual %s", expectedSHA, sha)
+	}
+	actualFileCount, err := countManagedBundleDirectoryRegularFiles(payloadPath)
+	if err != nil {
+		return managedToolBundleCorpusMetadata{}, err
+	}
+	if corpus.FileCount != actualFileCount {
+		return managedToolBundleCorpusMetadata{}, fmt.Errorf("managed bundle corpus file_count mismatch: expected %d actual %d", corpus.FileCount, actualFileCount)
+	}
+	return managedToolBundleCorpusMetadata{
+		Status:          "recorded",
+		Name:            name,
+		Source:          source,
+		RetrievedAt:     retrievedAt,
+		FileCount:       corpus.FileCount,
+		SHA256:          sha,
+		DigestStatus:    "matched",
+		DigestAlgorithm: digestAlgorithm,
+		DigestScope:     digestScope,
+	}, nil
+}
+
+func validateManagedToolBundleCorpusToken(field, value string) error {
+	if value == "" {
+		return nil
+	}
+	if strings.TrimSpace(value) != value {
+		return fmt.Errorf("managed bundle corpus %s must be a single token", field)
+	}
+	for _, r := range value {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return fmt.Errorf("managed bundle corpus %s must be a single token", field)
+		}
+	}
+	return nil
+}
+
+func managedToolBundleSignatureMetadataFromManifest(manifest managedToolBundleManifest) (managedToolBundleSignatureMetadata, error) {
+	if manifest.Signature == nil {
+		return managedToolBundleSignatureMetadata{Status: "missing"}, nil
+	}
+	signature := manifest.Signature
+	algorithm := strings.TrimSpace(signature.Algorithm)
+	keyID := strings.TrimSpace(signature.KeyID)
+	publicKeyText := strings.TrimSpace(signature.PublicKey)
+	payloadSHA256 := strings.ToLower(strings.TrimSpace(signature.PayloadSHA256))
+	signatureText := strings.TrimSpace(signature.Signature)
+	signedAt := strings.TrimSpace(signature.SignedAt)
+	signedBy := strings.TrimSpace(signature.SignedBy)
+	if algorithm == "" && keyID == "" && publicKeyText == "" && payloadSHA256 == "" && signatureText == "" && signedAt == "" && signedBy == "" {
+		return managedToolBundleSignatureMetadata{Status: "missing"}, nil
+	}
+	for field, value := range map[string]string{
+		"algorithm":      signature.Algorithm,
+		"key_id":         signature.KeyID,
+		"public_key":     signature.PublicKey,
+		"payload_sha256": signature.PayloadSHA256,
+		"signature":      signature.Signature,
+		"signed_at":      signature.SignedAt,
+		"signed_by":      signature.SignedBy,
+	} {
+		if err := validateManagedToolBundleSignatureToken(field, value); err != nil {
+			return managedToolBundleSignatureMetadata{}, err
+		}
+	}
+	if algorithm != "ed25519" {
+		return managedToolBundleSignatureMetadata{}, fmt.Errorf("managed bundle signature algorithm must be ed25519")
+	}
+	if publicKeyText == "" {
+		return managedToolBundleSignatureMetadata{}, fmt.Errorf("managed bundle signature public_key is required")
+	}
+	if payloadSHA256 == "" {
+		return managedToolBundleSignatureMetadata{}, fmt.Errorf("managed bundle signature payload_sha256 is required")
+	}
+	if signatureText == "" {
+		return managedToolBundleSignatureMetadata{}, fmt.Errorf("managed bundle signature is required")
+	}
+	decodedPayloadSHA, err := hex.DecodeString(payloadSHA256)
+	if err != nil || len(decodedPayloadSHA) != sha256.Size {
+		return managedToolBundleSignatureMetadata{}, fmt.Errorf("managed bundle signature payload_sha256 must be a SHA-256 hex digest")
+	}
+	if payloadSHA256 != strings.ToLower(strings.TrimSpace(manifest.SHA256)) {
+		return managedToolBundleSignatureMetadata{}, fmt.Errorf("managed bundle signature payload_sha256 must match manifest sha256")
+	}
+	if signedAt != "" {
+		if _, err := time.Parse(time.RFC3339, signedAt); err != nil {
+			return managedToolBundleSignatureMetadata{}, fmt.Errorf("managed bundle signature signed_at must be RFC3339")
+		}
+	}
+	publicKey, err := decodeManagedToolBundleSignatureBase64(publicKeyText, "public_key")
+	if err != nil {
+		return managedToolBundleSignatureMetadata{}, err
+	}
+	if len(publicKey) != ed25519.PublicKeySize {
+		return managedToolBundleSignatureMetadata{}, fmt.Errorf("managed bundle signature public_key must be ed25519 public key bytes")
+	}
+	signatureBytes, err := decodeManagedToolBundleSignatureBase64(signatureText, "signature")
+	if err != nil {
+		return managedToolBundleSignatureMetadata{}, err
+	}
+	if len(signatureBytes) != ed25519.SignatureSize {
+		return managedToolBundleSignatureMetadata{}, fmt.Errorf("managed bundle signature must be ed25519 signature bytes")
+	}
+	message := managedToolBundleSignatureMessage(manifest, payloadSHA256)
+	if !ed25519.Verify(ed25519.PublicKey(publicKey), message, signatureBytes) {
+		return managedToolBundleSignatureMetadata{}, fmt.Errorf("managed bundle signature verification failed")
+	}
+	return managedToolBundleSignatureMetadata{
+		Status:    "verified",
+		Algorithm: algorithm,
+		KeyID:     keyID,
+		SignedAt:  signedAt,
+		SignedBy:  signedBy,
+	}, nil
+}
+
+func validateManagedToolBundleSignatureToken(field, value string) error {
+	if value == "" {
+		return nil
+	}
+	if strings.TrimSpace(value) != value {
+		return fmt.Errorf("managed bundle signature %s must be a single token", field)
+	}
+	for _, r := range value {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return fmt.Errorf("managed bundle signature %s must be a single token", field)
+		}
+	}
+	return nil
+}
+
+func decodeManagedToolBundleSignatureBase64(value string, field string) ([]byte, error) {
+	for _, encoding := range []*base64.Encoding{base64.RawStdEncoding, base64.StdEncoding, base64.RawURLEncoding, base64.URLEncoding} {
+		if decoded, err := encoding.DecodeString(value); err == nil {
+			return decoded, nil
+		}
+	}
+	return nil, fmt.Errorf("managed bundle signature %s must be base64", field)
+}
+
+func managedToolBundleSignatureMessage(manifest managedToolBundleManifest, payloadSHA256 string) []byte {
+	return []byte("ouroboros-managed-bundle-signature-v1\nname:" + strings.TrimSpace(manifest.Name) + "\nkind:" + strings.TrimSpace(manifest.Kind) + "\nversion:" + strings.TrimSpace(manifest.Version) + "\npayload_sha256:" + strings.ToLower(strings.TrimSpace(payloadSHA256)) + "\n")
+}
+
+func managedToolBundleUpdateMetadataFromManifest(manifest managedToolBundleManifest) (managedToolBundleUpdateMetadata, error) {
+	if manifest.Update == nil {
+		return managedToolBundleUpdateMetadata{Status: "unknown"}, nil
+	}
+	latestVersion := manifest.Update.LatestVersion
+	latestSHA256 := manifest.Update.LatestSHA256
+	checkedAt := manifest.Update.CheckedAt
+	message := manifest.Update.Message
+	if err := validateManagedToolBundleUpdateToken("latest_version", latestVersion); err != nil {
+		return managedToolBundleUpdateMetadata{}, err
+	}
+	if err := validateManagedToolBundleUpdateToken("latest_sha256", latestSHA256); err != nil {
+		return managedToolBundleUpdateMetadata{}, err
+	}
+	normalizedLatestSHA256 := strings.TrimSpace(latestSHA256)
+	if normalizedLatestSHA256 != "" {
+		decoded, err := hex.DecodeString(normalizedLatestSHA256)
+		if err != nil || len(decoded) != sha256.Size {
+			return managedToolBundleUpdateMetadata{}, fmt.Errorf("managed bundle update latest_sha256 must be a SHA-256 hex digest")
+		}
+		normalizedLatestSHA256 = strings.ToLower(normalizedLatestSHA256)
+	}
+	if err := validateManagedToolBundleUpdateToken("checked_at", checkedAt); err != nil {
+		return managedToolBundleUpdateMetadata{}, err
+	}
+	if err := validateManagedToolBundleUpdateToken("message", message); err != nil {
+		return managedToolBundleUpdateMetadata{}, err
+	}
+	update := managedToolBundleUpdateMetadata{
+		Status:        "unknown",
+		LatestVersion: strings.TrimSpace(latestVersion),
+		LatestSHA256:  normalizedLatestSHA256,
+		CheckedAt:     strings.TrimSpace(checkedAt),
+		Message:       strings.TrimSpace(message),
+	}
+	if update.CheckedAt != "" {
+		if _, err := time.Parse(time.RFC3339, update.CheckedAt); err != nil {
+			return managedToolBundleUpdateMetadata{}, fmt.Errorf("managed bundle update checked_at must be RFC3339")
+		}
+	}
+	currentVersion := strings.TrimSpace(manifest.Version)
+	currentSHA256 := strings.ToLower(strings.TrimSpace(manifest.SHA256))
+	versionKnown := update.LatestVersion != ""
+	shaKnown := update.LatestSHA256 != ""
+	switch {
+	case versionKnown && update.LatestVersion != currentVersion:
+		update.Status = "update_available"
+	case shaKnown && update.LatestSHA256 != currentSHA256:
+		update.Status = "update_available"
+	case versionKnown || shaKnown:
+		update.Status = "current"
+	}
+	return update, nil
+}
+
+func validateManagedToolBundleUpdateToken(field, value string) error {
+	if value == "" {
+		return nil
+	}
+	if strings.TrimSpace(value) != value {
+		return fmt.Errorf("managed bundle update %s must be a single token", field)
+	}
+	for _, r := range value {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return fmt.Errorf("managed bundle update %s must be a single token", field)
 		}
 	}
 	return nil
@@ -3266,21 +6972,29 @@ func validateManagedBundlePayload(path string, manifest managedToolBundleManifes
 }
 
 func releaseManagedToolBundleDir(releaseRoot, name string) (string, error) {
-	if strings.TrimSpace(releaseRoot) == "" {
-		return "", fmt.Errorf("release root is required")
-	}
 	safeName, err := validateAuthoredToolName(name)
 	if err != nil {
 		return "", err
 	}
-	root, err := filepath.Abs(filepath.Join(releaseRoot, "toolchains", "managed-bundles"))
+	root, err := releaseManagedToolBundleRoot(releaseRoot)
 	if err != nil {
-		return "", fmt.Errorf("resolve release managed bundle root: %w", err)
+		return "", err
 	}
 	if err := rejectUnsafeAuthoredToolDirectory(root, "release managed bundle root"); err != nil {
 		return "", err
 	}
 	return filepath.Join(root, safeName), nil
+}
+
+func releaseManagedToolBundleRoot(releaseRoot string) (string, error) {
+	if strings.TrimSpace(releaseRoot) == "" {
+		return "", fmt.Errorf("release root is required")
+	}
+	root, err := filepath.Abs(filepath.Join(releaseRoot, "toolchains", "managed-bundles"))
+	if err != nil {
+		return "", fmt.Errorf("resolve release managed bundle root: %w", err)
+	}
+	return root, nil
 }
 
 func releaseWorkspacePayloadPath(releaseBundleDir, releasePayloadPath, workspaceBundleDir string) (string, error) {
@@ -3295,8 +7009,15 @@ func releaseWorkspacePayloadPath(releaseBundleDir, releasePayloadPath, workspace
 }
 
 func copyManagedBundleDirectory(src, dst string) error {
+	return copyManagedBundleDirectoryWithFileMode(src, dst, 0)
+}
+
+func copyManagedBundleDirectoryWithFileMode(src, dst string, fileMode os.FileMode) error {
 	if err := requireAuthoredToolDirectory(src, "release managed bundle directory"); err != nil {
 		return err
+	}
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return fmt.Errorf("create managed bundle target directory: %w", err)
 	}
 	if err := filepath.WalkDir(src, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
@@ -3329,7 +7050,11 @@ func copyManagedBundleDirectory(src, dst string) error {
 		if !info.Mode().IsRegular() {
 			return fmt.Errorf("managed bundle source must contain only regular files: %s", path)
 		}
-		if err := copyManagedBundleFile(path, target, info.Mode().Perm()); err != nil {
+		mode := info.Mode().Perm()
+		if fileMode != 0 {
+			mode = fileMode
+		}
+		if err := copyManagedBundleFile(path, target, mode, info); err != nil {
 			return err
 		}
 		return nil
@@ -3340,13 +7065,13 @@ func copyManagedBundleDirectory(src, dst string) error {
 	return nil
 }
 
-func copyManagedBundleFile(src, dst string, mode os.FileMode) error {
+func copyManagedBundleFile(src, dst string, mode os.FileMode, inspected os.FileInfo) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return fmt.Errorf("create managed bundle target file directory: %w", err)
 	}
-	in, err := os.Open(src)
+	in, err := openManagedBundleSourceFileAfterInspect(src, inspected, "managed bundle source file")
 	if err != nil {
-		return fmt.Errorf("open managed bundle source file: %w", err)
+		return err
 	}
 	defer in.Close()
 	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
@@ -3363,8 +7088,41 @@ func copyManagedBundleFile(src, dst string, mode os.FileMode) error {
 	return nil
 }
 
+const managedRuleBundleDirectoryDigestVersion = "ouroboros managed rule_bundle directory digest v1\n"
+
+func countManagedBundleDirectoryRegularFiles(dir string) (int, error) {
+	count := 0
+	if err := filepath.WalkDir(dir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		info, err := os.Lstat(path)
+		if err != nil {
+			return fmt.Errorf("inspect managed bundle corpus path: %w", err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("managed bundle corpus path must not be a symlink: %s", path)
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("managed bundle corpus path must be a regular file: %s", path)
+		}
+		count++
+		return nil
+	}); err != nil {
+		return 0, err
+	}
+	if count == 0 {
+		return 0, fmt.Errorf("managed rule_bundle payload must contain at least one regular file: %s", dir)
+	}
+	return count, nil
+}
+
 func digestManagedBundleDirectory(dir string) (string, error) {
 	paths := []string{}
+	inspectedFiles := map[string]os.FileInfo{}
 	if err := filepath.WalkDir(dir, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -3386,22 +7144,41 @@ func digestManagedBundleDirectory(dir string) (string, error) {
 		if err != nil {
 			return fmt.Errorf("resolve managed bundle digest path: %w", err)
 		}
-		paths = append(paths, filepath.ToSlash(rel))
+		rel = filepath.ToSlash(rel)
+		paths = append(paths, rel)
+		inspectedFiles[rel] = info
 		return nil
 	}); err != nil {
 		return "", err
 	}
+	if len(paths) == 0 {
+		return "", fmt.Errorf("managed rule_bundle payload must contain at least one regular file: %s", dir)
+	}
 	sort.Strings(paths)
 	hash := sha256.New()
+	hash.Write([]byte(managedRuleBundleDirectoryDigestVersion))
 	for _, rel := range paths {
-		data, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(rel)))
+		file, err := openManagedBundleSourceFileAfterInspect(filepath.Join(dir, filepath.FromSlash(rel)), inspectedFiles[rel], "managed bundle digest file")
+		if err != nil {
+			return "", err
+		}
+		contentHash := sha256.New()
+		size, err := io.Copy(contentHash, file)
+		closeErr := file.Close()
 		if err != nil {
 			return "", fmt.Errorf("read managed bundle digest file: %w", err)
 		}
-		hash.Write([]byte(rel))
-		hash.Write([]byte{0})
-		hash.Write(data)
-		hash.Write([]byte{0})
+		if closeErr != nil {
+			return "", fmt.Errorf("close managed bundle digest file: %w", closeErr)
+		}
+		var field [8]byte
+		relBytes := []byte(rel)
+		binary.BigEndian.PutUint64(field[:], uint64(len(relBytes)))
+		hash.Write(field[:])
+		hash.Write(relBytes)
+		binary.BigEndian.PutUint64(field[:], uint64(size))
+		hash.Write(field[:])
+		hash.Write(contentHash.Sum(nil))
 	}
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
@@ -3530,7 +7307,7 @@ func CreateToolchainInstallRequest(root, pack, dependency string) (ToolchainInst
 }
 
 func ListToolchainInstallRequests(root string) ([]ToolchainInstallRequest, error) {
-	doctor, err := doctorWorkspaceMetadataOnly(root)
+	doctor, err := doctorToolchainInstallRuntime(root)
 	if err != nil {
 		return nil, err
 	}
@@ -3641,6 +7418,171 @@ func resolveToolchainInstallRequestPath(root, requestPath string) (string, error
 	}
 	if filepath.Ext(candidate) != ".json" {
 		return "", fmt.Errorf("install request path must be a json file")
+	}
+	return candidate, nil
+}
+
+func resolveManagedToolBundleUpdateRequestPath(root, requestPath string) (string, error) {
+	trimmed := strings.TrimSpace(requestPath)
+	if trimmed == "" {
+		return "", fmt.Errorf("managed bundle update request path is required")
+	}
+	dir, err := filepath.Abs(managedToolBundleUpdateRequestDir(root))
+	if err != nil {
+		return "", fmt.Errorf("resolve managed bundle update request directory: %w", err)
+	}
+	if err := rejectUnsafeAuthoredToolDirectory(dir, "managed bundle update request directory"); err != nil {
+		return "", err
+	}
+	candidate := trimmed
+	if !filepath.IsAbs(candidate) {
+		candidate = filepath.Join(dir, candidate)
+	}
+	candidate, err = filepath.Abs(candidate)
+	if err != nil {
+		return "", fmt.Errorf("resolve managed bundle update request path: %w", err)
+	}
+	rel, err := filepath.Rel(dir, candidate)
+	if err != nil {
+		return "", fmt.Errorf("resolve managed bundle update request relative path: %w", err)
+	}
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("managed bundle update request path must stay under %s", dir)
+	}
+	if filepath.Ext(candidate) != ".json" {
+		return "", fmt.Errorf("managed bundle update request path must be a json file")
+	}
+	return candidate, nil
+}
+
+func resolveManagedToolBundleUpdateDownloadPlanPath(root, planPath string) (string, error) {
+	trimmed := strings.TrimSpace(planPath)
+	if trimmed == "" {
+		return "", fmt.Errorf("managed bundle update download plan path is required")
+	}
+	dir, err := filepath.Abs(managedToolBundleUpdateDownloadPlanDir(root))
+	if err != nil {
+		return "", fmt.Errorf("resolve managed bundle update download plan directory: %w", err)
+	}
+	if err := rejectUnsafeAuthoredToolDirectory(dir, "managed bundle update download plan directory"); err != nil {
+		return "", err
+	}
+	candidate := trimmed
+	if !filepath.IsAbs(candidate) {
+		candidate = filepath.Join(dir, candidate)
+	}
+	candidate, err = filepath.Abs(candidate)
+	if err != nil {
+		return "", fmt.Errorf("resolve managed bundle update download plan path: %w", err)
+	}
+	rel, err := filepath.Rel(dir, candidate)
+	if err != nil {
+		return "", fmt.Errorf("resolve managed bundle update download plan relative path: %w", err)
+	}
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("managed bundle update download plan path must stay under %s", dir)
+	}
+	if filepath.Ext(candidate) != ".json" {
+		return "", fmt.Errorf("managed bundle update download plan path must be a json file")
+	}
+	return candidate, nil
+}
+
+func resolveManagedToolBundleUpdateDownloadExecutionPath(root, executionPath string) (string, error) {
+	trimmed := strings.TrimSpace(executionPath)
+	if trimmed == "" {
+		return "", fmt.Errorf("managed bundle update download execution path is required")
+	}
+	dir, err := filepath.Abs(managedToolBundleUpdateDownloadExecutionDir(root))
+	if err != nil {
+		return "", fmt.Errorf("resolve managed bundle update download execution directory: %w", err)
+	}
+	if err := rejectUnsafeAuthoredToolDirectory(dir, "managed bundle update download execution directory"); err != nil {
+		return "", err
+	}
+	candidate := trimmed
+	if !filepath.IsAbs(candidate) {
+		candidate = filepath.Join(dir, candidate)
+	}
+	candidate, err = filepath.Abs(candidate)
+	if err != nil {
+		return "", fmt.Errorf("resolve managed bundle update download execution path: %w", err)
+	}
+	rel, err := filepath.Rel(dir, candidate)
+	if err != nil {
+		return "", fmt.Errorf("resolve managed bundle update download execution relative path: %w", err)
+	}
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("managed bundle update download execution path must stay under %s", dir)
+	}
+	if filepath.Ext(candidate) != ".json" {
+		return "", fmt.Errorf("managed bundle update download execution path must be a json file")
+	}
+	return candidate, nil
+}
+
+func resolveManagedToolBundleUpdateApplyExecutionPath(root, executionPath string) (string, error) {
+	trimmed := strings.TrimSpace(executionPath)
+	if trimmed == "" {
+		return "", fmt.Errorf("managed bundle update apply execution path is required")
+	}
+	dir, err := filepath.Abs(managedToolBundleUpdateApplyExecutionDir(root))
+	if err != nil {
+		return "", fmt.Errorf("resolve managed bundle update apply execution directory: %w", err)
+	}
+	if err := rejectUnsafeAuthoredToolDirectory(dir, "managed bundle update apply execution directory"); err != nil {
+		return "", err
+	}
+	candidate := trimmed
+	if !filepath.IsAbs(candidate) {
+		candidate = filepath.Join(dir, candidate)
+	}
+	candidate, err = filepath.Abs(candidate)
+	if err != nil {
+		return "", fmt.Errorf("resolve managed bundle update apply execution path: %w", err)
+	}
+	rel, err := filepath.Rel(dir, candidate)
+	if err != nil {
+		return "", fmt.Errorf("resolve managed bundle update apply execution relative path: %w", err)
+	}
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("managed bundle update apply execution path must stay under %s", dir)
+	}
+	if filepath.Ext(candidate) != ".json" {
+		return "", fmt.Errorf("managed bundle update apply execution path must be a json file")
+	}
+	return candidate, nil
+}
+
+func resolveManagedToolBundleUpdateDownloadPayloadPath(root, payloadPath string) (string, error) {
+	trimmed := strings.TrimSpace(payloadPath)
+	if trimmed == "" {
+		return "", fmt.Errorf("managed bundle update apply staged payload path is required")
+	}
+	dir, err := filepath.Abs(managedToolBundleUpdateDownloadStagingDir(root))
+	if err != nil {
+		return "", fmt.Errorf("resolve managed bundle update download staging directory: %w", err)
+	}
+	if err := rejectUnsafeAuthoredToolDirectory(dir, "managed bundle update download staging directory"); err != nil {
+		return "", err
+	}
+	candidate := trimmed
+	if !filepath.IsAbs(candidate) {
+		candidate = filepath.Join(dir, candidate)
+	}
+	candidate, err = filepath.Abs(candidate)
+	if err != nil {
+		return "", fmt.Errorf("resolve managed bundle update apply staged payload path: %w", err)
+	}
+	rel, err := filepath.Rel(dir, candidate)
+	if err != nil {
+		return "", fmt.Errorf("resolve managed bundle update apply staged payload relative path: %w", err)
+	}
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("managed bundle update apply staged payload path must stay under %s", dir)
+	}
+	if filepath.Base(candidate) != "payload" {
+		return "", fmt.Errorf("managed bundle update apply staged payload path must end with payload")
 	}
 	return candidate, nil
 }
@@ -3765,6 +7707,36 @@ func resolveToolCompilePreviewReviewExecutionPath(root, executionPath string) (s
 	return candidate, nil
 }
 
+func resolveToolCompilePreviewReviewExecutionDispatchPath(root, dispatchPath string) (string, error) {
+	trimmed := strings.TrimSpace(dispatchPath)
+	if trimmed == "" {
+		return "", fmt.Errorf("compile preview review execution dispatch path is required")
+	}
+	dir, err := filepath.Abs(toolCompilePreviewReviewExecutionDispatchDir(root))
+	if err != nil {
+		return "", fmt.Errorf("resolve compile preview review execution dispatch directory: %w", err)
+	}
+	candidate := trimmed
+	if !filepath.IsAbs(candidate) {
+		candidate = filepath.Join(dir, candidate)
+	}
+	candidate, err = filepath.Abs(candidate)
+	if err != nil {
+		return "", fmt.Errorf("resolve compile preview review execution dispatch path: %w", err)
+	}
+	rel, err := filepath.Rel(dir, candidate)
+	if err != nil {
+		return "", fmt.Errorf("resolve compile preview review execution dispatch relative path: %w", err)
+	}
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("compile preview review execution dispatch path must stay under %s", dir)
+	}
+	if filepath.Ext(candidate) != ".json" {
+		return "", fmt.Errorf("compile preview review execution dispatch path must be a json file")
+	}
+	return candidate, nil
+}
+
 func resolveToolchainInstallRetryDispatchPath(root, dispatchPath string) (string, error) {
 	trimmed := strings.TrimSpace(dispatchPath)
 	if trimmed == "" {
@@ -3829,12 +7801,36 @@ func toolchainInstallRequestDir(root string) string {
 	return filepath.Join(root, "toolchain", "install-requests")
 }
 
+func managedToolBundleUpdateRequestDir(root string) string {
+	return filepath.Join(root, "toolchain", "managed-update-requests")
+}
+
+func managedToolBundleUpdateDownloadPlanDir(root string) string {
+	return filepath.Join(root, "toolchain", "managed-update-download-plans")
+}
+
+func managedToolBundleUpdateDownloadStagingDir(root string) string {
+	return filepath.Join(root, "toolchain", "managed-update-downloads")
+}
+
+func managedToolBundleUpdateDownloadExecutionDir(root string) string {
+	return filepath.Join(root, "toolchain", "managed-update-download-executions")
+}
+
+func managedToolBundleUpdateApplyExecutionDir(root string) string {
+	return filepath.Join(root, "toolchain", "managed-update-apply-executions")
+}
+
 func toolCompilePreviewReviewDir(root string) string {
 	return filepath.Join(root, "toolchain", "compile-preview-reviews")
 }
 
 func toolCompilePreviewReviewExecutionDir(root string) string {
 	return filepath.Join(root, "toolchain", "compile-preview-review-executions")
+}
+
+func toolCompilePreviewReviewExecutionDispatchDir(root string) string {
+	return filepath.Join(root, "toolchain", "compile-preview-review-execution-dispatches")
 }
 
 func toolCompilePreviewReviewSelectionPath(root string) string {
@@ -3911,6 +7907,60 @@ func safeInstallRetryDispatchName(plan ToolchainInstallRetryPlan) string {
 	}
 	for _, skipped := range plan.Skipped {
 		parts = append(parts, skipped.ExecutionPath, skipped.DispatchPath, skipped.RequestPath, skipped.Pack, skipped.Dependency, skipped.Status, skipped.Reason)
+	}
+	return safeInstallRequestName(strings.Join(parts, "|"))
+}
+
+func safeManagedToolBundleUpdateRequestName(request ManagedToolBundleUpdateRequest) string {
+	parts := []string{
+		"managed-update-request",
+		request.Name,
+		request.Kind,
+		request.CurrentVersion,
+		request.CurrentSHA256,
+		request.LatestVersion,
+		request.LatestSHA256,
+		request.UpdateCheckedAt,
+		request.ReleaseManifestPath,
+	}
+	return safeInstallRequestName(strings.Join(parts, "|"))
+}
+
+func safeManagedToolBundleUpdateDownloadPlanName(plan ManagedToolBundleUpdateDownloadPlan) string {
+	parts := []string{
+		"managed-update-download-plan",
+		plan.Name,
+		plan.Kind,
+		plan.RequestPath,
+		plan.SourceURL,
+		plan.ExpectedSHA256,
+		plan.LatestVersion,
+		plan.LatestSHA256,
+		plan.UpdateCheckedAt,
+	}
+	return safeInstallRequestName(strings.Join(parts, "|"))
+}
+
+func safeManagedToolBundleUpdateDownloadExecutionName(execution ManagedToolBundleUpdateDownloadExecution) string {
+	parts := []string{
+		"managed-update-download-execution",
+		execution.PlanPath,
+		execution.SourceURL,
+		execution.ExpectedSHA256,
+		execution.Actor,
+		execution.ExecutedAt,
+	}
+	return safeInstallRequestName(strings.Join(parts, "|"))
+}
+
+func safeManagedToolBundleUpdateApplyExecutionName(execution ManagedToolBundleUpdateApplyExecution) string {
+	parts := []string{
+		"managed-update-apply-execution",
+		execution.DownloadExecutionPath,
+		execution.ExpectedSHA256,
+		execution.WorkspaceBundleDir,
+		execution.Actor,
+		execution.AppliedAt,
 	}
 	return safeInstallRequestName(strings.Join(parts, "|"))
 }

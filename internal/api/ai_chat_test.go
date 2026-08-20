@@ -1,16 +1,24 @@
-package api
+﻿package api
 
 import (
 	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/ouroboros/ouroboros/internal/eventlog"
 )
+
+func skipIfWindows(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("test relies on POSIX shell probe execution and is Linux-only")
+	}
+}
 
 func TestParseAndExecuteAIActionsRealWorkspaceFiles(t *testing.T) {
 	workspace := t.TempDir()
@@ -87,6 +95,7 @@ func TestAppendAIConversationWritesReplayEvents(t *testing.T) {
 }
 
 func TestRunAgentTaskStartsRealExecution(t *testing.T) {
+	skipIfWindows(t)
 	workspace := t.TempDir()
 	task, err := (&Server{workspace: workspace}).createAgentTask("operator", "执行真实命令")
 	if err != nil {

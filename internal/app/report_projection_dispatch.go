@@ -95,6 +95,7 @@ type ReportProjectionDispatchExecution struct {
 	DispatchPath string                                       `json:"dispatch_path"`
 	RunID        string                                       `json:"run_id"`
 	ReportPath   string                                       `json:"report_path"`
+	ReportSHA256 string                                       `json:"report_sha256,omitempty"`
 	EventCount   int                                          `json:"event_count"`
 	Written      bool                                         `json:"written"`
 	Error        string                                       `json:"error,omitempty"`
@@ -193,6 +194,7 @@ func ExecuteReportProjectionDispatch(ctx context.Context, root, dispatchPath str
 		return execution, err
 	}
 	execution.ReportPath = projection.ReportPath
+	execution.ReportSHA256 = projection.ReportSHA256
 	execution.EventCount = projection.EventCount
 	execution.Written = projection.Written
 	if err := writeReportProjectionDispatchExecution(root, &execution); err != nil {

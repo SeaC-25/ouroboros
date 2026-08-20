@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "worker_id": "swarm-swarm-1785916761663237992-agent-1785916761",
+  "mode": "local",
+  "status": "busy",
+  "capabilities": [
+    "agent",
+    "ai",
+    "execution"
+  ],
+  "labels": {
+    "agent_role": "Operator",
+    "agent_task_id": "agent-1785916761",
+    "execution_id": "exec-1785916761665902309",
+    "swarm_run_id": "swarm-1785916761663237992"
+  },
+  "registered_at": "2026-08-05T07:59:21.667355505Z",
+  "heartbeat_at": "2026-08-05T07:59:21.667355505Z"
+}

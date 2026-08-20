@@ -16,10 +16,12 @@ import type {
   GraphExportResult,
   GraphNode,
   HarnessCase,
+  HarnessRun,
   IDEData,
   IDEEvent,
   MissionState,
   OrchestratorRun,
+  PromptRecord,
   ProviderSettings,
   ReportFinding,
   ReportDocument,
@@ -288,6 +290,8 @@ interface HarnessCaseResponse extends Record<string, unknown> {
   command?: string;
   expectedResult?: string;
   promptId?: string;
+  promptName?: string;
+  inputText?: string;
   agentRole?: string;
   source?: string;
   filePath?: string;
@@ -295,6 +299,46 @@ interface HarnessCaseResponse extends Record<string, unknown> {
   blackboardItemId?: string;
   createdAt?: number;
   updatedAt?: number;
+}
+
+interface PromptRecordResponse extends Record<string, unknown> {
+  id?: string;
+  name?: string;
+  content?: string;
+  createdAt?: number;
+}
+
+interface HarnessRunResponse extends Record<string, unknown> {
+  id?: string;
+  promptName?: string;
+  input?: string;
+  output?: string;
+  model?: string;
+  createdAt?: number;
+}
+
+interface AIBlackboardListResponse {
+  items?: BlackboardItemResponse[];
+}
+
+interface AIAgentsListResponse {
+  items?: AgentTaskResponse[];
+}
+
+interface AIPromptsListResponse {
+  items?: PromptRecordResponse[];
+}
+
+interface AIHarnessCasesListResponse {
+  items?: HarnessCaseResponse[];
+}
+
+interface AIHarnessResultsListResponse {
+  items?: HarnessRunResponse[];
+}
+
+interface AISwarmRunsListResponse {
+  items?: SwarmWorkflowRunResponse[];
 }
 
 interface OrchestratorRunResponse extends Record<string, unknown> {
@@ -320,10 +364,14 @@ interface AIActionResultResponse {
   kind?: string;
   operation?: string;
   summary?: string;
+  fileDiff?: string;
   orchestratorRun?: OrchestratorRunResponse;
   blackboardItem?: BlackboardItemResponse;
   agentTask?: AgentTaskResponse;
   harnessCase?: HarnessCaseResponse;
+  prompt?: PromptRecordResponse;
+  harnessRun?: HarnessRunResponse;
+  swarmRun?: SwarmWorkflowRunResponse;
   execution?: ExecutionResponse;
 }
 
@@ -688,6 +736,60 @@ export async function fetchAIChat(): Promise<ChatResponse> {
   return requestJSON<ChatResponse>(baseURL, '/api/ai/chat');
 }
 
+export async function fetchAIBlackboard(): Promise<BlackboardItem[]> {
+  const baseURL = await apiBaseURL();
+  if (!baseURL) {
+    throw new Error(zhCN.shell.statusOffline);
+  }
+  const payload = await requestJSON<AIBlackboardListResponse>(baseURL, '/api/ai/blackboard');
+  return (payload.items ?? []).map(mapAIActionBlackboardItem).filter((item): item is BlackboardItem => Boolean(item));
+}
+
+export async function fetchAIAgents(): Promise<AgentTask[]> {
+  const baseURL = await apiBaseURL();
+  if (!baseURL) {
+    throw new Error(zhCN.shell.statusOffline);
+  }
+  const payload = await requestJSON<AIAgentsListResponse>(baseURL, '/api/ai/agents');
+  return (payload.items ?? []).map(mapAIActionAgentTask).filter((item): item is AgentTask => Boolean(item));
+}
+
+export async function fetchAIPrompts(): Promise<PromptRecord[]> {
+  const baseURL = await apiBaseURL();
+  if (!baseURL) {
+    throw new Error(zhCN.shell.statusOffline);
+  }
+  const payload = await requestJSON<AIPromptsListResponse>(baseURL, '/api/ai/prompts');
+  return (payload.items ?? []).map(mapAIActionPrompt).filter((item): item is PromptRecord => Boolean(item));
+}
+
+export async function fetchAIHarnessCases(): Promise<HarnessCase[]> {
+  const baseURL = await apiBaseURL();
+  if (!baseURL) {
+    throw new Error(zhCN.shell.statusOffline);
+  }
+  const payload = await requestJSON<AIHarnessCasesListResponse>(baseURL, '/api/ai/harness/cases');
+  return (payload.items ?? []).map(mapAIActionHarnessCase).filter((item): item is HarnessCase => Boolean(item));
+}
+
+export async function fetchAIHarnessResults(): Promise<HarnessRun[]> {
+  const baseURL = await apiBaseURL();
+  if (!baseURL) {
+    throw new Error(zhCN.shell.statusOffline);
+  }
+  const payload = await requestJSON<AIHarnessResultsListResponse>(baseURL, '/api/ai/harness/results');
+  return (payload.items ?? []).map(mapAIActionHarnessRun).filter((item): item is HarnessRun => Boolean(item));
+}
+
+export async function fetchAISwarmRuns(): Promise<SwarmWorkflowRun[]> {
+  const baseURL = await apiBaseURL();
+  if (!baseURL) {
+    throw new Error(zhCN.shell.statusOffline);
+  }
+  const payload = await requestJSON<AISwarmRunsListResponse>(baseURL, '/api/ai/swarm/runs');
+  return (payload.items ?? []).map(mapAIActionSwarmRun).filter((run): run is SwarmWorkflowRun => Boolean(run));
+}
+
 export async function sendAIChatMessage(message: string, context?: { filePath?: string; fileContent?: string }): Promise<ChatPostResponse> {
   const baseURL = await apiBaseURL();
   if (!baseURL) {
@@ -972,10 +1074,14 @@ function mapAIActionResultResponse(result: AIActionResultResponse | undefined): 
     kind: normalizeAIActionResultKind(result.kind),
     operation: result.operation,
     summary: result.summary,
+    fileDiff: result.fileDiff,
     orchestratorRun: mapAIActionOrchestratorRun(result.orchestratorRun),
     blackboardItem: mapAIActionBlackboardItem(result.blackboardItem),
     agentTask: mapAIActionAgentTask(result.agentTask),
     harnessCase: mapAIActionHarnessCase(result.harnessCase),
+    prompt: mapAIActionPrompt(result.prompt),
+    harnessRun: mapAIActionHarnessRun(result.harnessRun),
+    swarmRun: mapAIActionSwarmRun(result.swarmRun),
     execution: result.execution?.id ? mapRequiredExecutionResponse(result.execution, zhCN.aiActions.executionMissing) : undefined,
   };
 }
@@ -1015,6 +1121,31 @@ function mapAIActionHarnessCase(testCase: HarnessCaseResponse | undefined): Harn
     return undefined;
   }
   return { ...testCase };
+}
+
+function mapAIActionPrompt(prompt: PromptRecordResponse | undefined): PromptRecord | undefined {
+  if (!prompt) {
+    return undefined;
+  }
+  return { ...prompt };
+}
+
+function mapAIActionHarnessRun(run: HarnessRunResponse | undefined): HarnessRun | undefined {
+  if (!run) {
+    return undefined;
+  }
+  return { ...run };
+}
+function mapAIActionSwarmRun(run: SwarmWorkflowRunResponse | undefined): SwarmWorkflowRun | undefined {
+  if (!run) {
+    return undefined;
+  }
+  return {
+    ...run,
+    tasks: (run.tasks ?? []).map(mapAIActionAgentTask).filter((task): task is AgentTask => Boolean(task)),
+    facts: (run.facts ?? []).map(mapAIActionBlackboardItem).filter((item): item is BlackboardItem => Boolean(item)),
+    executions: (run.executions ?? []).map(mapExecutionResponse).filter((execution): execution is ExecutionStep => Boolean(execution)),
+  };
 }
 
 function mapRequiredAIActionResponse(action: AIActionResponse | undefined, context: string): AIAction {
@@ -1064,8 +1195,14 @@ function normalizeAIActionKind(kind: string): AIAction['kind'] | null {
       return 'agent';
     case 'harness':
       return 'harness';
+    case 'prompt':
+      return 'prompt';
     case 'orchestrator':
       return 'orchestrator';
+    case 'swarm':
+      return 'swarm';
+    case 'failure':
+      return 'failure';
     default:
       return null;
   }
@@ -1617,4 +1754,20 @@ function layoutFor(count: number): Array<{ x: number; y: number }> {
     x: 20 + ((index * 17) % 60),
     y: 20 + ((index * 23) % 65),
   });
+}
+
+interface SwarmWorkflowRunResponse extends Record<string, unknown> {
+  id?: string;
+  title?: string;
+  goal?: string;
+  status?: string;
+  tasks?: AgentTaskResponse[];
+  facts?: BlackboardItemResponse[];
+  executions?: ExecutionResponse[];
+  summary?: string;
+  createdAt?: number;
+  updatedAt?: number;
+  agentOutput?: Record<string, string>;
+  timeline?: Array<Record<string, unknown>>;
+  inputs?: Record<string, unknown>;
 }

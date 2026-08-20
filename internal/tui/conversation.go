@@ -12,14 +12,37 @@ type MissionEvent struct {
 	Message string
 }
 
+type AIDialogMessage struct {
+	Role            string
+	Text            string
+	Status          string
+	Provider        string
+	Model           string
+	InputTokens     int
+	OutputTokens    int
+	TotalTokens     int
+	MetadataOnly    bool
+	PromptStored    bool
+	ResponseStored  bool
+	HistoryExcluded bool
+	PreviewStatus   string
+	PreviewAction   string
+	PreviewMarker   string
+	PreviewPath     string
+	Error           string
+}
+
 type MissionConversation struct {
-	GoalSummary   string
-	SisyphusRound int
-	CurrentPlan   []string
-	AttemptResult string
-	Failure       sisyphus.FailureReason
-	Mutation      string
-	Events        []MissionEvent
+	GoalSummary      string
+	SisyphusRound    int
+	CurrentPlan      []string
+	AttemptResult    string
+	Failure          sisyphus.FailureReason
+	Mutation         string
+	Events           []MissionEvent
+	AIDialogInput    string
+	AIDialogEditing  bool
+	AIDialogMessages []AIDialogMessage
 }
 
 func DefaultMissionConversation() MissionConversation {
@@ -66,6 +89,54 @@ func (c MissionConversation) Rows() []string {
 			continue
 		}
 		rows = append(rows, kind+": "+message)
+	}
+	rows = append(rows, c.aiDialogRows()...)
+	return rows
+}
+
+func (c MissionConversation) aiDialogRows() []string {
+	rows := []string{"dialog: ai operator chat"}
+	for _, message := range c.AIDialogMessages {
+		role := strings.ToLower(strings.TrimSpace(message.Role))
+		text := strings.TrimSpace(message.Text)
+		switch role {
+		case "user":
+			if text != "" {
+				rows = append(rows, "You > "+text)
+			}
+		default:
+			status := strings.TrimSpace(message.Status)
+			if strings.TrimSpace(message.Error) != "" {
+				rows = append(rows, "AI > error: "+strings.TrimSpace(message.Error))
+			} else if text != "" {
+				rows = append(rows, "AI > "+text)
+			} else if status != "" {
+				rows = append(rows, "AI > "+status)
+			}
+			if strings.TrimSpace(message.Provider) != "" || strings.TrimSpace(message.Model) != "" || message.TotalTokens > 0 {
+				rows = append(rows, fmt.Sprintf(
+					"AI meta: provider=%s model=%s tokens=%d stored=%t",
+					valueOrDefault(message.Provider, "unknown"),
+					valueOrDefault(message.Model, "unknown"),
+					message.TotalTokens,
+					message.PromptStored || message.ResponseStored,
+				))
+			}
+			if previewStatus := strings.TrimSpace(message.PreviewStatus); previewStatus != "" {
+				rows = append(rows, fmt.Sprintf(
+					"AI preview: status=%s action=%s marker=%s artifact_created=%t stored=false",
+					previewStatus,
+					valueOrDefault(message.PreviewAction, "none"),
+					valueOrDefault(message.PreviewMarker, "none"),
+					strings.TrimSpace(message.PreviewPath) != "",
+				))
+			}
+		}
+	}
+	if c.AIDialogEditing {
+		rows = append(rows, "You > "+c.AIDialogInput+"|")
+	} else {
+		rows = append(rows, "You > press i to chat")
 	}
 	return rows
 }

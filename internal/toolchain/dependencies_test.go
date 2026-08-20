@@ -1,14 +1,25 @@
-package toolchain
+﻿package toolchain
 
 import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
 
+func skipOnWindowsProbe(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		// These tests exec a POSIX #!/bin/sh probe script, which Windows cannot
+		// execute. The probe-exec semantics are Linux-only.
+		t.Skip("POSIX probe exec tests are Linux-only")
+	}
+}
+
 func TestCheckDependenciesReportsReadyBinaryDependency(t *testing.T) {
+	skipOnWindowsProbe(t)
 	probe := filepath.Join(t.TempDir(), "dep-probe")
 	if err := os.WriteFile(probe, []byte("#!/bin/sh\nprintf 'dep-1.2.3\\n'\n"), 0o755); err != nil {
 		t.Fatalf("write dependency probe: %v", err)
@@ -35,6 +46,7 @@ func TestCheckDependenciesReportsReadyBinaryDependency(t *testing.T) {
 }
 
 func TestCheckDependenciesDoesNotExecuteOptionalHealthCommand(t *testing.T) {
+	skipOnWindowsProbe(t)
 	dir := t.TempDir()
 	marker := filepath.Join(dir, "executed")
 	probe := filepath.Join(dir, "optional-probe")
@@ -66,6 +78,7 @@ func TestCheckDependenciesDoesNotExecuteOptionalHealthCommand(t *testing.T) {
 }
 
 func TestCheckDependenciesDoesNotExecuteOptionalRuleBundleHealthCommand(t *testing.T) {
+	skipOnWindowsProbe(t)
 	dir := t.TempDir()
 	marker := filepath.Join(dir, "executed")
 	probe := filepath.Join(dir, "optional-rule-probe")
@@ -298,6 +311,7 @@ func TestCheckDependenciesReportsContainerImageProvenanceAndUpdate(t *testing.T)
 }
 
 func TestCheckDependenciesVerifiesContainerImageDigestFromHealthCommand(t *testing.T) {
+	skipOnWindowsProbe(t)
 	digest := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	probe := filepath.Join(t.TempDir(), "image-inspect")
 	if err := os.WriteFile(probe, []byte("#!/bin/sh\nprintf 'ghcr.io/ouroboros/httpx-worker@"+digest+"\\n'\n"), 0o755); err != nil {
@@ -330,6 +344,7 @@ func TestCheckDependenciesVerifiesContainerImageDigestFromHealthCommand(t *testi
 }
 
 func TestCheckDependenciesReportsContainerImageDigestMismatch(t *testing.T) {
+	skipOnWindowsProbe(t)
 	expected := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	actual := "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	probe := filepath.Join(t.TempDir(), "image-inspect")

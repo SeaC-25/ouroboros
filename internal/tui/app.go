@@ -27,11 +27,43 @@ type Model struct {
 	runtimeControlRows      []string
 	runCancelArmed          bool
 	runPaused               bool
+	aiDialogSubmitter       AIDialogSubmitter
 }
 
 type RuntimeActionRequester func(RuntimeAction) (RuntimeActionRequestResult, error)
 type RuntimeActionExecutor func(RuntimeAction) (RuntimeActionExecutionResult, error)
 type RuntimeControlRequester func(RuntimeControlAction) (RuntimeControlResult, error)
+type AIDialogSubmitter func(AIDialogRequest) (AIDialogResult, error)
+
+type AIDialogHistoryMessage struct {
+	Role string
+	Text string
+}
+
+type AIDialogRequest struct {
+	Prompt  string
+	History []AIDialogHistoryMessage
+}
+
+type AIDialogResult struct {
+	Status          string
+	Provider        string
+	Model           string
+	Text            string
+	InputTokens     int
+	OutputTokens    int
+	TotalTokens     int
+	MetadataOnly    bool
+	PromptStored    bool
+	ResponseStored  bool
+	HistoryExcluded bool
+	ClearHistory    bool
+	PreviewStatus   string
+	PreviewAction   string
+	PreviewMarker   string
+	PreviewPath     string
+	RuntimeRows     []string
+}
 
 type RuntimeControlAction struct {
 	Kind string
@@ -46,6 +78,12 @@ type RuntimeControlResultMsg struct {
 	Action RuntimeControlAction
 	Result RuntimeControlResult
 	Err    error
+}
+
+type AIDialogResultMsg struct {
+	Request AIDialogRequest
+	Result  AIDialogResult
+	Err     error
 }
 
 type RuntimeActionRequestResultMsg struct {
@@ -99,14 +137,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.WithRuntimeActionExecutionResult(typed), nil
 	case RuntimeControlResultMsg:
 		return m.WithRuntimeControlResult(typed), nil
+	case AIDialogResultMsg:
+		return m.WithAIDialogResult(typed), nil
 	case tea.WindowSizeMsg:
 		m.layout = NewLayout(typed.Width, typed.Height)
 		m.resizeViewports()
 		return m, nil
 	case tea.KeyMsg:
+		if m.conversation.AIDialogEditing {
+			return m.UpdateAIDialogInput(typed)
+		}
 		switch typed.String() {
 		case "ctrl+c", "q":
 			return m, tea.Quit
+		case "i":
+			return m.StartAIDialogInput(), nil
 		case "esc":
 			return m.ClearAgentFocus(), nil
 		case "left":
@@ -180,9 +225,191 @@ func (m Model) WithRuntimeControlRequester(requester RuntimeControlRequester) Mo
 	return m
 }
 
+func (m Model) WithAIDialogSubmitter(submitter AIDialogSubmitter) Model {
+	m.aiDialogSubmitter = submitter
+	return m
+}
+
 func (m Model) WithInstallRequestStatus(summary string) Model {
 	m.status.InstallRequests = strings.TrimSpace(summary)
 	return m
+}
+
+func (m Model) AppendMissionEvents(events []MissionEvent) Model {
+	for _, event := range events {
+		if strings.TrimSpace(event.Message) == "" {
+			continue
+		}
+		m.conversation.Events = append(m.conversation.Events, event)
+	}
+	return m
+}
+
+func (m Model) StartAIDialogInput() Model {
+	m.conversation.AIDialogEditing = true
+	m.conversation.AIDialogInput = ""
+	return m
+}
+
+func (m Model) UpdateAIDialogInput(key tea.KeyMsg) (Model, tea.Cmd) {
+	switch key.Type {
+	case tea.KeyCtrlC:
+		return m, tea.Quit
+	case tea.KeyEsc:
+		m.conversation.AIDialogEditing = false
+		m.conversation.AIDialogInput = ""
+		return m, nil
+	case tea.KeyEnter:
+		return m.SubmitAIDialogInput()
+	case tea.KeyBackspace, tea.KeyCtrlH:
+		input := []rune(m.conversation.AIDialogInput)
+		if len(input) > 0 {
+			m.conversation.AIDialogInput = string(input[:len(input)-1])
+		}
+		return m, nil
+	case tea.KeySpace:
+		m.conversation.AIDialogInput += " "
+		return m, nil
+	case tea.KeyRunes:
+		m.conversation.AIDialogInput += string(key.Runes)
+		return m, nil
+	default:
+		return m, nil
+	}
+}
+
+func (m Model) SubmitAIDialogInput() (Model, tea.Cmd) {
+	prompt := strings.TrimSpace(m.conversation.AIDialogInput)
+	if prompt == "" {
+		m.conversation.AIDialogInput = ""
+		return m, nil
+	}
+	m.conversation.AIDialogEditing = false
+	m.conversation.AIDialogInput = ""
+	history := aiDialogHistoryForProvider(m.conversation.AIDialogMessages)
+	m.conversation.AIDialogMessages = append(m.conversation.AIDialogMessages,
+		AIDialogMessage{Role: "user", Text: prompt},
+		AIDialogMessage{Role: "assistant", Status: "generating"},
+	)
+	request := AIDialogRequest{Prompt: prompt, History: history}
+	if m.aiDialogSubmitter == nil {
+		m = m.WithAIDialogResult(AIDialogResultMsg{
+			Request: request,
+			Err:     errAIDialogUnavailable{},
+		})
+		return m, nil
+	}
+	submitter := m.aiDialogSubmitter
+	return m, func() tea.Msg {
+		result, err := submitter(request)
+		return AIDialogResultMsg{Request: request, Result: result, Err: err}
+	}
+}
+
+type errAIDialogUnavailable struct{}
+
+func (errAIDialogUnavailable) Error() string {
+	return "AI provider is not configured"
+}
+
+func (m Model) WithAIDialogResult(msg AIDialogResultMsg) Model {
+	message := AIDialogMessage{
+		Role:            "assistant",
+		Status:          valueOrDefault(msg.Result.Status, "completed"),
+		Provider:        msg.Result.Provider,
+		Model:           msg.Result.Model,
+		Text:            msg.Result.Text,
+		InputTokens:     msg.Result.InputTokens,
+		OutputTokens:    msg.Result.OutputTokens,
+		TotalTokens:     msg.Result.TotalTokens,
+		MetadataOnly:    msg.Result.MetadataOnly,
+		PromptStored:    msg.Result.PromptStored,
+		ResponseStored:  msg.Result.ResponseStored,
+		HistoryExcluded: msg.Result.HistoryExcluded,
+		PreviewStatus:   msg.Result.PreviewStatus,
+		PreviewAction:   msg.Result.PreviewAction,
+		PreviewMarker:   msg.Result.PreviewMarker,
+		PreviewPath:     msg.Result.PreviewPath,
+	}
+	if msg.Err != nil {
+		message.Status = "failed"
+		message.Text = ""
+		message.Error = msg.Err.Error()
+	}
+	if msg.Result.HistoryExcluded {
+		m.conversation.AIDialogMessages = markLastAIDialogUserHistoryExcluded(m.conversation.AIDialogMessages)
+	}
+	if msg.Result.ClearHistory && msg.Err == nil {
+		message.HistoryExcluded = true
+		m.conversation.AIDialogMessages = []AIDialogMessage{message}
+		m.conversation.AIDialogEditing = true
+		m.conversation.AIDialogInput = ""
+		return m
+	}
+	m.conversation.AIDialogMessages = replacePendingAIDialogAssistantMessage(m.conversation.AIDialogMessages, message)
+	if len(msg.Result.RuntimeRows) > 0 {
+		m = m.AppendRuntimeRows(RuntimeTabModelRuntime, msg.Result.RuntimeRows)
+		if previewPath := strings.TrimSpace(msg.Result.PreviewPath); previewPath != "" {
+			m = m.SelectRuntimeRowMatching(RuntimeTabModelRuntime, "model tool plan preview:", previewPath)
+		}
+	}
+	m.conversation.AIDialogEditing = true
+	m.conversation.AIDialogInput = ""
+	return m
+}
+
+func aiDialogHistoryForProvider(messages []AIDialogMessage) []AIDialogHistoryMessage {
+	history := []AIDialogHistoryMessage{}
+	for _, message := range messages {
+		if message.HistoryExcluded {
+			continue
+		}
+		role := strings.ToLower(strings.TrimSpace(message.Role))
+		text := strings.TrimSpace(message.Text)
+		if text == "" {
+			continue
+		}
+		switch role {
+		case "user":
+			history = append(history, AIDialogHistoryMessage{Role: "user", Text: text})
+		case "assistant":
+			if strings.TrimSpace(message.Error) != "" || strings.ToLower(strings.TrimSpace(message.Status)) == "generating" {
+				continue
+			}
+			history = append(history, AIDialogHistoryMessage{Role: "assistant", Text: text})
+		}
+	}
+	return history
+}
+
+func markLastAIDialogUserHistoryExcluded(messages []AIDialogMessage) []AIDialogMessage {
+	out := append([]AIDialogMessage(nil), messages...)
+	for i := len(out) - 1; i >= 0; i-- {
+		if strings.ToLower(strings.TrimSpace(out[i].Role)) == "user" {
+			out[i].HistoryExcluded = true
+			return out
+		}
+	}
+	return out
+}
+
+func replacePendingAIDialogAssistantMessage(messages []AIDialogMessage, replacement AIDialogMessage) []AIDialogMessage {
+	replaced := false
+	out := append([]AIDialogMessage(nil), messages...)
+	for i := len(out) - 1; i >= 0; i-- {
+		if strings.ToLower(strings.TrimSpace(out[i].Role)) != "assistant" {
+			continue
+		}
+		if strings.TrimSpace(out[i].Status) == "generating" && strings.TrimSpace(out[i].Text) == "" && strings.TrimSpace(out[i].Error) == "" {
+			out[i] = replacement
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		out = append(out, replacement)
+	}
+	return out
 }
 
 func (m Model) SelectRuntimeTab(tab RuntimeTab) Model {
@@ -422,7 +649,15 @@ func (m Model) ConfirmOrExecuteRuntimeActionWithControl(controlAction string) (M
 	}
 	kind := strings.TrimSpace(action.Kind)
 	controlAction = strings.TrimSpace(controlAction)
-	if kind != "compile-preview" && kind != "compile-preview-review-artifact" && kind != "compile-preview-review-selection" && kind != "report-projection-dispatch-artifact" && kind != "report-projection-dispatch-execution-artifact" && kind != "report-projection-execution-selection" && kind != "replay-workbench-session-artifact" && kind != "replay-workbench-session-selection" && kind != "replay-workbench-collaboration-artifact" && kind != "replay-workbench-collaboration-selection" && kind != "replay-workbench-collaboration-note" && kind != "replay-workbench-collaboration-note-selection" && kind != "install-dispatch-artifact" && kind != "install-retry-dispatch-artifact" && kind != "worker-lifecycle-action-plan-artifact" && kind != "worker-lifecycle-action-plan-selection" && kind != "worker-lifecycle-policy-artifact" && kind != "worker-lifecycle-policy-selection" && kind != "worker-lease-result-reconciliation-artifact" && kind != "worker-lease-reclaim-artifact" && kind != "worker-placement-artifact" && kind != "worker-placement-dispatch-artifact" && kind != "worker-queue-claim-artifact" && kind != "worker-transport-request-artifact" && kind != "worker-transport-daemon-artifact" {
+	if kind != "compile-preview" && kind != "compile-preview-review-artifact" && kind != "compile-preview-review-selection" && kind != "compile-preview-review-execution-dispatch-artifact" && kind != "model-tool-plan-preview" && kind != "workflow-status" && kind != "report-projection-dispatch-artifact" && kind != "report-projection-dispatch-execution-artifact" && kind != "report-projection-execution-selection" && kind != "replay-workbench-session-artifact" && kind != "replay-workbench-session-selection" && kind != "replay-workbench-collaboration-artifact" && kind != "replay-workbench-collaboration-selection" && kind != "replay-workbench-collaboration-note" && kind != "replay-workbench-collaboration-note-selection" && kind != "install-dispatch-artifact" && kind != "install-retry-dispatch-artifact" && kind != "worker-lifecycle-action-plan-artifact" && kind != "worker-lifecycle-action-plan-selection" && kind != "worker-lifecycle-policy-artifact" && kind != "worker-lifecycle-policy-selection" && kind != "worker-lease-result-reconciliation-artifact" && kind != "worker-lease-reclaim-artifact" && kind != "worker-placement-artifact" && kind != "worker-placement-dispatch-artifact" && kind != "worker-queue-claim-artifact" && kind != "worker-transport-request-artifact" && kind != "worker-transport-daemon-artifact" {
+		action.ExecutionStatus = "unsupported"
+		action.ExecutionError = "runtime action is not executable"
+		tabs = tabs.WithActiveRuntimeAction(action)
+		stack.RuntimeTabs = tabs
+		m.graphStack = stack
+		return m, nil
+	}
+	if kind == "workflow-status" && runtimeActionIsReadOnly(action) {
 		action.ExecutionStatus = "unsupported"
 		action.ExecutionError = "runtime action is not executable"
 		tabs = tabs.WithActiveRuntimeAction(action)
@@ -510,6 +745,14 @@ func (m Model) ConfirmOrExecuteRuntimeActionWithControl(controlAction string) (M
 		m.graphStack = stack
 		return m, nil
 	}
+	if kind == "model-tool-plan-preview" && runtimeActionIsReadOnly(action) {
+		action.ExecutionStatus = "unsupported"
+		action.ExecutionError = "runtime action is not executable"
+		tabs = tabs.WithActiveRuntimeAction(action)
+		stack.RuntimeTabs = tabs
+		m.graphStack = stack
+		return m, nil
+	}
 	controlChanged := false
 	if controlAction != "" {
 		if kind != "worker-transport-daemon-artifact" && !(kind == "worker-queue-claim-artifact" && (controlAction == "cancel" || controlAction == "expire" || controlAction == "renew")) {
@@ -587,16 +830,29 @@ func (m Model) WithRuntimeActionExecutionResult(msg RuntimeActionExecutionResult
 	}
 	if len(msg.Result.RuntimeRows) > 0 {
 		targetTab := RuntimeTabToolchainHealth
-		if strings.TrimSpace(action.Kind) == "report-projection-dispatch-artifact" || strings.TrimSpace(action.Kind) == "report-projection-dispatch-execution-artifact" || strings.TrimSpace(action.Kind) == "report-projection-execution-selection" || strings.TrimSpace(action.Kind) == "replay-workbench-session-artifact" || strings.TrimSpace(action.Kind) == "replay-workbench-session-selection" || strings.TrimSpace(action.Kind) == "replay-workbench-collaboration-artifact" || strings.TrimSpace(action.Kind) == "replay-workbench-collaboration-selection" || strings.TrimSpace(action.Kind) == "replay-workbench-collaboration-note" || strings.TrimSpace(action.Kind) == "replay-workbench-collaboration-note-selection" {
+		if strings.TrimSpace(action.Kind) == "model-tool-plan-preview" {
+			targetTab = RuntimeTabModelRuntime
+		}
+		workflowStatusCompileResult := strings.TrimSpace(action.Kind) == "workflow-status" && (strings.TrimSpace(action.RequestPath) == "create-compile-preview-review-execution-dispatch" || strings.TrimSpace(action.RequestPath) == "execute-compile-preview-review-execution-dispatch")
+		if (strings.TrimSpace(action.Kind) == "workflow-status" && !workflowStatusCompileResult) || strings.TrimSpace(action.Kind) == "report-projection-dispatch-artifact" || strings.TrimSpace(action.Kind) == "report-projection-dispatch-execution-artifact" || strings.TrimSpace(action.Kind) == "report-projection-execution-selection" || strings.TrimSpace(action.Kind) == "replay-workbench-session-artifact" || strings.TrimSpace(action.Kind) == "replay-workbench-session-selection" || strings.TrimSpace(action.Kind) == "replay-workbench-collaboration-artifact" || strings.TrimSpace(action.Kind) == "replay-workbench-collaboration-selection" || strings.TrimSpace(action.Kind) == "replay-workbench-collaboration-note" || strings.TrimSpace(action.Kind) == "replay-workbench-collaboration-note-selection" {
 			targetTab = RuntimeTabTimelineLanes
 		}
 		if strings.TrimSpace(action.Kind) == "worker-lifecycle-action-plan-artifact" || strings.TrimSpace(action.Kind) == "worker-lifecycle-action-plan-selection" || strings.TrimSpace(action.Kind) == "worker-lifecycle-policy-artifact" || strings.TrimSpace(action.Kind) == "worker-lifecycle-policy-selection" || strings.TrimSpace(action.Kind) == "worker-lease-result-reconciliation-artifact" || strings.TrimSpace(action.Kind) == "worker-lease-reclaim-artifact" || strings.TrimSpace(action.Kind) == "worker-placement-artifact" || strings.TrimSpace(action.Kind) == "worker-placement-dispatch-artifact" || strings.TrimSpace(action.Kind) == "worker-queue-claim-artifact" || strings.TrimSpace(action.Kind) == "worker-transport-request-artifact" || strings.TrimSpace(action.Kind) == "worker-transport-daemon-artifact" {
 			targetTab = RuntimeTabAgentRuntime
 		}
+		if strings.TrimSpace(action.Kind) == "workflow-status" {
+			tabs = tabs.Select(targetTab)
+		}
 		path := strings.TrimSpace(msg.Result.Path)
-		if strings.TrimSpace(action.Kind) == "compile-preview-review-artifact" || strings.TrimSpace(action.Kind) == "compile-preview-review-selection" {
+		compilePreviewReviewDispatchResult := (strings.TrimSpace(action.Kind) == "compile-preview-review-artifact" || (strings.TrimSpace(action.Kind) == "workflow-status" && strings.TrimSpace(action.RequestPath) == "create-compile-preview-review-execution-dispatch")) && runtimeRowsContainPrefix(msg.Result.RuntimeRows, "compile-preview review execution dispatch artifact:")
+		compilePreviewReviewExecutionResult := strings.TrimSpace(action.Kind) == "workflow-status" && strings.TrimSpace(action.RequestPath) == "execute-compile-preview-review-execution-dispatch" && runtimeRowsContainPrefix(msg.Result.RuntimeRows, "compile-preview review execution artifact:")
+		if compilePreviewReviewDispatchResult {
+			tabs = tabs.ReplaceRowsByPrefixesPreservingAction(targetTab, compilePreviewReviewExecutionDispatchRuntimeRowPrefixes(), msg.Result.RuntimeRows)
+		} else if compilePreviewReviewExecutionResult {
+			tabs = tabs.ReplaceRowsByPrefixesPreservingAction(targetTab, compilePreviewReviewExecutionRuntimeRowPrefixes(), msg.Result.RuntimeRows)
+		} else if strings.TrimSpace(action.Kind) == "compile-preview-review-artifact" || strings.TrimSpace(action.Kind) == "compile-preview-review-selection" {
 			tabs = tabs.ReplaceRowsByPrefixesPreservingAction(targetTab, compilePreviewReviewRuntimeRowPrefixes(), msg.Result.RuntimeRows)
-		} else if strings.TrimSpace(action.Kind) == "report-projection-dispatch-artifact" || strings.TrimSpace(action.Kind) == "report-projection-dispatch-execution-artifact" || strings.TrimSpace(action.Kind) == "report-projection-execution-selection" {
+		} else if strings.TrimSpace(action.Kind) == "workflow-status" || strings.TrimSpace(action.Kind) == "report-projection-dispatch-artifact" || strings.TrimSpace(action.Kind) == "report-projection-dispatch-execution-artifact" || strings.TrimSpace(action.Kind) == "report-projection-execution-selection" {
 			tabs = tabs.ReplaceRowsByPrefixesPreservingAction(targetTab, reportProjectionDispatchExecutionRuntimeRowPrefixes(), msg.Result.RuntimeRows)
 		} else if strings.TrimSpace(action.Kind) == "replay-workbench-session-artifact" || strings.TrimSpace(action.Kind) == "replay-workbench-session-selection" {
 			tabs = tabs.ReplaceRowsByPrefixesPreservingAction(targetTab, replayWorkbenchSessionRuntimeRowPrefixes(), msg.Result.RuntimeRows)
@@ -613,7 +869,7 @@ func (m Model) WithRuntimeActionExecutionResult(msg RuntimeActionExecutionResult
 		} else {
 			tabs = tabs.AppendRowsPreservingAction(targetTab, msg.Result.RuntimeRows)
 		}
-		if strings.TrimSpace(action.Kind) == "compile-preview-review-artifact" || strings.TrimSpace(action.Kind) == "compile-preview-review-selection" {
+		if !compilePreviewReviewDispatchResult && (strings.TrimSpace(action.Kind) == "compile-preview-review-artifact" || strings.TrimSpace(action.Kind) == "compile-preview-review-selection") {
 			reviewPath := strings.TrimSpace(action.ReviewPath)
 			if reviewPath == "" {
 				reviewPath = strings.TrimSpace(action.ArtifactPath)
@@ -679,6 +935,9 @@ func (m Model) WithRuntimeActionExecutionResult(msg RuntimeActionExecutionResult
 			if strings.TrimSpace(action.Kind) == "compile-preview" {
 				prefix = "compile-preview review artifact:"
 			}
+			if compilePreviewReviewDispatchResult {
+				prefix = "compile-preview review execution dispatch artifact:"
+			}
 			if strings.TrimSpace(action.Kind) == "worker-lease-reclaim-artifact" {
 				prefix = "worker lease reclaim execution artifact:"
 			}
@@ -709,6 +968,30 @@ func (m Model) WithRuntimeActionExecutionResult(msg RuntimeActionExecutionResult
 			if strings.TrimSpace(action.Kind) == "report-projection-dispatch-artifact" {
 				prefix = "report projection dispatch execution artifact:"
 			}
+			if strings.TrimSpace(action.Kind) == "compile-preview-review-execution-dispatch-artifact" {
+				prefix = "compile-preview review execution artifact:"
+			}
+			if strings.TrimSpace(action.Kind) == "model-tool-plan-preview" {
+				prefix = "model tool plan preview acceptance artifact:"
+			}
+			if strings.TrimSpace(action.Kind) == "workflow-status" {
+				prefix = "report projection dispatch artifact:"
+				if strings.TrimSpace(action.RequestPath) == "create-compile-preview-review-execution-dispatch" {
+					prefix = "compile-preview review execution dispatch artifact:"
+				}
+				if strings.TrimSpace(action.RequestPath) == "execute-compile-preview-review-execution-dispatch" {
+					prefix = "compile-preview review execution artifact:"
+				}
+				if strings.TrimSpace(action.RequestPath) == "execute-report-projection-dispatch" || strings.TrimSpace(action.RequestPath) == "review-report-projection-execution" || strings.TrimSpace(action.RequestPath) == "select-report-projection-execution" {
+					prefix = "report projection dispatch execution artifact:"
+				}
+				if strings.TrimSpace(action.RequestPath) == "review-report-projection-execution" {
+					prefix = "report projection execution review:"
+				}
+				if strings.TrimSpace(action.RequestPath) == "select-report-projection-execution" {
+					prefix = "report projection execution selection:"
+				}
+			}
 			tabs = tabs.SelectFirstRowMatching(targetTab, prefix, path)
 		}
 	}
@@ -719,6 +1002,15 @@ func (m Model) WithRuntimeActionExecutionResult(msg RuntimeActionExecutionResult
 	}
 	m.graphStack = stack
 	return m
+}
+
+func runtimeRowsContainPrefix(rows []string, prefix string) bool {
+	for _, row := range rows {
+		if strings.HasPrefix(strings.TrimSpace(row), prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func compilePreviewReviewRuntimeRowPrefixes() []string {
@@ -735,14 +1027,34 @@ func compilePreviewReviewRuntimeRowPrefixes() []string {
 	}
 }
 
+func compilePreviewReviewExecutionDispatchRuntimeRowPrefixes() []string {
+	return []string{
+		"compile-preview review execution dispatches:",
+		"compile-preview review execution dispatch artifact:",
+	}
+}
+
+func compilePreviewReviewExecutionRuntimeRowPrefixes() []string {
+	return []string{
+		"compile-preview review executions:",
+		"compile-preview review execution artifact:",
+	}
+}
+
 func reportProjectionDispatchExecutionRuntimeRowPrefixes() []string {
 	return []string{
+		"report projection dispatches:",
+		"report projection dispatch artifact:",
+		"report projection dispatch compact:",
+		"report projection dispatch path:",
 		"report projection dispatch executions:",
 		"report projection execution selection:",
+		"report projection selection compact:",
 		"report projection execution superseded:",
 		"report projection dispatch execution artifact:",
 		"report projection dispatch execution compact:",
 		"report projection execution review:",
+		"report projection review compact:",
 		"report projection dispatch execution annotation:",
 		"report projection dispatch execution path:",
 	}

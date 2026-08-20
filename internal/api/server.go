@@ -81,6 +81,12 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/ai/actions", s.handleAIActions)
 	mux.HandleFunc("/api/ai/actions/run", s.handleAIActionRun)
 	mux.HandleFunc("/api/ai/chat", s.handleAIChat)
+	mux.HandleFunc("/api/ai/blackboard", s.handleAIBlackboard)
+	mux.HandleFunc("/api/ai/agents", s.handleAIAgents)
+	mux.HandleFunc("/api/ai/prompts", s.handleAIPrompts)
+	mux.HandleFunc("/api/ai/harness/cases", s.handleAIHarnessCases)
+	mux.HandleFunc("/api/ai/harness/results", s.handleAIHarnessResults)
+	mux.HandleFunc("/api/ai/swarm/runs", s.handleAISwarmRuns)
 	mux.HandleFunc("/api/events/stream", s.handleWebSocket)
 
 	// CORS中间件

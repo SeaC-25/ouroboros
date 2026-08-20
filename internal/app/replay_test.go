@@ -13,6 +13,7 @@ import (
 
 func TestReplayWorkspaceRebuildsRunSnapshot(t *testing.T) {
 	ctx := context.Background()
+	skipIfWindows(t)
 	root := filepath.Join(t.TempDir(), "workspace")
 	if err := InitWorkspace(root); err != nil {
 		t.Fatalf("init workspace: %v", err)

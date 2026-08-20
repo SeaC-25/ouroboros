@@ -2,7 +2,9 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -283,6 +285,21 @@ func TestExecuteReportProjectionDispatchWritesReportAndAuditArtifact(t *testing.
 	}
 	if _, err := os.Stat(execution.ReportPath); err != nil {
 		t.Fatalf("expected markdown report to be written: %v", err)
+	}
+	reportBytes, err := os.ReadFile(execution.ReportPath)
+	if err != nil {
+		t.Fatalf("read markdown report: %v", err)
+	}
+	reportDigest := sha256.Sum256(reportBytes)
+	reportSHA256 := hex.EncodeToString(reportDigest[:])
+	artifactBytes, err := os.ReadFile(execution.Path)
+	if err != nil {
+		t.Fatalf("read report projection execution artifact: %v", err)
+	}
+	artifactText := string(artifactBytes)
+	if !strings.Contains(artifactText, `"report_sha256":"`+reportSHA256+`"`) &&
+		!strings.Contains(artifactText, `"report_sha256": "`+reportSHA256+`"`) {
+		t.Fatalf("expected execution artifact to record report_sha256 %s", reportSHA256)
 	}
 	replay, err := ReplayWorkspace(ctx, root, run.RunID)
 	if err != nil {

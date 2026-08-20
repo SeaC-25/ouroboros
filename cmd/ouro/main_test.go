@@ -1,10 +1,16 @@
 package main
 
 import (
+	"archive/tar"
+	"archive/zip"
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -15,6 +21,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -27,6 +35,13 @@ import (
 	"github.com/ouroboros/ouroboros/internal/evidence"
 	"github.com/ouroboros/ouroboros/internal/tui"
 )
+
+func skipIfWindows(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("test relies on POSIX shell execution / Unix-only behavior and is Linux-only")
+	}
+}
 
 func readFirstSSEEvent(t *testing.T, reader io.Reader) (string, string) {
 	t.Helper()
@@ -54,6 +69,24 @@ func readFirstSSEEvent(t *testing.T, reader io.Reader) (string, string) {
 	return "", ""
 }
 
+func replaceRunWorkspaceWithOptions(t *testing.T, fn func(context.Context, string, app.RunOptions) (app.RunResult, error)) func() {
+	t.Helper()
+	previous := runWorkspaceWithOptions
+	runWorkspaceWithOptions = fn
+	return func() {
+		runWorkspaceWithOptions = previous
+	}
+}
+
+func replaceCompletionFinalAcceptanceBeforePublishHook(t *testing.T, fn func(completionEvidenceStatus, string) error) func() {
+	t.Helper()
+	previous := completionFinalAcceptanceBeforePublishHook
+	completionFinalAcceptanceBeforePublishHook = fn
+	return func() {
+		completionFinalAcceptanceBeforePublishHook = previous
+	}
+}
+
 func TestRootCommandIncludesProductionCommands(t *testing.T) {
 	cmd := newRootCommand(new(bytes.Buffer), new(bytes.Buffer))
 	names := map[string]bool{}
@@ -61,7 +94,7 @@ func TestRootCommandIncludesProductionCommands(t *testing.T) {
 		names[child.Name()] = true
 	}
 
-	for _, name := range []string{"init", "run", "report-project", "report-project-dispatch", "report-project-dispatches", "execute-report-project-dispatch", "report-project-dispatch-executions", "report-project-dispatch-execution-annotate", "report-project-dispatch-execution-select", "report-project-dispatch-execution-selection", "report-project-dispatch-execution-selection-clear", "replay", "replay-workbench", "replay-workbench-session", "replay-workbench-session-annotate", "replay-workbench-session-select", "replay-workbench-session-selection", "replay-workbench-session-selection-clear", "replay-workbench-sessions", "replay-workbench-collaboration", "replay-workbench-collaboration-annotate", "replay-workbench-collaboration-select", "replay-workbench-collaboration-selection", "replay-workbench-collaboration-selection-clear", "replay-workbench-collaboration-presence", "replay-workbench-collaboration-presences", "replay-workbench-collaboration-note", "replay-workbench-collaboration-note-annotate", "replay-workbench-collaboration-note-select", "replay-workbench-collaboration-note-selection", "replay-workbench-collaboration-note-selection-clear", "replay-workbench-collaboration-notes", "replay-workbench-collaborations", "toolchain", "runtime", "provider", "doctor"} {
+	for _, name := range []string{"init", "chat", "run", "workflow-status", "completion-status", "completion-accept", "report-project", "report-project-dispatch", "report-project-dispatches", "execute-report-project-dispatch", "report-project-dispatch-executions", "report-project-dispatch-execution-annotate", "report-project-dispatch-execution-select", "report-project-dispatch-execution-selection", "report-project-dispatch-execution-selection-clear", "replay", "replay-workbench", "replay-workbench-session", "replay-workbench-session-annotate", "replay-workbench-session-select", "replay-workbench-session-selection", "replay-workbench-session-selection-clear", "replay-workbench-sessions", "replay-workbench-collaboration", "replay-workbench-collaboration-annotate", "replay-workbench-collaboration-select", "replay-workbench-collaboration-selection", "replay-workbench-collaboration-selection-clear", "replay-workbench-collaboration-presence", "replay-workbench-collaboration-presences", "replay-workbench-collaboration-note", "replay-workbench-collaboration-note-annotate", "replay-workbench-collaboration-note-select", "replay-workbench-collaboration-note-selection", "replay-workbench-collaboration-note-selection-clear", "replay-workbench-collaboration-notes", "replay-workbench-collaborations", "toolchain", "runtime", "provider", "doctor"} {
 		if !names[name] {
 			t.Fatalf("expected root command to include %q", name)
 		}
@@ -85,6 +118,1309 @@ func TestRootCommandIncludesProductionCommands(t *testing.T) {
 		if !runtimeNames[name] {
 			t.Fatalf("expected runtime command to include %q", name)
 		}
+	}
+	var toolchainCmdFound bool
+	var toolchainNames map[string]bool
+	for _, child := range cmd.Commands() {
+		if child.Name() != "toolchain" {
+			continue
+		}
+		toolchainCmdFound = true
+		toolchainNames = map[string]bool{}
+		for _, toolchainChild := range child.Commands() {
+			toolchainNames[toolchainChild.Name()] = true
+		}
+	}
+	if !toolchainCmdFound {
+		t.Fatalf("expected root command to include toolchain command")
+	}
+	for _, name := range []string{"apply-managed-update-download-execution", "managed-update-apply-executions"} {
+		if !toolchainNames[name] {
+			t.Fatalf("expected toolchain command to include %q", name)
+		}
+	}
+}
+
+func TestCompletionStatusCommandReportsReadyForFinalReviewReadOnly(t *testing.T) {
+	logDir := t.TempDir()
+	resultPath, manifestPath, manifestDigestPath, resultSHA, manifestSHA := writeCompletionEvidenceReadyFixtureForCLITest(t, logDir)
+	beforeEntries, err := os.ReadDir(logDir)
+	if err != nil {
+		t.Fatalf("read log dir before command: %v", err)
+	}
+
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{"completion-status", logDir})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("completion status command: %v output=%q", err, out.String())
+	}
+	for _, want := range []string{
+		"completion-status: status=ready-for-final-review result=true manifest=true manifest_digest=true final_review_status=operator_review_required claim_100_ready=false remaining_manual_step=claim_100_after_real_operator_evidence_review",
+		"completion-status-artifacts: result=" + resultPath,
+		"manifest=" + manifestPath,
+		"manifest_digest=" + manifestDigestPath,
+		"completion-status-digests: result_sha256=" + resultSHA,
+		"evidence_manifest_sha256=" + manifestSHA,
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("expected completion status output to contain %q, got %q", want, out.String())
+		}
+	}
+	afterEntries, err := os.ReadDir(logDir)
+	if err != nil {
+		t.Fatalf("read log dir after command: %v", err)
+	}
+	if len(afterEntries) != len(beforeEntries) {
+		t.Fatalf("completion status must not create files: before=%d after=%d output=%q", len(beforeEntries), len(afterEntries), out.String())
+	}
+}
+
+func TestCompletionStatusCommandSurfacesFixtureEvidence(t *testing.T) {
+	logDir := t.TempDir()
+	writeCompletionEvidenceReadyFixtureWithPolicyForCLITest(t, logDir, true)
+
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{"completion-status", logDir})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("completion status command: %v output=%q", err, out.String())
+	}
+	for _, want := range []string{
+		"completion-status: status=ready-for-final-review result=true manifest=true manifest_digest=true final_review_status=fixture_evidence_not_acceptable claim_100_ready=false remaining_manual_step=replace_fixture_evidence_with_real_operator_evidence",
+		"fixture_evidence_detected=true",
+		"remaining_manual_step_status=matched",
+		"evidence_schema_status=matched",
+		"evidence_link_status=matched",
+		"result_digest_status=matched",
+		"evidence_manifest_digest_status=matched",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("expected fixture completion status output to contain %q, got %q", want, out.String())
+		}
+	}
+	if strings.Contains(out.String(), "final_review_status=operator_review_required") {
+		t.Fatalf("completion status must not report operator-ready final review for fixture evidence: %q", out.String())
+	}
+	if strings.Contains(out.String(), "claim_100_ready=true") {
+		t.Fatalf("completion status must not claim 100 ready for fixture evidence: %q", out.String())
+	}
+}
+
+func TestCompletionStatusCommandRejectsReadyForFinalReviewWhenEvidenceDigestsMismatch(t *testing.T) {
+	logDir := t.TempDir()
+	_, _, manifestDigestPath, _, _ := writeCompletionEvidenceReadyFixtureForCLITest(t, logDir)
+	mismatchedSidecar := `schema=ouroboros.completion_audit.evidence_manifest_digest.v1
+status=ready-for-final-review
+result=` + filepath.Join(logDir, "completion-audit.txt") + `
+result_sha256=` + strings.Repeat("0", 64) + `
+evidence_manifest=` + filepath.Join(logDir, "completion-evidence-manifest.txt") + `
+evidence_manifest_sha256=` + strings.Repeat("1", 64) + `
+remaining_manual_step=claim_100_after_real_operator_evidence_review
+`
+	if err := os.WriteFile(manifestDigestPath, []byte(mismatchedSidecar), 0o644); err != nil {
+		t.Fatalf("write mismatched completion evidence sidecar: %v", err)
+	}
+
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{"completion-status", logDir})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("completion status command: %v output=%q", err, out.String())
+	}
+	for _, want := range []string{
+		"completion-status: status=incomplete result=true manifest=true manifest_digest=true final_review_status=completion_evidence_digest_mismatch claim_100_ready=false remaining_manual_step=rerun_make_audit-completion",
+		"result_digest_status=mismatch",
+		"evidence_manifest_digest_status=mismatch",
+		"completion-status-digests: result_sha256=" + strings.Repeat("0", 64),
+		"evidence_manifest_sha256=" + strings.Repeat("1", 64),
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("expected mismatched completion status output to contain %q, got %q", want, out.String())
+		}
+	}
+	if strings.Contains(out.String(), "final_review_status=operator_review_required") {
+		t.Fatalf("completion status must not report operator-ready final review when digests mismatch: %q", out.String())
+	}
+}
+
+func TestCompletionStatusCommandRejectsReadyForFinalReviewWhenEvidenceLinksMismatch(t *testing.T) {
+	logDir := t.TempDir()
+	resultPath := filepath.Join(logDir, "completion-audit.txt")
+	manifestPath := filepath.Join(logDir, "completion-evidence-manifest.txt")
+	manifestDigestPath := filepath.Join(logDir, "completion-evidence-manifest.sha256")
+	resultBody := `schema=ouroboros.completion_audit.result.v1
+status=ready-for-final-review
+evidence_manifest=` + filepath.Join(logDir, "wrong-manifest.txt") + `
+evidence_manifest_digest=` + manifestDigestPath + `
+reviewed_by=operator
+reviewed_at=2026-06-10T10:00:00Z
+remaining_manual_step=claim_100_after_real_operator_evidence_review
+`
+	if err := os.WriteFile(resultPath, []byte(resultBody), 0o644); err != nil {
+		t.Fatalf("write completion result fixture: %v", err)
+	}
+	resultDigest := sha256.Sum256([]byte(resultBody))
+	resultSHA := hex.EncodeToString(resultDigest[:])
+	manifestBody := `schema=ouroboros.completion_audit.evidence_manifest.v1
+status=ready-for-final-review
+result=` + resultPath + `
+result_sha256=` + resultSHA + `
+remaining_manual_step=claim_100_after_real_operator_evidence_review
+`
+	if err := os.WriteFile(manifestPath, []byte(manifestBody), 0o644); err != nil {
+		t.Fatalf("write completion manifest fixture: %v", err)
+	}
+	manifestDigest := sha256.Sum256([]byte(manifestBody))
+	manifestSHA := hex.EncodeToString(manifestDigest[:])
+	sidecarBody := `schema=ouroboros.completion_audit.evidence_manifest_digest.v1
+status=ready-for-final-review
+result=` + resultPath + `
+result_sha256=` + resultSHA + `
+evidence_manifest=` + manifestPath + `
+evidence_manifest_sha256=` + manifestSHA + `
+remaining_manual_step=claim_100_after_real_operator_evidence_review
+`
+	if err := os.WriteFile(manifestDigestPath, []byte(sidecarBody), 0o644); err != nil {
+		t.Fatalf("write completion sidecar fixture: %v", err)
+	}
+
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{"completion-status", logDir})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("completion status command: %v output=%q", err, out.String())
+	}
+	for _, want := range []string{
+		"completion-status: status=incomplete result=true manifest=true manifest_digest=true final_review_status=completion_evidence_link_mismatch claim_100_ready=false remaining_manual_step=rerun_make_audit-completion",
+		"evidence_link_status=mismatch",
+		"result_digest_status=matched",
+		"evidence_manifest_digest_status=matched",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("expected link mismatch completion status output to contain %q, got %q", want, out.String())
+		}
+	}
+	if strings.Contains(out.String(), "final_review_status=operator_review_required") {
+		t.Fatalf("completion status must not report operator-ready final review when evidence links mismatch: %q", out.String())
+	}
+}
+
+func TestCompletionStatusCommandRejectsReadyForFinalReviewWhenEvidenceLinksAreRelative(t *testing.T) {
+	logDir := t.TempDir()
+	skipIfWindows(t)
+	resultPath := filepath.Join(logDir, "completion-audit.txt")
+	manifestPath := filepath.Join(logDir, "completion-evidence-manifest.txt")
+	manifestDigestPath := filepath.Join(logDir, "completion-evidence-manifest.sha256")
+	resultBody := `schema=ouroboros.completion_audit.result.v1
+status=ready-for-final-review
+evidence_manifest=` + relativePathForCLITest(t, manifestPath) + `
+evidence_manifest_digest=` + manifestDigestPath + `
+reviewed_by=operator
+reviewed_at=2026-06-10T10:00:00Z
+remaining_manual_step=claim_100_after_real_operator_evidence_review
+`
+	if err := os.WriteFile(resultPath, []byte(resultBody), 0o644); err != nil {
+		t.Fatalf("write completion result fixture: %v", err)
+	}
+	resultDigest := sha256.Sum256([]byte(resultBody))
+	resultSHA := hex.EncodeToString(resultDigest[:])
+	manifestBody := `schema=ouroboros.completion_audit.evidence_manifest.v1
+status=ready-for-final-review
+result=` + resultPath + `
+result_sha256=` + resultSHA + `
+remaining_manual_step=claim_100_after_real_operator_evidence_review
+`
+	if err := os.WriteFile(manifestPath, []byte(manifestBody), 0o644); err != nil {
+		t.Fatalf("write completion manifest fixture: %v", err)
+	}
+	manifestDigest := sha256.Sum256([]byte(manifestBody))
+	manifestSHA := hex.EncodeToString(manifestDigest[:])
+	sidecarBody := `schema=ouroboros.completion_audit.evidence_manifest_digest.v1
+status=ready-for-final-review
+result=` + resultPath + `
+result_sha256=` + resultSHA + `
+evidence_manifest=` + manifestPath + `
+evidence_manifest_sha256=` + manifestSHA + `
+remaining_manual_step=claim_100_after_real_operator_evidence_review
+`
+	if err := os.WriteFile(manifestDigestPath, []byte(sidecarBody), 0o644); err != nil {
+		t.Fatalf("write completion sidecar fixture: %v", err)
+	}
+
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{"completion-status", logDir})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("completion status command: %v output=%q", err, out.String())
+	}
+	for _, want := range []string{
+		"completion-status: status=incomplete result=true manifest=true manifest_digest=true final_review_status=completion_evidence_link_mismatch claim_100_ready=false remaining_manual_step=rerun_make_audit-completion",
+		"evidence_link_status=relative",
+		"result_digest_status=matched",
+		"evidence_manifest_digest_status=matched",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("expected relative-link completion status output to contain %q, got %q", want, out.String())
+		}
+	}
+	if strings.Contains(out.String(), "final_review_status=operator_review_required") {
+		t.Fatalf("completion status must not report operator-ready final review when evidence links are relative: %q", out.String())
+	}
+}
+
+func TestCompletionStatusCommandRejectsReadyForFinalReviewWhenEvidenceSchemasMismatch(t *testing.T) {
+	logDir := t.TempDir()
+	resultPath := filepath.Join(logDir, "completion-audit.txt")
+	manifestPath := filepath.Join(logDir, "completion-evidence-manifest.txt")
+	manifestDigestPath := filepath.Join(logDir, "completion-evidence-manifest.sha256")
+	resultBody := `schema=ouroboros.completion_audit.result.v0
+status=ready-for-final-review
+evidence_manifest=` + manifestPath + `
+evidence_manifest_digest=` + manifestDigestPath + `
+reviewed_by=operator
+reviewed_at=2026-06-10T10:00:00Z
+remaining_manual_step=claim_100_after_real_operator_evidence_review
+`
+	if err := os.WriteFile(resultPath, []byte(resultBody), 0o644); err != nil {
+		t.Fatalf("write completion result fixture: %v", err)
+	}
+	resultDigest := sha256.Sum256([]byte(resultBody))
+	resultSHA := hex.EncodeToString(resultDigest[:])
+	manifestBody := `schema=ouroboros.completion_audit.evidence_manifest.v1
+status=ready-for-final-review
+result=` + resultPath + `
+result_sha256=` + resultSHA + `
+remaining_manual_step=claim_100_after_real_operator_evidence_review
+`
+	if err := os.WriteFile(manifestPath, []byte(manifestBody), 0o644); err != nil {
+		t.Fatalf("write completion manifest fixture: %v", err)
+	}
+	manifestDigest := sha256.Sum256([]byte(manifestBody))
+	manifestSHA := hex.EncodeToString(manifestDigest[:])
+	sidecarBody := `schema=ouroboros.completion_audit.evidence_manifest_digest.v1
+status=ready-for-final-review
+result=` + resultPath + `
+result_sha256=` + resultSHA + `
+evidence_manifest=` + manifestPath + `
+evidence_manifest_sha256=` + manifestSHA + `
+remaining_manual_step=claim_100_after_real_operator_evidence_review
+`
+	if err := os.WriteFile(manifestDigestPath, []byte(sidecarBody), 0o644); err != nil {
+		t.Fatalf("write completion sidecar fixture: %v", err)
+	}
+
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{"completion-status", logDir})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("completion status command: %v output=%q", err, out.String())
+	}
+	for _, want := range []string{
+		"completion-status: status=incomplete result=true manifest=true manifest_digest=true final_review_status=completion_evidence_schema_mismatch claim_100_ready=false remaining_manual_step=rerun_make_audit-completion",
+		"evidence_schema_status=mismatch",
+		"evidence_link_status=matched",
+		"result_digest_status=matched",
+		"evidence_manifest_digest_status=matched",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("expected schema mismatch completion status output to contain %q, got %q", want, out.String())
+		}
+	}
+	if strings.Contains(out.String(), "final_review_status=operator_review_required") {
+		t.Fatalf("completion status must not report operator-ready final review when evidence schemas mismatch: %q", out.String())
+	}
+}
+
+func TestCompletionStatusCommandRejectsReadyForFinalReviewWhenRemainingManualStepMismatch(t *testing.T) {
+	logDir := t.TempDir()
+	resultPath, manifestPath, manifestDigestPath, resultSHA, manifestSHA := writeCompletionEvidenceReadyFixtureForCLITest(t, logDir)
+	unsafeSidecar := `schema=ouroboros.completion_audit.evidence_manifest_digest.v1
+status=ready-for-final-review
+result=` + resultPath + `
+result_sha256=` + resultSHA + `
+evidence_manifest=` + manifestPath + `
+evidence_manifest_sha256=` + manifestSHA + `
+remaining_manual_step=claim_100_without_operator_review
+`
+	if err := os.WriteFile(manifestDigestPath, []byte(unsafeSidecar), 0o644); err != nil {
+		t.Fatalf("write unsafe completion sidecar fixture: %v", err)
+	}
+
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{"completion-status", logDir})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("completion status command: %v output=%q", err, out.String())
+	}
+	for _, want := range []string{
+		"completion-status: status=incomplete result=true manifest=true manifest_digest=true final_review_status=completion_evidence_manual_step_mismatch claim_100_ready=false remaining_manual_step=rerun_make_audit-completion",
+		"remaining_manual_step_status=mismatch",
+		"evidence_schema_status=matched",
+		"evidence_link_status=matched",
+		"result_digest_status=matched",
+		"evidence_manifest_digest_status=matched",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("expected manual-step mismatch completion status output to contain %q, got %q", want, out.String())
+		}
+	}
+	if strings.Contains(out.String(), "final_review_status=operator_review_required") {
+		t.Fatalf("completion status must not report operator-ready final review when remaining manual step is unsafe: %q", out.String())
+	}
+}
+
+func TestCompletionStatusCommandReportsIncompleteWhenAuditEvidenceMissing(t *testing.T) {
+	logDir := t.TempDir()
+
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{"completion-status", logDir})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("completion status command: %v output=%q", err, out.String())
+	}
+	for _, want := range []string{
+		"completion-status: status=incomplete result=false manifest=false manifest_digest=false final_review_status=completion_audit_required claim_100_ready=false remaining_manual_step=run_make_audit-completion",
+		"completion-status-artifacts: result=" + filepath.Join(logDir, "completion-audit.txt"),
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("expected incomplete completion status output to contain %q, got %q", want, out.String())
+		}
+	}
+	entries, err := os.ReadDir(logDir)
+	if err != nil {
+		t.Fatalf("read log dir after command: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("completion status must not create evidence files, got %d entries", len(entries))
+	}
+}
+
+func TestCompletionStatusCommandRejectsSymlinkAuditLogDirParent(t *testing.T) {
+	root := t.TempDir()
+	realParent := filepath.Join(root, "real")
+	logDir := filepath.Join(realParent, "logs")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatalf("create real log dir: %v", err)
+	}
+	writeCompletionEvidenceReadyFixtureWithPolicyForCLITest(t, logDir, false)
+	linkParent := filepath.Join(root, "linked")
+	if err := os.Symlink(realParent, linkParent); err != nil {
+		t.Fatalf("create symlink parent: %v", err)
+	}
+	symlinkedLogDir := filepath.Join(linkParent, "logs")
+
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{"completion-status", symlinkedLogDir})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatalf("expected symlink-parent completion status to fail, output=%q", out.String())
+	}
+	if !strings.Contains(err.Error(), "completion audit log directory path component must not be a symlink") {
+		t.Fatalf("expected symlink path component error, got %v output=%q", err, out.String())
+	}
+}
+
+func TestCompletionStatusCommandRejectsSymlinkDotDotAuditLogDir(t *testing.T) {
+	root := t.TempDir()
+	logDir := filepath.Join(root, "logs")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatalf("create log dir: %v", err)
+	}
+	writeCompletionEvidenceReadyFixtureWithPolicyForCLITest(t, logDir, false)
+	linkParent := filepath.Join(root, "linked")
+	if err := os.Symlink(filepath.Join(root, "logs"), linkParent); err != nil {
+		t.Fatalf("create symlink path component: %v", err)
+	}
+	symlinkDotDotLogDir := linkParent + string(os.PathSeparator) + ".." + string(os.PathSeparator) + "logs"
+
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{"completion-status", symlinkDotDotLogDir})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatalf("expected symlink-dotdot completion status to fail, output=%q", out.String())
+	}
+	if !strings.Contains(err.Error(), "completion audit log directory must be canonical") {
+		t.Fatalf("expected canonical path rejection, got %v output=%q", err, out.String())
+	}
+}
+
+func TestCompletionAcceptCommandWritesFinalAcceptanceAndCompletionStatusClaimsReady(t *testing.T) {
+	logDir := t.TempDir()
+	writeCompletionEvidenceReadyFixtureWithPolicyForCLITest(t, logDir, false)
+
+	var acceptOut bytes.Buffer
+	cmd := newRootCommand(&acceptOut, new(bytes.Buffer))
+	cmd.SetArgs([]string{
+		"completion-accept", logDir,
+		"--reviewed-by", "operator@example.test",
+		"--accepted-at", "2026-06-11T10:00:00Z",
+		"--accept-real-evidence",
+	})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("completion accept command: %v output=%q", err, acceptOut.String())
+	}
+	acceptancePath := filepath.Join(logDir, "completion-final-acceptance.txt")
+	for _, want := range []string{
+		"completion-accept: status=accepted claim_100_ready=true final_acceptance=" + acceptancePath,
+		"accepted_by=operator@example.test",
+	} {
+		if !strings.Contains(acceptOut.String(), want) {
+			t.Fatalf("expected completion accept output to contain %q, got %q", want, acceptOut.String())
+		}
+	}
+	body, err := os.ReadFile(acceptancePath)
+	if err != nil {
+		t.Fatalf("read final acceptance: %v", err)
+	}
+	for _, want := range []string{
+		"schema=ouroboros.completion_audit.final_acceptance.v1",
+		"status=accepted",
+		"accepted_by=operator@example.test",
+		"accepted_at=2026-06-11T10:00:00Z",
+		"real_operator_evidence_reviewed=true",
+		"fixture_evidence_accepted=false",
+		"claim_100_ready=true",
+		"production_summary_sha256=",
+		"attestation_sha256=",
+		"policy_sha256=",
+	} {
+		if !strings.Contains(string(body), want) {
+			t.Fatalf("expected final acceptance to contain %q, got:\n%s", want, body)
+		}
+	}
+
+	var statusOut bytes.Buffer
+	statusCmd := newRootCommand(&statusOut, new(bytes.Buffer))
+	statusCmd.SetArgs([]string{"completion-status", logDir})
+	if err := statusCmd.Execute(); err != nil {
+		t.Fatalf("completion status command: %v output=%q", err, statusOut.String())
+	}
+	for _, want := range []string{
+		"completion-status: status=complete result=true manifest=true manifest_digest=true final_review_status=accepted claim_100_ready=true remaining_manual_step=none",
+		"final_acceptance=true",
+		"final_acceptance_status=matched",
+		"completion-status-artifacts: result=",
+		"final_acceptance=" + acceptancePath,
+	} {
+		if !strings.Contains(statusOut.String(), want) {
+			t.Fatalf("expected accepted completion status output to contain %q, got %q", want, statusOut.String())
+		}
+	}
+}
+
+func TestCompletionAcceptCommandRejectsLinkedEvidenceSymlinkParent(t *testing.T) {
+	root := t.TempDir()
+	logDir := filepath.Join(root, "logs")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatalf("create log dir: %v", err)
+	}
+	_, manifestPath, manifestDigestPath, _, _ := writeCompletionEvidenceReadyFixtureWithPolicyForCLITest(t, logDir, false)
+	linkDir := filepath.Join(root, "linked-logs")
+	if err := os.Symlink(logDir, linkDir); err != nil {
+		t.Fatalf("create linked evidence parent: %v", err)
+	}
+	replaceCompletionEvidenceFieldForCLITest(t, manifestPath, "production_summary", filepath.Join(linkDir, "summary.txt"))
+	refreshCompletionManifestDigestSidecarForCLITest(t, manifestPath, manifestDigestPath)
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	cmd := newRootCommand(&out, &errOut)
+	cmd.SetArgs([]string{
+		"completion-accept", logDir,
+		"--reviewed-by", "operator@example.test",
+		"--accepted-at", "2026-06-11T10:00:00Z",
+		"--accept-real-evidence",
+	})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatalf("expected symlink-parent linked evidence acceptance to fail, output=%q", out.String())
+	}
+	if !strings.Contains(err.Error(), "completion evidence file path component must not be a symlink") {
+		t.Fatalf("expected linked evidence symlink component rejection, got %v output=%q stderr=%q", err, out.String(), errOut.String())
+	}
+	if _, statErr := os.Stat(filepath.Join(logDir, "completion-final-acceptance.txt")); !os.IsNotExist(statErr) {
+		t.Fatalf("symlink-parent linked evidence must not create final acceptance, stat err=%v", statErr)
+	}
+}
+
+func TestCompletionStatusCommandRejectsFinalAcceptanceSymlinkDotDotPathBinding(t *testing.T) {
+	root := t.TempDir()
+	logDir := filepath.Join(root, "logs")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatalf("create log dir: %v", err)
+	}
+	writeCompletionEvidenceReadyFixtureWithPolicyForCLITest(t, logDir, false)
+	var acceptOut bytes.Buffer
+	acceptCmd := newRootCommand(&acceptOut, new(bytes.Buffer))
+	acceptCmd.SetArgs([]string{
+		"completion-accept", logDir,
+		"--reviewed-by", "operator@example.test",
+		"--accepted-at", "2026-06-11T10:00:00Z",
+		"--accept-real-evidence",
+	})
+	if err := acceptCmd.Execute(); err != nil {
+		t.Fatalf("completion accept command: %v output=%q", err, acceptOut.String())
+	}
+	realTarget := filepath.Join(root, "real")
+	if err := os.MkdirAll(realTarget, 0o755); err != nil {
+		t.Fatalf("create symlink target: %v", err)
+	}
+	linkDir := filepath.Join(root, "linked")
+	if err := os.Symlink(realTarget, linkDir); err != nil {
+		t.Fatalf("create linked evidence parent: %v", err)
+	}
+	acceptancePath := filepath.Join(logDir, "completion-final-acceptance.txt")
+	linkedResultPath := linkDir + string(os.PathSeparator) + ".." + string(os.PathSeparator) + "logs" + string(os.PathSeparator) + "completion-audit.txt"
+	replaceCompletionEvidenceFieldForCLITest(t, acceptancePath, "result", linkedResultPath)
+
+	var out bytes.Buffer
+	statusCmd := newRootCommand(&out, new(bytes.Buffer))
+	statusCmd.SetArgs([]string{"completion-status", logDir})
+	err := statusCmd.Execute()
+	if err == nil {
+		t.Fatalf("expected symlink-dotdot final acceptance path binding to fail, output=%q", out.String())
+	}
+	if !strings.Contains(err.Error(), "final acceptance linked path must be canonical") {
+		t.Fatalf("expected final acceptance linked path canonical rejection, got %v output=%q", err, out.String())
+	}
+}
+
+func TestCompletionAcceptCommandRejectsLinkedEvidenceSymlinkDotDotPath(t *testing.T) {
+	for _, field := range []struct {
+		name string
+		file string
+	}{
+		{name: "production_summary", file: "summary.txt"},
+		{name: "attestation", file: "completion-attestation.env"},
+		{name: "policy", file: "deployment-policy.env"},
+	} {
+		t.Run(field.name, func(t *testing.T) {
+			root := t.TempDir()
+			logDir := filepath.Join(root, "logs")
+			if err := os.MkdirAll(logDir, 0o755); err != nil {
+				t.Fatalf("create log dir: %v", err)
+			}
+			_, manifestPath, manifestDigestPath, _, _ := writeCompletionEvidenceReadyFixtureWithPolicyForCLITest(t, logDir, false)
+			linkParent := filepath.Join(root, "linked")
+			if err := os.Symlink(logDir, linkParent); err != nil {
+				t.Fatalf("create linked evidence path component: %v", err)
+			}
+			linkedPath := linkParent + string(os.PathSeparator) + ".." + string(os.PathSeparator) + "logs" + string(os.PathSeparator) + field.file
+			replaceCompletionEvidenceFieldForCLITest(t, manifestPath, field.name, linkedPath)
+			refreshCompletionManifestDigestSidecarForCLITest(t, manifestPath, manifestDigestPath)
+
+			var out bytes.Buffer
+			var errOut bytes.Buffer
+			cmd := newRootCommand(&out, &errOut)
+			cmd.SetArgs([]string{
+				"completion-accept", logDir,
+				"--reviewed-by", "operator@example.test",
+				"--accepted-at", "2026-06-11T10:00:00Z",
+				"--accept-real-evidence",
+			})
+			err := cmd.Execute()
+			if err == nil {
+				t.Fatalf("expected symlink-dotdot linked evidence acceptance to fail, output=%q", out.String())
+			}
+			if !strings.Contains(err.Error(), "completion evidence file must be canonical") {
+				t.Fatalf("expected linked evidence canonical path rejection, got %v output=%q stderr=%q", err, out.String(), errOut.String())
+			}
+			if _, statErr := os.Stat(filepath.Join(logDir, "completion-final-acceptance.txt")); !os.IsNotExist(statErr) {
+				t.Fatalf("symlink-dotdot linked evidence must not create final acceptance, stat err=%v", statErr)
+			}
+		})
+	}
+}
+
+func TestCompletionAcceptCommandRevalidatesFinalAcceptancePathBeforePublish(t *testing.T) {
+	root := t.TempDir()
+	logDir := filepath.Join(root, "logs")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatalf("create log dir: %v", err)
+	}
+	writeCompletionEvidenceReadyFixtureWithPolicyForCLITest(t, logDir, false)
+	replacedLogDir := filepath.Join(root, "logs-replaced")
+	outsideDir := filepath.Join(root, "outside")
+	if err := os.MkdirAll(outsideDir, 0o755); err != nil {
+		t.Fatalf("create outside dir: %v", err)
+	}
+	restoreHook := replaceCompletionFinalAcceptanceBeforePublishHook(t, func(status completionEvidenceStatus, tmpPath string) error {
+		if status.LogDir != logDir {
+			return fmt.Errorf("unexpected log dir in publish hook: %s", status.LogDir)
+		}
+		if strings.TrimSpace(tmpPath) == "" {
+			return fmt.Errorf("expected final acceptance temp path")
+		}
+		if err := os.Rename(logDir, replacedLogDir); err != nil {
+			return fmt.Errorf("replace log dir before publish: %w", err)
+		}
+		if err := os.Symlink(outsideDir, logDir); err != nil {
+			return fmt.Errorf("symlink log dir before publish: %w", err)
+		}
+		return nil
+	})
+	defer restoreHook()
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	cmd := newRootCommand(&out, &errOut)
+	cmd.SetArgs([]string{
+		"completion-accept", logDir,
+		"--reviewed-by", "operator@example.test",
+		"--accepted-at", "2026-06-11T10:00:00Z",
+		"--accept-real-evidence",
+	})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatalf("expected replaced final acceptance path publish to fail, output=%q", out.String())
+	}
+	if !strings.Contains(err.Error(), "completion audit log directory path component must not be a symlink") {
+		t.Fatalf("expected publish-time log dir symlink revalidation, got %v output=%q stderr=%q", err, out.String(), errOut.String())
+	}
+	if _, statErr := os.Stat(filepath.Join(outsideDir, "completion-final-acceptance.txt")); !os.IsNotExist(statErr) {
+		t.Fatalf("publish-time replaced log dir must not create outside final acceptance, stat err=%v", statErr)
+	}
+}
+
+func TestCompletionAcceptCommandRejectsFixtureEvidence(t *testing.T) {
+	logDir := t.TempDir()
+	writeCompletionEvidenceReadyFixtureWithPolicyForCLITest(t, logDir, true)
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	cmd := newRootCommand(&out, &errOut)
+	cmd.SetArgs([]string{
+		"completion-accept", logDir,
+		"--reviewed-by", "operator@example.test",
+		"--accepted-at", "2026-06-11T10:00:00Z",
+		"--accept-real-evidence",
+	})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatalf("expected fixture evidence acceptance to fail, output=%q", out.String())
+	}
+	if !strings.Contains(err.Error(), "fixture evidence cannot be final accepted") {
+		t.Fatalf("expected fixture rejection error, got %v output=%q stderr=%q", err, out.String(), errOut.String())
+	}
+	if _, statErr := os.Stat(filepath.Join(logDir, "completion-final-acceptance.txt")); !os.IsNotExist(statErr) {
+		t.Fatalf("fixture evidence must not create final acceptance, stat err=%v", statErr)
+	}
+}
+
+func TestCompletionAcceptCommandRejectsLinkedEvidenceDigestDrift(t *testing.T) {
+	logDir := t.TempDir()
+	writeCompletionEvidenceReadyFixtureWithPolicyForCLITest(t, logDir, false)
+	summaryPath := filepath.Join(logDir, "summary.txt")
+	if err := os.WriteFile(summaryPath, []byte(`schema=ouroboros.production_acceptance.audit.v1
+status=accepted
+mode=operator-owned
+policy=`+filepath.Join(logDir, "deployment-policy.env")+`
+no_live_targets=true
+tampered_after_manifest=true
+`), 0o644); err != nil {
+		t.Fatalf("tamper production summary fixture: %v", err)
+	}
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	cmd := newRootCommand(&out, &errOut)
+	cmd.SetArgs([]string{
+		"completion-accept", logDir,
+		"--reviewed-by", "operator@example.test",
+		"--accepted-at", "2026-06-11T10:00:00Z",
+		"--accept-real-evidence",
+	})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatalf("expected digest-drift acceptance to fail, output=%q", out.String())
+	}
+	if !strings.Contains(err.Error(), "production_summary_sha256 mismatch") {
+		t.Fatalf("expected production summary digest mismatch, got %v output=%q stderr=%q", err, out.String(), errOut.String())
+	}
+	if _, statErr := os.Stat(filepath.Join(logDir, "completion-final-acceptance.txt")); !os.IsNotExist(statErr) {
+		t.Fatalf("digest-drift evidence must not create final acceptance, stat err=%v", statErr)
+	}
+}
+
+func TestCompletionAcceptCommandRejectsFixtureAttestationBody(t *testing.T) {
+	logDir := t.TempDir()
+	_, manifestPath, manifestDigestPath, _, _ := writeCompletionEvidenceReadyFixtureWithPolicyForCLITest(t, logDir, false)
+	attestationPath := filepath.Join(logDir, "completion-attestation.env")
+	attestationBody := `schema=ouroboros.completion_audit.attestation.v1
+attestation_status=approved
+reviewed_by=final-evidence-fixture
+reviewed_at=2026-06-10T10:00:00Z
+production_evidence=fixture
+fixture_evidence_allowed=true
+`
+	if err := os.WriteFile(attestationPath, []byte(attestationBody), 0o644); err != nil {
+		t.Fatalf("write fixture-marked attestation: %v", err)
+	}
+	replaceCompletionEvidenceFieldForCLITest(t, manifestPath, "attestation_sha256", fileSHA256ForCLITest(t, attestationPath))
+	refreshCompletionManifestDigestSidecarForCLITest(t, manifestPath, manifestDigestPath)
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	cmd := newRootCommand(&out, &errOut)
+	cmd.SetArgs([]string{
+		"completion-accept", logDir,
+		"--reviewed-by", "operator@example.test",
+		"--accepted-at", "2026-06-11T10:00:00Z",
+		"--accept-real-evidence",
+	})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatalf("expected fixture attestation acceptance to fail, output=%q", out.String())
+	}
+	if !strings.Contains(err.Error(), "fixture evidence cannot be final accepted") {
+		t.Fatalf("expected fixture rejection error, got %v output=%q stderr=%q", err, out.String(), errOut.String())
+	}
+	if _, statErr := os.Stat(filepath.Join(logDir, "completion-final-acceptance.txt")); !os.IsNotExist(statErr) {
+		t.Fatalf("fixture attestation must not create final acceptance, stat err=%v", statErr)
+	}
+}
+
+func TestCompletionAcceptCommandRejectsRelativeAuditLogDir(t *testing.T) {
+	logDir := t.TempDir()
+	skipIfWindows(t)
+	writeCompletionEvidenceReadyFixtureWithPolicyForCLITest(t, logDir, false)
+	relativeLogDir := relativePathForCLITest(t, logDir)
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	cmd := newRootCommand(&out, &errOut)
+	cmd.SetArgs([]string{
+		"completion-accept", relativeLogDir,
+		"--reviewed-by", "operator@example.test",
+		"--accepted-at", "2026-06-11T10:00:00Z",
+		"--accept-real-evidence",
+	})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatalf("expected relative audit log dir acceptance to fail, output=%q", out.String())
+	}
+	if !strings.Contains(err.Error(), "completion audit log directory must be absolute") {
+		t.Fatalf("expected absolute log dir error, got %v output=%q stderr=%q", err, out.String(), errOut.String())
+	}
+	if _, statErr := os.Stat(filepath.Join(logDir, "completion-final-acceptance.txt")); !os.IsNotExist(statErr) {
+		t.Fatalf("relative log dir must not create final acceptance, stat err=%v", statErr)
+	}
+}
+
+func TestCompletionStatusCommandRejectsTamperedFinalAcceptance(t *testing.T) {
+	logDir := t.TempDir()
+	_, _, _, resultSHA, manifestSHA := writeCompletionEvidenceReadyFixtureWithPolicyForCLITest(t, logDir, false)
+	acceptancePath := filepath.Join(logDir, "completion-final-acceptance.txt")
+	sidecarPath := filepath.Join(logDir, "completion-evidence-manifest.sha256")
+	sidecarSHA := fileSHA256ForCLITest(t, sidecarPath)
+	body := `schema=ouroboros.completion_audit.final_acceptance.v1
+status=accepted
+accepted_by=operator@example.test
+accepted_at=2026-06-11T10:00:00Z
+result=` + filepath.Join(logDir, "completion-audit.txt") + `
+result_sha256=` + resultSHA + `
+evidence_manifest=` + filepath.Join(logDir, "completion-evidence-manifest.txt") + `
+evidence_manifest_sha256=` + manifestSHA + `
+evidence_manifest_digest=` + sidecarPath + `
+evidence_manifest_digest_sha256=` + sidecarSHA + `
+real_operator_evidence_reviewed=true
+fixture_evidence_accepted=true
+claim_100_ready=true
+`
+	if err := os.WriteFile(acceptancePath, []byte(body), 0o644); err != nil {
+		t.Fatalf("write tampered final acceptance: %v", err)
+	}
+
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{"completion-status", logDir})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("completion status command: %v output=%q", err, out.String())
+	}
+	for _, want := range []string{
+		"completion-status: status=incomplete result=true manifest=true manifest_digest=true final_review_status=final_acceptance_mismatch claim_100_ready=false remaining_manual_step=rerun_completion-accept",
+		"final_acceptance=true",
+		"final_acceptance_status=mismatch",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("expected tampered final acceptance status output to contain %q, got %q", want, out.String())
+		}
+	}
+}
+
+func writeCompletionEvidenceReadyFixtureForCLITest(t *testing.T, logDir string) (string, string, string, string, string) {
+	t.Helper()
+	return writeCompletionEvidenceReadyFixtureWithPolicyForCLITest(t, logDir, false)
+}
+
+func writeCompletionEvidenceReadyFixtureWithPolicyForCLITest(t *testing.T, logDir string, fixtureEvidence bool) (string, string, string, string, string) {
+	t.Helper()
+	resultPath := filepath.Join(logDir, "completion-audit.txt")
+	manifestPath := filepath.Join(logDir, "completion-evidence-manifest.txt")
+	manifestDigestPath := filepath.Join(logDir, "completion-evidence-manifest.sha256")
+	summaryPath := filepath.Join(logDir, "summary.txt")
+	policyPath := filepath.Join(logDir, "deployment-policy.env")
+	attestationPath := filepath.Join(logDir, "completion-attestation.env")
+	policyEnvironment := "production"
+	policyAcceptedBy := "operator@example.test"
+	policyScope := "authorized-production-final-review"
+	attestationReviewer := "operator@example.test"
+	if fixtureEvidence {
+		policyEnvironment = "fixture"
+		policyAcceptedBy = "final-evidence-fixture"
+		policyScope = "fixture-only-local-final-evidence-smoke"
+		attestationReviewer = "final-evidence-fixture"
+	}
+	summaryBody := `schema=ouroboros.production_acceptance.audit.v1
+status=accepted
+mode=operator-owned
+policy=` + policyPath + `
+no_live_targets=true
+`
+	if err := os.WriteFile(summaryPath, []byte(summaryBody), 0o644); err != nil {
+		t.Fatalf("write summary fixture: %v", err)
+	}
+	policyBody := `schema=ouroboros.production_acceptance.policy.v1
+policy_status=approved
+deployment_environment=` + policyEnvironment + `
+accepted_by=` + policyAcceptedBy + `
+accepted_at=2026-06-11T09:00:00Z
+authorization_scope=` + policyScope + `
+`
+	if err := os.WriteFile(policyPath, []byte(policyBody), 0o644); err != nil {
+		t.Fatalf("write policy fixture: %v", err)
+	}
+	attestationBody := `schema=ouroboros.completion_audit.attestation.v1
+attestation_status=approved
+reviewed_by=` + attestationReviewer + `
+reviewed_at=2026-06-10T10:00:00Z
+production_evidence=operator_owned
+fixture_evidence_allowed=false
+`
+	if err := os.WriteFile(attestationPath, []byte(attestationBody), 0o644); err != nil {
+		t.Fatalf("write attestation fixture: %v", err)
+	}
+	resultBody := `schema=ouroboros.completion_audit.result.v1
+status=ready-for-final-review
+evidence_manifest=` + manifestPath + `
+evidence_manifest_digest=` + manifestDigestPath + `
+reviewed_by=` + attestationReviewer + `
+reviewed_at=2026-06-10T10:00:00Z
+remaining_manual_step=claim_100_after_real_operator_evidence_review
+`
+	if err := os.WriteFile(resultPath, []byte(resultBody), 0o644); err != nil {
+		t.Fatalf("write completion result fixture: %v", err)
+	}
+	resultDigest := sha256.Sum256([]byte(resultBody))
+	resultSHA := hex.EncodeToString(resultDigest[:])
+	manifestBody := `schema=ouroboros.completion_audit.evidence_manifest.v1
+status=ready-for-final-review
+result=` + resultPath + `
+result_sha256=` + resultSHA + `
+production_summary=` + summaryPath + `
+production_summary_sha256=` + fileSHA256ForCLITest(t, summaryPath) + `
+attestation=` + attestationPath + `
+attestation_sha256=` + fileSHA256ForCLITest(t, attestationPath) + `
+policy=` + policyPath + `
+policy_sha256=` + fileSHA256ForCLITest(t, policyPath) + `
+remaining_manual_step=claim_100_after_real_operator_evidence_review
+`
+	if err := os.WriteFile(manifestPath, []byte(manifestBody), 0o644); err != nil {
+		t.Fatalf("write completion manifest fixture: %v", err)
+	}
+	manifestDigest := sha256.Sum256([]byte(manifestBody))
+	manifestSHA := hex.EncodeToString(manifestDigest[:])
+	sidecarBody := `schema=ouroboros.completion_audit.evidence_manifest_digest.v1
+status=ready-for-final-review
+result=` + resultPath + `
+result_sha256=` + resultSHA + `
+evidence_manifest=` + manifestPath + `
+evidence_manifest_sha256=` + manifestSHA + `
+attestation_reviewed_by=` + attestationReviewer + `
+remaining_manual_step=claim_100_after_real_operator_evidence_review
+`
+	if err := os.WriteFile(manifestDigestPath, []byte(sidecarBody), 0o644); err != nil {
+		t.Fatalf("write completion sidecar fixture: %v", err)
+	}
+	return resultPath, manifestPath, manifestDigestPath, resultSHA, manifestSHA
+}
+
+func replaceCompletionEvidenceFieldForCLITest(t *testing.T, path, key, value string) {
+	t.Helper()
+	bytes, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read completion evidence fixture %s: %v", path, err)
+	}
+	prefix := key + "="
+	lines := strings.Split(string(bytes), "\n")
+	replaced := false
+	for i, line := range lines {
+		if strings.HasPrefix(line, prefix) {
+			lines[i] = prefix + value
+			replaced = true
+		}
+	}
+	if !replaced {
+		lines = append(lines, prefix+value)
+	}
+	body := strings.Join(lines, "\n")
+	if !strings.HasSuffix(body, "\n") {
+		body += "\n"
+	}
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write completion evidence fixture %s: %v", path, err)
+	}
+}
+
+func refreshCompletionManifestDigestSidecarForCLITest(t *testing.T, manifestPath, sidecarPath string) {
+	t.Helper()
+	replaceCompletionEvidenceFieldForCLITest(t, sidecarPath, "evidence_manifest_sha256", fileSHA256ForCLITest(t, manifestPath))
+}
+
+func fileSHA256ForCLITest(t *testing.T, path string) string {
+	t.Helper()
+	bytes, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	digest := sha256.Sum256(bytes)
+	return hex.EncodeToString(digest[:])
+}
+
+func relativePathForCLITest(t *testing.T, path string) string {
+	t.Helper()
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("get cwd: %v", err)
+	}
+	rel, err := filepath.Rel(cwd, path)
+	if err != nil {
+		t.Fatalf("rel path: %v", err)
+	}
+	return rel
+}
+
+func TestChatCommandLaunchesAIDialogComposerWithoutRunningWorkspace(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	session := &fakeInteractiveSession{}
+	restore := replaceInteractiveSession(t, session)
+	defer restore()
+
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{"chat", root})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute chat command: %v", err)
+	}
+	if session.runCount != 1 {
+		t.Fatalf("expected chat command to launch one interactive session, got %d", session.runCount)
+	}
+	for _, want := range []string{"Workspace", "Mission Conversation", "dialog: ai operator chat", "Runtime Tabs"} {
+		if !strings.Contains(session.initialView, want) {
+			t.Fatalf("expected chat TUI view to contain %q, got:\n%s", want, session.initialView)
+		}
+	}
+	if strings.Contains(session.initialView, "AI > press i to chat") {
+		t.Fatalf("chat command should open the AI composer by default, got:\n%s", session.initialView)
+	}
+	if strings.Contains(out.String(), "run:") || strings.Contains(out.String(), "replay:") {
+		t.Fatalf("chat command must not start a run or replay summary, got %q", out.String())
+	}
+	if _, err := os.Stat(filepath.Join(root, "replay", "events.db")); !os.IsNotExist(err) {
+		t.Fatalf("chat command must not create a replay event log, stat err=%v", err)
+	}
+}
+
+func TestChatCommandTUISnapshotPrintsFocusedComposer(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	session := &fakeInteractiveSession{}
+	restore := replaceInteractiveSession(t, session)
+	defer restore()
+
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{"chat", root, "--tui"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute chat --tui command: %v", err)
+	}
+	if session.runCount != 0 {
+		t.Fatalf("chat --tui must not launch an interactive session, got %d", session.runCount)
+	}
+	text := out.String()
+	for _, want := range []string{"Workspace", "Mission Conversation", "dialog: ai operator chat", "AI setup:", "You > |", "Runtime Tabs"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected chat --tui output to contain %q, got:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "run:") || strings.Contains(text, "replay:") {
+		t.Fatalf("chat --tui must not start a run or replay summary, got %q", text)
+	}
+	if _, err := os.Stat(filepath.Join(root, "replay", "events.db")); !os.IsNotExist(err) {
+		t.Fatalf("chat --tui must not create a replay event log, stat err=%v", err)
+	}
+}
+
+func TestChatCommandPromptSubmitsThroughAIDialogAndCreatesPreview(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	type capturedRequest struct {
+		Model    string `json:"model"`
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	var captured capturedRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("expected chat completions POST, got %s %s", r.Method, r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer secret-value" {
+			t.Fatalf("expected bearer credential from env, got %q", got)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("decode provider request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"choices": [{"message": {"role": "assistant", "content": "semantic_action: enumerate_paths"}}],
+			"usage": {"prompt_tokens": 7, "completion_tokens": 5, "total_tokens": 12}
+		}`))
+	}))
+	defer server.Close()
+	t.Setenv("OURO_TEST_PROVIDER_KEY", "secret-value")
+	if _, err := app.ConfigureOpenAICompatibleProvider(root, app.OpenAICompatibleProviderConfiguration{
+		Name:            "smoke-openai",
+		BaseURL:         server.URL + "/v1",
+		Model:           "gpt-smoke",
+		APIKeyEnv:       "OURO_TEST_PROVIDER_KEY",
+		Enabled:         true,
+		Capabilities:    []string{"chat", "tool_planning"},
+		RoutingStrategy: "enabled_order_failover",
+	}); err != nil {
+		t.Fatalf("configure provider: %v", err)
+	}
+	session := &fakeInteractiveSession{}
+	restore := replaceInteractiveSession(t, session)
+	defer restore()
+
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{"chat", root, "--prompt", "Return one reviewed semantic action marker."})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute chat --prompt command: %v output=%q", err, out.String())
+	}
+	if session.runCount != 0 {
+		t.Fatalf("chat --prompt must not launch an interactive session, got %d", session.runCount)
+	}
+	if captured.Model != "gpt-smoke" || len(captured.Messages) != 2 || captured.Messages[0].Role != "system" || captured.Messages[1].Role != "user" || captured.Messages[1].Content != "Return one reviewed semantic action marker." {
+		t.Fatalf("unexpected chat provider request: %#v", captured)
+	}
+	for _, forbidden := range []string{"secret-value", "Authorization", "Bearer"} {
+		if strings.Contains(out.String(), forbidden) {
+			t.Fatalf("chat --prompt output leaked %q: %q", forbidden, out.String())
+		}
+	}
+	for _, want := range []string{
+		"chat: status=completed provider=smoke-openai model=gpt-smoke tokens=12 stored=false",
+		"chat-text: semantic_action: enumerate_paths",
+		"chat-preview: status=created action=enumerate_paths marker=semantic_action: enumerate_paths artifact_created=true stored=false",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("expected chat --prompt output to contain %q, got %q", want, out.String())
+		}
+	}
+	previews, err := filepath.Glob(filepath.Join(root, "runtime", "model-tool-plan-previews", "*.json"))
+	if err != nil {
+		t.Fatalf("glob preview artifacts: %v", err)
+	}
+	if len(previews) != 1 {
+		t.Fatalf("expected one metadata-only preview artifact, got %d: %v", len(previews), previews)
+	}
+	if _, err := os.Stat(filepath.Join(root, "replay", "events.db")); !os.IsNotExist(err) {
+		t.Fatalf("chat --prompt must not create a replay event log, stat err=%v", err)
+	}
+}
+
+func TestChatCommandPromptRejectsEmptyPromptWithoutLaunchingInteractiveSession(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	session := &fakeInteractiveSession{}
+	restore := replaceInteractiveSession(t, session)
+	defer restore()
+
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{"chat", root, "--prompt", "   "})
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatalf("expected empty chat --prompt to fail")
+	}
+	if !strings.Contains(err.Error(), "chat prompt is required") {
+		t.Fatalf("expected empty prompt error, got %v output=%q", err, out.String())
+	}
+	if session.runCount != 0 {
+		t.Fatalf("empty chat --prompt must not launch an interactive session, got %d", session.runCount)
+	}
+	if _, err := os.Stat(filepath.Join(root, "replay", "events.db")); !os.IsNotExist(err) {
+		t.Fatalf("empty chat --prompt must not create a replay event log, stat err=%v", err)
+	}
+}
+
+func TestWorkflowStatusCommandPrintsNextGateLinksAndDoesNotMutateWorkspace(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	review, err := app.CreateToolCompilePreviewReview(root, app.ToolCompilePreviewOptions{Action: compiler.ActionEnumeratePaths})
+	if err != nil {
+		t.Fatalf("create compile preview review: %v", err)
+	}
+	extraction := app.ExtractModelToolPlanPreview("ouro_action: enumerate_paths\n" + strings.Repeat("padding ", 16))
+	preview, err := app.RecordModelToolPlanPreviewArtifact(root, "run-workflow-cli", app.ProviderGenerationResult{
+		ProviderName: "local-openai",
+		Model:        "gpt-plan",
+	}, "", extraction, review, app.ModelToolPlanPreviewArtifactOptions{
+		Now: time.Date(2026, 6, 5, 3, 45, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("record preview: %v", err)
+	}
+	beforeAcceptances := countCLIJSON(t, filepath.Join(root, "runtime", "model-tool-plan-preview-acceptances"))
+
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{"workflow-status", root})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("workflow status command: %v", err)
+	}
+	for _, want := range []string{
+		"workflow-status: status=ready mode=read-only stage=model-tool-plan next_gate=accept-model-tool-plan-preview reason=valid-preview-awaits-acceptance action=enumerate_paths",
+		"previews=1 acceptances=0 dispatches=0 executions=0 report_dispatches=0 report_executions=0",
+		"workflow-command: ouro provider tool-plan-preview-accept " + root,
+		"--accept",
+		"workflow-links: preview=" + preview.Path,
+		"review=" + review.Path,
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("expected workflow status output to contain %q, got %q", want, out.String())
+		}
+	}
+	if got := countCLIJSON(t, filepath.Join(root, "runtime", "model-tool-plan-preview-acceptances")); got != beforeAcceptances {
+		t.Fatalf("workflow status must not accept previews: before=%d after=%d", beforeAcceptances, got)
+	}
+}
+
+func TestWorkflowStatusCommandReportsSafetyAuthorizationGateAndDoesNotExecute(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	skipIfWindows(t)
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	review, err := app.CreateToolCompilePreviewReview(root, app.ToolCompilePreviewOptions{Action: compiler.ActionEnumeratePaths})
+	if err != nil {
+		t.Fatalf("create compile preview review: %v", err)
+	}
+	extraction := app.ExtractModelToolPlanPreview("ouro_action: enumerate_paths\n" + strings.Repeat("padding ", 16))
+	preview, err := app.RecordModelToolPlanPreviewArtifact(root, "run-workflow-cli-safety", app.ProviderGenerationResult{
+		ProviderName: "local-openai",
+		Model:        "gpt-plan",
+	}, "", extraction, review, app.ModelToolPlanPreviewArtifactOptions{
+		Now: time.Date(2026, 6, 5, 4, 10, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("record preview: %v", err)
+	}
+	if _, err := app.AcceptModelToolPlanPreviewArtifact(root, filepath.Base(preview.Path), app.ModelToolPlanPreviewAcceptanceOptions{AcceptedBy: "operator"}); err != nil {
+		t.Fatalf("accept preview: %v", err)
+	}
+	dispatch, err := app.CreateToolCompilePreviewReviewExecutionDispatch(root, review.Path, app.ToolCompilePreviewReviewExecutionDispatchOptions{Actor: "operator"})
+	if err != nil {
+		t.Fatalf("create compile dispatch: %v", err)
+	}
+	scope := `version: 1
+scope:
+  target_policy: disabled
+  targets:
+    - kind: url
+      value: https://example.test
+  exclusions: []
+execution:
+  isolation: process
+`
+	if err := os.WriteFile(filepath.Join(root, "scope.yaml"), []byte(scope), 0o644); err != nil {
+		t.Fatalf("write disabled scope: %v", err)
+	}
+	beforeAcceptances := countCLIJSON(t, filepath.Join(root, "runtime", "model-tool-plan-preview-acceptances"))
+	selectionPath := filepath.Join(root, "toolchain", "compile-preview-review-selection.json")
+	beforeSelection, err := os.ReadFile(selectionPath)
+	if err != nil {
+		t.Fatalf("read selection before workflow status: %v", err)
+	}
+	beforeReportDispatches := countCLIJSON(t, filepath.Join(root, "reports", "report-projection-dispatches"))
+	beforeReportExecutions := countCLIJSON(t, filepath.Join(root, "reports", "report-projection-dispatch-executions"))
+	beforeExecutions := countCLIJSON(t, filepath.Join(root, "toolchain", "compile-preview-review-executions"))
+	if _, err := os.Stat(filepath.Join(root, "replay", "events.db")); !os.IsNotExist(err) {
+		t.Fatalf("expected no replay event log before workflow status, stat err=%v", err)
+	}
+
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{"workflow-status", root})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("workflow status command should report safety gate: %v", err)
+	}
+	for _, want := range []string{
+		"workflow-status: status=blocked mode=read-only stage=model-tool-plan next_gate=safety-authorization reason=compile-execution-requires-current-safety-authorization action=enumerate_paths",
+		"safety_errors=1",
+		"workflow-command: ouro doctor " + root + " --require-safety-authorization",
+		"workflow-links:",
+		"review=" + review.Path,
+		"dispatch=" + dispatch.Path,
+		"workflow-safety-error: missing required safety bypass authorization for scope.target_policy disabled",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("expected workflow safety output to contain %q, got %q", want, out.String())
+		}
+	}
+	if got := countCLIJSON(t, filepath.Join(root, "toolchain", "compile-preview-review-executions")); got != beforeExecutions {
+		t.Fatalf("workflow status must not execute compile dispatches: before=%d after=%d", beforeExecutions, got)
+	}
+	if got := countCLIJSON(t, filepath.Join(root, "runtime", "model-tool-plan-preview-acceptances")); got != beforeAcceptances {
+		t.Fatalf("workflow status must not accept previews: before=%d after=%d", beforeAcceptances, got)
+	}
+	afterSelection, err := os.ReadFile(selectionPath)
+	if err != nil {
+		t.Fatalf("read selection after workflow status: %v", err)
+	}
+	if string(afterSelection) != string(beforeSelection) {
+		t.Fatalf("workflow status must not rewrite selection marker\nbefore=%s\nafter=%s", string(beforeSelection), string(afterSelection))
+	}
+	if got := countCLIJSON(t, filepath.Join(root, "reports", "report-projection-dispatches")); got != beforeReportDispatches {
+		t.Fatalf("workflow status must not create report dispatches: before=%d after=%d", beforeReportDispatches, got)
+	}
+	if got := countCLIJSON(t, filepath.Join(root, "reports", "report-projection-dispatch-executions")); got != beforeReportExecutions {
+		t.Fatalf("workflow status must not execute report dispatches: before=%d after=%d", beforeReportExecutions, got)
+	}
+	if _, err := os.Stat(filepath.Join(root, "replay", "events.db")); !os.IsNotExist(err) {
+		t.Fatalf("workflow status must not create replay event log, stat err=%v", err)
 	}
 }
 
@@ -156,6 +1492,268 @@ providers:
 	}
 	if len(captured.Messages) != 2 || captured.Messages[0].Role != "system" || captured.Messages[1].Role != "user" {
 		t.Fatalf("unexpected request messages: %#v", captured.Messages)
+	}
+}
+
+func TestProviderConfigureOpenAICompatibleCommandWritesProviderConfigWithoutLeakingKey(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	skipIfWindows(t)
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	t.Setenv("OURO_CONFIGURE_KEY", "actual-secret-value")
+
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{
+		"provider", "configure-openai-compatible", root,
+		"--name", "local-openai",
+		"--base-url", "https://api.example.test/v1",
+		"--model", "gpt-test",
+		"--api-key-env", "OURO_CONFIGURE_KEY",
+		"--capability", "chat",
+		"--capability", "tool_planning",
+		"--timeout-ms", "30000",
+		"--context-window-tokens", "128000",
+		"--routing-strategy", "enabled_order_failover",
+		"--enable",
+	})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute provider configure: %v output=%q", err, out.String())
+	}
+	for _, want := range []string{
+		"provider-configure: status=written provider=local-openai type=openai_compatible model=gpt-test enabled=true",
+		"providers_yaml=" + filepath.Join(root, "providers.yaml"),
+		"api_key_env=OURO_CONFIGURE_KEY",
+		"api_key_value_stored=false",
+		"routing_strategy=enabled_order_failover",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("expected provider configure output to contain %q, got %q", want, out.String())
+		}
+	}
+	if strings.Contains(out.String(), "actual-secret-value") {
+		t.Fatalf("provider configure output leaked api key value: %q", out.String())
+	}
+
+	data, err := os.ReadFile(filepath.Join(root, "providers.yaml"))
+	if err != nil {
+		t.Fatalf("read providers: %v", err)
+	}
+	if strings.Contains(string(data), "actual-secret-value") {
+		t.Fatalf("providers.yaml leaked api key value: %s", string(data))
+	}
+	config, err := app.LoadProviderConfig(filepath.Join(root, "providers.yaml"))
+	if err != nil {
+		t.Fatalf("load provider config: %v", err)
+	}
+	if err := app.ValidateProviderConfig(config); err != nil {
+		t.Fatalf("validate provider config: %v", err)
+	}
+	if len(config.Providers) != 2 || config.Providers[0].Name != "local-openai" || !config.Providers[0].Enabled || config.Providers[1].Name != "offline" || config.Providers[1].Enabled {
+		t.Fatalf("unexpected provider order/enabled state: %#v", config.Providers)
+	}
+}
+
+func TestProviderGenerateCommandStreamsAndPrintsStreamingMetadata(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	var captured struct {
+		Model         string `json:"model"`
+		Stream        bool   `json:"stream"`
+		StreamOptions struct {
+			IncludeUsage bool `json:"include_usage"`
+		} `json:"stream_options"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("expected chat completions path, got %s", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("decode streamed generation body: %v", err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"streamed \"}}]}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"plan\"}}]}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"usage\":{\"prompt_tokens\":13,\"completion_tokens\":4,\"total_tokens\":17},\"choices\":[]}\n\n")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+	providers := fmt.Sprintf(`version: 1
+providers:
+  - name: local-openai
+    type: openai_compatible
+    model: gpt-stream
+    base_url: %s/v1
+    enabled: true
+`, server.URL)
+	if err := os.WriteFile(filepath.Join(root, "providers.yaml"), []byte(providers), 0o644); err != nil {
+		t.Fatalf("write providers: %v", err)
+	}
+
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{"provider", "generate", root, "--prompt", "Stream next step.", "--stream"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute streaming provider generate: %v output=%q", err, out.String())
+	}
+	if !captured.Stream || !captured.StreamOptions.IncludeUsage {
+		t.Fatalf("expected streamed request, got %#v", captured)
+	}
+	for _, want := range []string{
+		"provider-generate: status=completed",
+		"provider=local-openai",
+		"model=gpt-stream",
+		"streaming=true",
+		"stream_completed=true",
+		"stream_chunk_count=2",
+		"stream_digest=",
+		"stream_preview=streamed plan",
+		"text=streamed plan",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("expected streaming provider output to contain %q, got %q", want, out.String())
+		}
+	}
+}
+
+func TestProviderGenerateCommandPrintsFailoverRoutingMetadata(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	primarySecret := "PRIMARY_PROVIDER_BODY_SECRET"
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, primarySecret, http.StatusBadGateway)
+	}))
+	defer primary.Close()
+	backup := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"choices": [{"message": {"role": "assistant", "content": "backup plan"}}],
+			"usage": {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10}
+		}`))
+	}))
+	defer backup.Close()
+	providers := fmt.Sprintf(`version: 1
+routing:
+  strategy: enabled_order_failover
+providers:
+  - name: primary-openai
+    type: openai_compatible
+    model: gpt-primary
+    base_url: %s/v1
+    enabled: true
+  - name: backup-openai
+    type: openai_compatible
+    model: gpt-backup
+    base_url: %s/v1
+    enabled: true
+`, primary.URL, backup.URL)
+	if err := os.WriteFile(filepath.Join(root, "providers.yaml"), []byte(providers), 0o644); err != nil {
+		t.Fatalf("write providers: %v", err)
+	}
+
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{"provider", "generate", root, "--prompt", "Summarize scope."})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute provider generate with failover: %v output=%q", err, out.String())
+	}
+	for _, want := range []string{
+		"provider=backup-openai",
+		"model=gpt-backup",
+		"routing=enabled_order_failover",
+		"attempts=2",
+		"failover=true",
+		"selected=backup-openai",
+		"failed=primary-openai",
+		"text=backup plan",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("expected provider generate failover output to contain %q, got %q", want, out.String())
+		}
+	}
+	if strings.Contains(out.String(), primarySecret) {
+		t.Fatalf("provider generate failover output leaked primary secret: %q", out.String())
+	}
+}
+
+func TestProviderGenerateCommandRoutesByRequiredCapabilitiesAndPrintsSkippedMetadata(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	primarySecret := "PRIMARY_BODY_SECRET"
+	primaryPostCount := 0
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		primaryPostCount++
+		http.Error(w, primarySecret, http.StatusBadGateway)
+	}))
+	defer primary.Close()
+	backupPostCount := 0
+	backup := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		backupPostCount++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"choices": [{"message": {"role": "assistant", "content": "capability matched result"}}],
+			"usage": {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10}
+		}`))
+	}))
+	defer backup.Close()
+	providers := fmt.Sprintf(`version: 1
+routing:
+  strategy: enabled_order_failover
+providers:
+  - name: primary-openai
+    type: openai_compatible
+    model: gpt-primary
+    base_url: %s/v1
+    capabilities:
+      - text_only
+    enabled: true
+  - name: backup-openai
+    type: openai_compatible
+    model: gpt-backup
+    base_url: %s/v1
+    capabilities:
+      - json_mode
+    enabled: true
+`, primary.URL, backup.URL)
+	if err := os.WriteFile(filepath.Join(root, "providers.yaml"), []byte(providers), 0o644); err != nil {
+		t.Fatalf("write providers: %v", err)
+	}
+
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{"provider", "generate", root, "--prompt", "hello", "--required-capability", "json_mode"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("provider generate with required capabilities: %v output=%q", err, out.String())
+	}
+	if primaryPostCount != 0 || backupPostCount != 1 {
+		t.Fatalf("expected primary skip and one backup POST, got primary=%d backup=%d", primaryPostCount, backupPostCount)
+	}
+	for _, want := range []string{
+		"provider=backup-openai",
+		"model=gpt-backup",
+		"routing=enabled_order_failover",
+		"attempts=1",
+		"failover=false",
+		"selected=backup-openai",
+		"failed=none",
+		"required_capabilities=json_mode",
+		"capability_match=true",
+		"skipped_providers=primary-openai=missing_required_capabilities",
+		"text=capability matched result",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("expected provider generate output to contain %q, got %q", want, out.String())
+		}
+	}
+	if strings.Contains(out.String(), primarySecret) {
+		t.Fatalf("provider generate output leaked skipped provider secret: %q", out.String())
 	}
 }
 
@@ -327,6 +1925,107 @@ func TestProviderUsageCommandCanPrintSummary(t *testing.T) {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("expected provider usage summary output to contain %q, got %q", want, out.String())
 		}
+	}
+}
+
+func TestProviderGenerationsCommandListsAndReadsReviewArtifacts(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	secret := "DO_NOT_PRINT_FULL_GENERATION"
+	artifact, err := app.RecordModelGenerationArtifact(root, "run-review", app.ProviderGenerationResult{
+		ProviderName:           "local-openai",
+		Model:                  "gpt-review",
+		Text:                   "reviewable bounded preview " + strings.Repeat("padding ", 24) + secret,
+		InputTokens:            42,
+		OutputTokens:           11,
+		TotalTokens:            53,
+		ContextWindowTokens:    8192,
+		Capabilities:           []string{"planning"},
+		EstimatedCostUSD:       0.000321,
+		EstimatedCostAvailable: true,
+		RoutingStrategy:        "enabled_order_failover",
+		ProviderAttemptCount:   2,
+		ProviderFailover:       true,
+		SelectedProviderName:   "local-openai",
+		FailedProviderNames:    []string{"primary-openai"},
+		RequiredCapabilities:   []string{"json_mode", "tool_planning"},
+		CapabilityMatch:        true,
+		SkippedProviders: []app.ProviderSkippedProvider{{
+			Name:                "model-without-json",
+			Reason:              "missing_required_capabilities",
+			MissingCapabilities: []string{"json_mode"},
+		}},
+		Streaming:        true,
+		StreamChunkCount: 2,
+		StreamCompleted:  true,
+		StreamDigest:     "stream-digest",
+		StreamPreview:    "reviewable bounded preview",
+	}, app.ProviderGenerationBudgetDecision{
+		Enforced:            true,
+		Status:              "within_limit",
+		MaxEstimatedCostUSD: 0.01,
+	}, true, app.ModelGenerationArtifactOptions{Now: time.Date(2026, 6, 4, 15, 0, 0, 0, time.UTC)})
+	if err != nil {
+		t.Fatalf("record model generation artifact: %v", err)
+	}
+
+	var listOut bytes.Buffer
+	list := newRootCommand(&listOut, new(bytes.Buffer))
+	list.SetArgs([]string{"provider", "generations", root})
+	if err := list.Execute(); err != nil {
+		t.Fatalf("list provider generations: %v output=%q", err, listOut.String())
+	}
+	for _, want := range []string{
+		"provider-generation:",
+		"path=" + artifact.Path,
+		"run=run-review",
+		"source=closed-loop-planner-generation",
+		"provider=local-openai",
+		"model=gpt-review",
+		"input_tokens=42",
+		"output_tokens=11",
+		"total_tokens=53",
+		"estimated_cost_usd=0.000321",
+		"budget_status=within_limit",
+		"ledger_write=true",
+		"assistant_text_persisted=false",
+		"routing=enabled_order_failover",
+		"attempts=2",
+		"failover=true",
+		"selected=local-openai",
+		"failed=primary-openai",
+		"required_capabilities=json_mode|tool_planning",
+		"capability_match=true",
+		"skipped_providers=model-without-json=missing_required_capabilities",
+		"streaming=true",
+		"stream_completed=true",
+		"stream_chunk_count=2",
+		"stream_digest=stream-digest",
+		"stream_preview=reviewable bounded preview",
+		"digest=",
+		"preview=",
+	} {
+		if !strings.Contains(listOut.String(), want) {
+			t.Fatalf("expected provider generations output to contain %q, got %q", want, listOut.String())
+		}
+	}
+	if strings.Contains(listOut.String(), secret) {
+		t.Fatalf("provider generations output leaked full generation secret: %q", listOut.String())
+	}
+
+	var readOut bytes.Buffer
+	read := newRootCommand(&readOut, new(bytes.Buffer))
+	read.SetArgs([]string{"provider", "generations", root, filepath.Base(artifact.Path)})
+	if err := read.Execute(); err != nil {
+		t.Fatalf("read provider generation artifact: %v output=%q", err, readOut.String())
+	}
+	if !strings.Contains(readOut.String(), "provider-generation:") || !strings.Contains(readOut.String(), "artifact="+artifact.ArtifactID) {
+		t.Fatalf("expected read provider generation output, got %q", readOut.String())
+	}
+	if strings.Contains(readOut.String(), secret) {
+		t.Fatalf("provider generation read output leaked full generation secret: %q", readOut.String())
 	}
 }
 
@@ -583,6 +2282,7 @@ execution:
 
 func TestDoctorCommandCanRequireSafetyBypassAuthorization(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
+	skipIfWindows(t)
 	if err := app.InitWorkspace(root); err != nil {
 		t.Fatalf("init workspace: %v", err)
 	}
@@ -696,6 +2396,7 @@ execution:
 
 func TestDoctorCommandJSONCanRequireSafetyAuthorization(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
+	skipIfWindows(t)
 	if err := app.InitWorkspace(root); err != nil {
 		t.Fatalf("init workspace: %v", err)
 	}
@@ -770,6 +2471,7 @@ execution:
 
 func TestDoctorCommandJSONReportsExpiredSafetyAuthorization(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
+	skipIfWindows(t)
 	if err := app.InitWorkspace(root); err != nil {
 		t.Fatalf("init workspace: %v", err)
 	}
@@ -844,6 +2546,7 @@ safety_bypasses:
 
 func TestDoctorCommandRequireSafetyAuthorizationAcceptsMetadata(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
+	skipIfWindows(t)
 	if err := app.InitWorkspace(root); err != nil {
 		t.Fatalf("init workspace: %v", err)
 	}
@@ -913,6 +2616,259 @@ func TestRunCommandExecutesWorkspaceRun(t *testing.T) {
 	}
 }
 
+func TestRunCommandProviderPromptDoesNotEnableGenerationWithoutGate(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	var captured app.RunOptions
+	var calls int
+	restore := replaceRunWorkspaceWithOptions(t, func(ctx context.Context, root string, options app.RunOptions) (app.RunResult, error) {
+		calls++
+		captured = options
+		return app.RunResult{RunID: "run-provider-disabled", EventCount: 1}, nil
+	})
+	defer restore()
+
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{"run", root, "--provider-generate-prompt", "Summarize next step."})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute run with provider prompt only: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("expected one run call, got %d", calls)
+	}
+	if captured.EnableProviderGeneration {
+		t.Fatalf("provider generation must stay disabled without --provider-generate: %#v", captured)
+	}
+	if captured.ProviderGenerationPrompt != "" || captured.ProviderGenerationSystemPrompt != "" ||
+		captured.ProviderGenerationMaxTokens != 0 || captured.ProviderGenerationMaxEstimatedCostUSD != nil ||
+		captured.ProviderGenerationRecordUsage {
+		t.Fatalf("provider generation options must not be populated without --provider-generate: %#v", captured)
+	}
+}
+
+func TestRunCommandRejectsProviderGenerateWithoutPrompt(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	skipIfWindows(t)
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	var calls int
+	restore := replaceRunWorkspaceWithOptions(t, func(ctx context.Context, root string, options app.RunOptions) (app.RunResult, error) {
+		calls++
+		return app.RunResult{}, nil
+	})
+	defer restore()
+
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{"run", root, "--provider-generate"})
+
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "provider generation prompt is required") {
+		t.Fatalf("expected missing provider generation prompt error, got err=%v output=%q", err, out.String())
+	}
+	if calls != 0 {
+		t.Fatalf("provider generation validation must fail before run execution, got %d calls", calls)
+	}
+}
+
+func TestRunCommandRejectsNegativeProviderGenerationLimits(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	skipIfWindows(t)
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+
+	tests := []struct {
+		name      string
+		args      []string
+		wantError string
+	}{
+		{
+			name:      "max tokens",
+			args:      []string{"run", root, "--provider-generate", "--provider-generate-prompt", "Plan next step.", "--provider-generate-max-tokens", "-1"},
+			wantError: "provider generation max_tokens must be non-negative",
+		},
+		{
+			name:      "max estimated cost",
+			args:      []string{"run", root, "--provider-generate", "--provider-generate-prompt", "Plan next step.", "--provider-generate-max-estimated-cost-usd=-0.01"},
+			wantError: "provider generation max_estimated_cost_usd must be non-negative",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls int
+			restore := replaceRunWorkspaceWithOptions(t, func(ctx context.Context, root string, options app.RunOptions) (app.RunResult, error) {
+				calls++
+				return app.RunResult{}, nil
+			})
+			defer restore()
+
+			var out bytes.Buffer
+			cmd := newRootCommand(&out, new(bytes.Buffer))
+			cmd.SetArgs(tt.args)
+
+			err := cmd.Execute()
+			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("expected %q error, got err=%v output=%q", tt.wantError, err, out.String())
+			}
+			if calls != 0 {
+				t.Fatalf("provider generation validation must fail before run execution, got %d calls", calls)
+			}
+		})
+	}
+}
+
+func TestRunCommandPassesProviderGenerationOptions(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	skipIfWindows(t)
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	var captured app.RunOptions
+	var calls int
+	restore := replaceRunWorkspaceWithOptions(t, func(ctx context.Context, root string, options app.RunOptions) (app.RunResult, error) {
+		calls++
+		captured = options
+		return app.RunResult{RunID: "run-provider-enabled", EventCount: 2, ReportPath: filepath.Join(root, "reports", "run-provider-enabled.md")}, nil
+	})
+	defer restore()
+
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{
+		"run", root,
+		"--action", "fingerprint_surface",
+		"--defer-report-projection",
+		"--require-safety-authorization",
+		"--provider-generate",
+		"--provider-generate-prompt", "Plan the next operator-reviewed step.",
+		"--provider-generate-system-prompt", "You are Ouroboros.",
+		"--provider-generate-max-tokens", "256",
+		"--provider-generate-max-estimated-cost-usd", "0.125",
+		"--provider-generate-required-capability", "json_mode",
+		"--provider-generate-required-capability", "tool_planning",
+		"--provider-generate-required-capability", "json_mode",
+		"--provider-generate-stream",
+		"--provider-generate-record-usage",
+	})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute run with provider generation: %v output=%q", err, out.String())
+	}
+	if calls != 1 {
+		t.Fatalf("expected one run call, got %d", calls)
+	}
+	if captured.Action != compiler.ActionFingerprintSurface || !captured.DeferReportProjection || !captured.RequireSafetyAuthorization {
+		t.Fatalf("existing run options were not preserved: %#v", captured)
+	}
+	if !captured.EnableProviderGeneration {
+		t.Fatalf("expected provider generation to be enabled: %#v", captured)
+	}
+	if captured.ProviderGenerationPrompt != "Plan the next operator-reviewed step." {
+		t.Fatalf("unexpected provider prompt: %#v", captured)
+	}
+	if captured.ProviderGenerationSystemPrompt != "You are Ouroboros." {
+		t.Fatalf("unexpected provider system prompt: %#v", captured)
+	}
+	if captured.ProviderGenerationMaxTokens != 256 {
+		t.Fatalf("unexpected provider max tokens: %#v", captured)
+	}
+	if captured.ProviderGenerationMaxEstimatedCostUSD == nil || *captured.ProviderGenerationMaxEstimatedCostUSD != 0.125 {
+		t.Fatalf("unexpected provider max estimated cost: %#v", captured)
+	}
+	if !captured.ProviderGenerationRecordUsage {
+		t.Fatalf("expected provider usage recording to be enabled: %#v", captured)
+	}
+	if strings.Join(captured.ProviderGenerationRequiredCapabilities, "|") != "json_mode|tool_planning" {
+		t.Fatalf("unexpected provider required capabilities: %#v", captured)
+	}
+	if !captured.ProviderGenerationStream {
+		t.Fatalf("expected provider generation stream mode to be enabled: %#v", captured)
+	}
+	if !strings.Contains(out.String(), "run: run-provider-enabled") {
+		t.Fatalf("expected normal run output, got %q", out.String())
+	}
+}
+
+func TestRunCommandProviderGenerationToolPlanPreviewRequiresExplicitFlag(t *testing.T) {
+	tests := []struct {
+		name        string
+		extraArgs   []string
+		wantPreview bool
+	}{
+		{
+			name:        "default disabled",
+			wantPreview: false,
+		},
+		{
+			name:        "explicit flag enabled",
+			extraArgs:   []string{"--provider-generate-tool-plan-preview"},
+			wantPreview: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "workspace")
+			if err := app.InitWorkspace(root); err != nil {
+				t.Fatalf("init workspace: %v", err)
+			}
+			var captured app.RunOptions
+			var calls int
+			restore := replaceRunWorkspaceWithOptions(t, func(ctx context.Context, root string, options app.RunOptions) (app.RunResult, error) {
+				calls++
+				captured = options
+				return app.RunResult{RunID: "run-provider-tool-plan-preview", EventCount: 1}, nil
+			})
+			defer restore()
+
+			args := []string{
+				"run", root,
+				"--provider-generate",
+				"--provider-generate-prompt", "Plan the next metadata-only preview step.",
+			}
+			args = append(args, tt.extraArgs...)
+			var out bytes.Buffer
+			cmd := newRootCommand(&out, new(bytes.Buffer))
+			cmd.SetArgs(args)
+
+			if err := cmd.Execute(); err != nil {
+				t.Fatalf("execute run with provider generation tool plan preview args %v: %v output=%q", tt.extraArgs, err, out.String())
+			}
+			if calls != 1 {
+				t.Fatalf("expected one run call, got %d", calls)
+			}
+			if !captured.EnableProviderGeneration {
+				t.Fatalf("expected provider generation to be enabled: %#v", captured)
+			}
+			if captured.ProviderGenerationToolPlanPreview != tt.wantPreview {
+				t.Fatalf("unexpected provider tool plan preview flag, want %t got %#v", tt.wantPreview, captured)
+			}
+		})
+	}
+}
+
+func TestRunCommandProviderGenerationToolPlanPreviewFlagDocumentsReadOnlyBoundary(t *testing.T) {
+	cmd := newRootCommand(new(bytes.Buffer), new(bytes.Buffer))
+	runCmd, _, err := cmd.Find([]string{"run"})
+	if err != nil {
+		t.Fatalf("find run command: %v", err)
+	}
+	flag := runCmd.Flags().Lookup("provider-generate-tool-plan-preview")
+	if flag == nil {
+		t.Fatalf("expected provider generation tool plan preview flag")
+	}
+	for _, want := range []string{"read-only", "metadata-only", "does not execute tools", "dispatch workers", "touch targets"} {
+		if !strings.Contains(flag.Usage, want) {
+			t.Fatalf("expected tool plan preview flag usage to contain %q, got %q", want, flag.Usage)
+		}
+	}
+}
+
 func TestRunCommandCanDeferReportProjection(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
 	if err := app.InitWorkspace(root); err != nil {
@@ -944,6 +2900,7 @@ func TestRunCommandCanDeferReportProjection(t *testing.T) {
 
 func TestRunCommandCanSelectFingerprintSurfaceActionForArtifactScope(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
+	skipIfWindows(t)
 	if err := app.InitWorkspace(root); err != nil {
 		t.Fatalf("init workspace: %v", err)
 	}
@@ -984,6 +2941,103 @@ execution:
 	}
 	if !strings.Contains(out.String(), "report: not-generated") {
 		t.Fatalf("expected deferred action run output to show report not-generated, got %q", out.String())
+	}
+}
+
+func TestRunCommandCanGenerateProviderMessageWithBudgetAndUsageRecord(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	skipIfWindows(t)
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	postCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/models/gpt-test":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"gpt-test"}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/chat/completions":
+			postCount++
+			var request struct {
+				MaxTokens int `json:"max_tokens"`
+				Messages  []struct {
+					Role    string `json:"role"`
+					Content string `json:"content"`
+				} `json:"messages"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatalf("decode provider request: %v", err)
+			}
+			if request.MaxTokens != 64 || len(request.Messages) != 2 || request.Messages[1].Content != "summarize next planner step" {
+				t.Fatalf("unexpected provider request: %#v", request)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"next step accepted"}}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`))
+		default:
+			t.Fatalf("unexpected provider request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	providers := fmt.Sprintf(`version: 1
+providers:
+  - name: local-openai
+    type: openai_compatible
+    model: gpt-test
+    base_url: %s/v1
+    input_price_per_million_tokens: 1
+    output_price_per_million_tokens: 1
+    timeout_ms: 5000
+    enabled: true
+`, server.URL)
+	if err := os.WriteFile(filepath.Join(root, "providers.yaml"), []byte(providers), 0o644); err != nil {
+		t.Fatalf("write providers: %v", err)
+	}
+
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{
+		"run", root,
+		"--defer-report-projection",
+		"--provider-generate",
+		"--provider-generate-prompt", "summarize next planner step",
+		"--provider-generate-system-prompt", "planner system prompt",
+		"--provider-generate-max-tokens", "64",
+		"--provider-generate-max-estimated-cost-usd", "0.001",
+		"--provider-generate-record-usage",
+	})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute run provider generation: %v output=%q", err, out.String())
+	}
+	if postCount != 1 {
+		t.Fatalf("expected one provider generation POST, got %d", postCount)
+	}
+	if !strings.Contains(out.String(), "report: not-generated") {
+		t.Fatalf("expected deferred run output, got %q", out.String())
+	}
+	records, err := app.ListProviderUsageRecords(root)
+	if err != nil {
+		t.Fatalf("list provider usage records: %v", err)
+	}
+	if len(records) != 1 || records[0].TotalTokens != 15 || records[0].BudgetStatus != "within_limit" {
+		t.Fatalf("expected one budgeted provider usage record, got %#v", records)
+	}
+}
+
+func TestRunCommandProviderGenerateRequiresPrompt(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{"run", root, "--provider-generate"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatalf("expected provider-generate prompt error")
+	}
+	if !strings.Contains(err.Error(), "prompt is required") {
+		t.Fatalf("expected prompt error, got %v output=%q", err, out.String())
 	}
 }
 
@@ -1780,6 +3834,7 @@ func TestReportProjectDispatchExecutionAnnotateCommandRejectsFalsePositiveDecisi
 
 func TestRunCommandCanPrintTUISnapshot(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
+	skipIfWindows(t)
 	if err := app.InitWorkspace(root); err != nil {
 		t.Fatalf("init workspace: %v", err)
 	}
@@ -1800,6 +3855,7 @@ func TestRunCommandCanPrintTUISnapshot(t *testing.T) {
 
 func TestRunCommandCanRequireSafetyAuthorization(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
+	skipIfWindows(t)
 	if err := app.InitWorkspace(root); err != nil {
 		t.Fatalf("init workspace: %v", err)
 	}
@@ -1830,6 +3886,7 @@ execution:
 
 func TestRunCommandInteractiveStreamsSnapshotsToTUI(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
+	skipIfWindows(t)
 	if err := app.InitWorkspace(root); err != nil {
 		t.Fatalf("init workspace: %v", err)
 	}
@@ -1999,6 +4056,7 @@ func TestRunCommandInteractivePauseResumeControlUpdatesTUI(t *testing.T) {
 
 func TestReplayCommandReplaysWorkspaceRun(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
+	skipIfWindows(t)
 	if err := app.InitWorkspace(root); err != nil {
 		t.Fatalf("init workspace: %v", err)
 	}
@@ -2026,6 +4084,7 @@ func TestReplayCommandReplaysWorkspaceRun(t *testing.T) {
 
 func TestReplayCommandCanExportJSON(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
+	skipIfWindows(t)
 	if err := app.InitWorkspace(root); err != nil {
 		t.Fatalf("init workspace: %v", err)
 	}
@@ -8822,6 +10881,7 @@ func TestReplayWorkbenchHandlerRejectsMutationMethods(t *testing.T) {
 
 func TestReplayCommandCanLaunchInteractiveTUI(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
+	skipIfWindows(t)
 	if err := app.InitWorkspace(root); err != nil {
 		t.Fatalf("init workspace: %v", err)
 	}
@@ -8861,6 +10921,7 @@ func TestReplayCommandCanLaunchInteractiveTUI(t *testing.T) {
 
 func TestReplayCommandCanPrintTUISnapshot(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
+	skipIfWindows(t)
 	if err := app.InitWorkspace(root); err != nil {
 		t.Fatalf("init workspace: %v", err)
 	}
@@ -8941,6 +11002,176 @@ healthcheck: built_in
 		if !strings.Contains(replayOut.String(), want) {
 			t.Fatalf("expected failed replay output to contain %q, got %q", want, replayOut.String())
 		}
+	}
+}
+
+func TestProviderToolPlanPreviewsCommandListsAndReadsArtifacts(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	review, err := app.CreateToolCompilePreviewReview(root, app.ToolCompilePreviewOptions{Action: compiler.ActionEnumeratePaths})
+	if err != nil {
+		t.Fatalf("create compile preview review: %v", err)
+	}
+	extraction := app.ExtractModelToolPlanPreview("ouro_action: enumerate_paths\n" + strings.Repeat("padding ", 24) + "DO_NOT_PRINT_MODEL_TOOL_PLAN_SECRET")
+	artifact, err := app.RecordModelToolPlanPreviewArtifact(root, "run-tool-plan", app.ProviderGenerationResult{
+		ProviderName: "local-openai",
+		Model:        "gpt-plan",
+		Text:         "not persisted by tool-plan artifact",
+	}, "/tmp/model-generation.json", extraction, review, app.ModelToolPlanPreviewArtifactOptions{Now: time.Date(2026, 6, 5, 1, 30, 0, 0, time.UTC)})
+	if err != nil {
+		t.Fatalf("record model tool-plan preview artifact: %v", err)
+	}
+
+	var listOut bytes.Buffer
+	list := newRootCommand(&listOut, new(bytes.Buffer))
+	list.SetArgs([]string{"provider", "tool-plan-previews", root})
+	if err := list.Execute(); err != nil {
+		t.Fatalf("list provider tool plan previews: %v output=%q", err, listOut.String())
+	}
+	for _, want := range []string{
+		"provider-tool-plan-preview:",
+		"path=" + artifact.Path,
+		"run=run-tool-plan",
+		"source=closed-loop-planner-generation",
+		"status=completed",
+		"mode=metadata-only",
+		"provider=local-openai",
+		"model=gpt-plan",
+		"action=enumerate_paths",
+		"valid=true",
+		"reason=accepted",
+		"marker=ouro_action: enumerate_paths",
+		"model_output_digest=",
+		"generation_artifact=/tmp/model-generation.json",
+		"review=" + review.Path,
+		"assistant_text_persisted=false",
+		"executed_tools=0",
+		"worker_dispatch=false",
+		"target_contact=false",
+		"digest=",
+	} {
+		if !strings.Contains(listOut.String(), want) {
+			t.Fatalf("expected tool plan preview list output to contain %q, got %q", want, listOut.String())
+		}
+	}
+	if strings.Contains(listOut.String(), "DO_NOT_PRINT_MODEL_TOOL_PLAN_SECRET") {
+		t.Fatalf("tool plan preview list leaked full model output: %q", listOut.String())
+	}
+
+	var readOut bytes.Buffer
+	read := newRootCommand(&readOut, new(bytes.Buffer))
+	read.SetArgs([]string{"provider", "tool-plan-previews", root, filepath.Base(artifact.Path)})
+	if err := read.Execute(); err != nil {
+		t.Fatalf("read provider tool plan preview: %v output=%q", err, readOut.String())
+	}
+	if !strings.Contains(readOut.String(), "artifact="+artifact.ArtifactID) || !strings.Contains(readOut.String(), "review="+review.Path) {
+		t.Fatalf("expected read output to identify artifact/review, got %q", readOut.String())
+	}
+}
+
+func TestProviderToolPlanPreviewAcceptCommandRequiresAcceptAndListsAudit(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	review, err := app.CreateToolCompilePreviewReview(root, app.ToolCompilePreviewOptions{Action: compiler.ActionEnumeratePaths})
+	if err != nil {
+		t.Fatalf("create compile preview review: %v", err)
+	}
+	extraction := app.ExtractModelToolPlanPreview("semantic_action: enumerate_paths\n" + strings.Repeat("padding ", 24) + "DO_NOT_PRINT_ACCEPT_SECRET")
+	artifact, err := app.RecordModelToolPlanPreviewArtifact(root, "run-accept", app.ProviderGenerationResult{
+		ProviderName: "local-openai",
+		Model:        "gpt-plan",
+		Text:         "not persisted by tool-plan artifact",
+	}, "/tmp/model-generation.json", extraction, review, app.ModelToolPlanPreviewArtifactOptions{Now: time.Date(2026, 6, 5, 2, 30, 0, 0, time.UTC)})
+	if err != nil {
+		t.Fatalf("record model tool-plan preview artifact: %v", err)
+	}
+
+	var noGateOut bytes.Buffer
+	noGate := newRootCommand(&noGateOut, new(bytes.Buffer))
+	noGate.SetArgs([]string{"provider", "tool-plan-preview-accept", root, filepath.Base(artifact.Path)})
+	if err := noGate.Execute(); err == nil {
+		t.Fatalf("expected tool-plan-preview-accept to require --accept")
+	}
+	if selection, found, err := app.ReadToolCompilePreviewReviewSelection(root); err != nil || found {
+		t.Fatalf("accept without --accept must not write selection, found=%v selection=%#v err=%v", found, selection, err)
+	}
+
+	var acceptOut bytes.Buffer
+	accept := newRootCommand(&acceptOut, new(bytes.Buffer))
+	accept.SetArgs([]string{"provider", "tool-plan-preview-accept", root, filepath.Base(artifact.Path), "--accept", "--accepted-by", "alice", "--reason", "operator reviewed marker"})
+	if err := accept.Execute(); err != nil {
+		t.Fatalf("accept provider tool plan preview: %v output=%q", err, acceptOut.String())
+	}
+	for _, want := range []string{
+		"provider-tool-plan-preview-acceptance:",
+		"status=accepted",
+		"mode=metadata-only",
+		"accepted_by=alice",
+		"reason=operator reviewed marker",
+		"run=run-accept",
+		"provider=local-openai",
+		"model=gpt-plan",
+		"action=enumerate_paths",
+		"preview=" + artifact.Path,
+		"review=" + review.Path,
+		"selection=" + filepath.Join(root, "toolchain", "compile-preview-review-selection.json"),
+		"assistant_text_persisted=false",
+		"executed_tools=0",
+		"worker_dispatch=false",
+		"target_contact=false",
+		"execution_dispatch_created=false",
+		"digest=",
+	} {
+		if !strings.Contains(acceptOut.String(), want) {
+			t.Fatalf("expected accept output to contain %q, got %q", want, acceptOut.String())
+		}
+	}
+	if strings.Contains(acceptOut.String(), "DO_NOT_PRINT_ACCEPT_SECRET") {
+		t.Fatalf("tool plan preview accept leaked full model output: %q", acceptOut.String())
+	}
+	selection, found, err := app.ReadToolCompilePreviewReviewSelection(root)
+	if err != nil {
+		t.Fatalf("read selection after accept: %v", err)
+	}
+	if !found || selection.ReviewPath != review.Path || selection.SelectedBy != "alice" || selection.Reason != "accepted model tool-plan preview: operator reviewed marker" {
+		t.Fatalf("expected accepted preview to select review, found=%v selection=%#v", found, selection)
+	}
+	dispatches, err := filepath.Glob(filepath.Join(root, "toolchain", "compile-preview-review-execution-dispatches", "*.json"))
+	if err != nil {
+		t.Fatalf("glob dispatches: %v", err)
+	}
+	if len(dispatches) != 0 {
+		t.Fatalf("tool-plan preview accept must not create execution dispatches, got %#v", dispatches)
+	}
+
+	acceptances, err := app.ListModelToolPlanPreviewAcceptances(root)
+	if err != nil {
+		t.Fatalf("list acceptances: %v", err)
+	}
+	if len(acceptances) != 1 {
+		t.Fatalf("expected one acceptance, got %#v", acceptances)
+	}
+	var listOut bytes.Buffer
+	list := newRootCommand(&listOut, new(bytes.Buffer))
+	list.SetArgs([]string{"provider", "tool-plan-preview-acceptances", root})
+	if err := list.Execute(); err != nil {
+		t.Fatalf("list provider tool plan preview acceptances: %v output=%q", err, listOut.String())
+	}
+	if !strings.Contains(listOut.String(), "path="+acceptances[0].Path) || !strings.Contains(listOut.String(), "selection="+selection.Path) {
+		t.Fatalf("expected acceptance list output to identify path/selection, got %q", listOut.String())
+	}
+	var readOut bytes.Buffer
+	read := newRootCommand(&readOut, new(bytes.Buffer))
+	read.SetArgs([]string{"provider", "tool-plan-preview-acceptances", root, filepath.Base(acceptances[0].Path)})
+	if err := read.Execute(); err != nil {
+		t.Fatalf("read provider tool plan preview acceptance: %v output=%q", err, readOut.String())
+	}
+	if !strings.Contains(readOut.String(), "artifact="+acceptances[0].ArtifactID) || !strings.Contains(readOut.String(), "review="+review.Path) {
+		t.Fatalf("expected acceptance read output to identify artifact/review, got %q", readOut.String())
 	}
 }
 
@@ -9203,6 +11434,174 @@ func TestToolchainManagedBundleCommandsListPlanAndInstall(t *testing.T) {
 	}
 }
 
+func TestToolchainManagedBundleImportCommandCopiesLocalBinaryWithoutInstallLink(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	marker := filepath.Join(t.TempDir(), "managed-import-payload-ran")
+	payloadBody := "#!/bin/sh\ntouch " + marker + "\n"
+	sourcePayload := filepath.Join(t.TempDir(), "httpx")
+	if err := os.WriteFile(sourcePayload, []byte(payloadBody), 0o755); err != nil {
+		t.Fatalf("write source payload: %v", err)
+	}
+	digest := sha256.Sum256([]byte(payloadBody))
+	expectedSHA := hex.EncodeToString(digest[:])
+	workspacePayload := filepath.Join(root, "toolchain", "managed-bundles", "httpx", "payload", "httpx")
+	manifestPath := filepath.Join(root, "toolchain", "managed-bundles", "httpx", "bundle.yaml")
+	installPath := filepath.Join(root, "toolchain", "bin", "httpx")
+
+	var missingImportOut bytes.Buffer
+	missingImportCmd := newRootCommand(&missingImportOut, new(bytes.Buffer))
+	missingImportCmd.SetArgs([]string{"toolchain", "managed-bundle-import", root, "httpx", sourcePayload, "--version", "1.3.0", "--source", "local-test/httpx"})
+	err := missingImportCmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "--import") {
+		t.Fatalf("expected managed-bundle-import to require --import, got %v output=%q", err, missingImportOut.String())
+	}
+	if _, err := os.Lstat(filepath.Join(root, "toolchain", "managed-bundles", "httpx")); !os.IsNotExist(err) {
+		t.Fatalf("managed-bundle-import without --import must not write bundle, stat err=%v", err)
+	}
+
+	wrongDigest := sha256.Sum256([]byte("different payload"))
+	wrongSHA := hex.EncodeToString(wrongDigest[:])
+	var mismatchOut bytes.Buffer
+	mismatchCmd := newRootCommand(&mismatchOut, new(bytes.Buffer))
+	mismatchCmd.SetArgs([]string{"toolchain", "managed-bundle-import", root, "httpx", sourcePayload, "--kind", "binary", "--version", "1.3.0", "--source", "local-test/httpx", "--expected-sha256", wrongSHA, "--import"})
+	err = mismatchCmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "sha256 mismatch") {
+		t.Fatalf("expected managed-bundle-import expected sha256 mismatch, got %v output=%q", err, mismatchOut.String())
+	}
+	if _, err := os.Lstat(filepath.Join(root, "toolchain", "managed-bundles", "httpx")); !os.IsNotExist(err) {
+		t.Fatalf("managed-bundle-import expected sha256 mismatch must not write bundle, stat err=%v", err)
+	}
+
+	var emptyExpectedOut bytes.Buffer
+	emptyExpectedCmd := newRootCommand(&emptyExpectedOut, new(bytes.Buffer))
+	emptyExpectedCmd.SetArgs([]string{"toolchain", "managed-bundle-import", root, "httpx", sourcePayload, "--kind", "binary", "--version", "1.3.0", "--source", "local-test/httpx", "--expected-sha256", "", "--import"})
+	err = emptyExpectedCmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "expected sha256 is invalid") {
+		t.Fatalf("expected managed-bundle-import empty expected sha256 rejection, got %v output=%q", err, emptyExpectedOut.String())
+	}
+	if _, err := os.Lstat(filepath.Join(root, "toolchain", "managed-bundles", "httpx")); !os.IsNotExist(err) {
+		t.Fatalf("managed-bundle-import empty expected sha256 must not write bundle, stat err=%v", err)
+	}
+
+	var importOut bytes.Buffer
+	importCmd := newRootCommand(&importOut, new(bytes.Buffer))
+	importCmd.SetArgs([]string{"toolchain", "managed-bundle-import", root, "httpx", sourcePayload, "--kind", "binary", "--version", "1.3.0", "--source", "local-test/httpx", "--expected-sha256", strings.ToUpper(expectedSHA), "--import"})
+	if err := importCmd.Execute(); err != nil {
+		t.Fatalf("execute managed-bundle-import: %v", err)
+	}
+	for _, want := range []string{
+		"managed-bundle-import: status=imported",
+		"mode=workspace-copy",
+		"action=copy",
+		"name=httpx",
+		"kind=binary",
+		"version=1.3.0",
+		"source=local-test/httpx",
+		"sha256=" + expectedSHA,
+		"expected_sha256=" + expectedSHA,
+		"source_payload=" + sourcePayload,
+		"payload=" + workspacePayload,
+		"manifest=" + manifestPath,
+		"install=" + installPath,
+	} {
+		if !strings.Contains(importOut.String(), want) {
+			t.Fatalf("expected managed-bundle-import output to contain %q, got %q", want, importOut.String())
+		}
+	}
+	if _, err := os.Stat(workspacePayload); err != nil {
+		t.Fatalf("expected workspace payload copy: %v", err)
+	}
+	if _, err := os.Lstat(installPath); !os.IsNotExist(err) {
+		t.Fatalf("managed-bundle-import must not create install link, stat err=%v", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("managed-bundle-import must not execute payload, marker stat err=%v", err)
+	}
+
+	var listOut bytes.Buffer
+	listCmd := newRootCommand(&listOut, new(bytes.Buffer))
+	listCmd.SetArgs([]string{"toolchain", "managed-bundles", root, "httpx"})
+	if err := listCmd.Execute(); err != nil {
+		t.Fatalf("execute managed-bundles read: %v", err)
+	}
+	if !strings.Contains(listOut.String(), "managed-bundle: name=httpx") || !strings.Contains(listOut.String(), "payload="+workspacePayload) {
+		t.Fatalf("expected imported bundle to be readable, got %q", listOut.String())
+	}
+}
+
+func TestToolchainManagedBundleImportCommandCopiesLocalRuleBundleDirectoryWithoutInstallLink(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	sourcePayload := writeManagedRuleBundleImportFixtureForCLITest(t, t.TempDir(), map[string]string{
+		"http/example.yaml": "id: ouro-http\ninfo:\n  name: Ouro HTTP\n  severity: info\n",
+		"dns/info.yaml":     "id: ouro-dns\ninfo:\n  name: Ouro DNS\n  severity: low\n",
+	})
+	expectedSHA := digestDirectoryForCLITest(t, sourcePayload)
+	workspacePayload := filepath.Join(root, "toolchain", "managed-bundles", "nuclei-templates", "payload")
+	manifestPath := filepath.Join(root, "toolchain", "managed-bundles", "nuclei-templates", "bundle.yaml")
+	installPath := filepath.Join(root, "toolchain", "rules", "nuclei-templates")
+
+	wrongDigest := sha256.Sum256([]byte("different rule bundle"))
+	wrongSHA := hex.EncodeToString(wrongDigest[:])
+	var mismatchOut bytes.Buffer
+	mismatchCmd := newRootCommand(&mismatchOut, new(bytes.Buffer))
+	mismatchCmd.SetArgs([]string{"toolchain", "managed-bundle-import", root, "nuclei-templates", sourcePayload, "--kind", "rule_bundle", "--version", "2026.06.05", "--source", "local-test/nuclei-templates", "--expected-sha256", wrongSHA, "--import"})
+	err := mismatchCmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "sha256 mismatch") {
+		t.Fatalf("expected rule_bundle managed-bundle-import sha256 mismatch, got %v output=%q", err, mismatchOut.String())
+	}
+	if _, err := os.Lstat(filepath.Join(root, "toolchain", "managed-bundles", "nuclei-templates")); !os.IsNotExist(err) {
+		t.Fatalf("rule_bundle managed-bundle-import sha256 mismatch must not write bundle, stat err=%v", err)
+	}
+
+	var importOut bytes.Buffer
+	importCmd := newRootCommand(&importOut, new(bytes.Buffer))
+	importCmd.SetArgs([]string{"toolchain", "managed-bundle-import", root, "nuclei-templates", sourcePayload, "--kind", "rule_bundle", "--version", "2026.06.05", "--source", "local-test/nuclei-templates", "--expected-sha256", strings.ToUpper(expectedSHA), "--import"})
+	if err := importCmd.Execute(); err != nil {
+		t.Fatalf("execute managed-bundle-import rule_bundle: %v", err)
+	}
+	for _, want := range []string{
+		"managed-bundle-import: status=imported",
+		"mode=workspace-copy",
+		"action=copy",
+		"name=nuclei-templates",
+		"kind=rule_bundle",
+		"version=2026.06.05",
+		"source=local-test/nuclei-templates",
+		"sha256=" + expectedSHA,
+		"expected_sha256=" + expectedSHA,
+		"source_payload=" + sourcePayload,
+		"payload=" + workspacePayload,
+		"manifest=" + manifestPath,
+		"install=" + installPath,
+	} {
+		if !strings.Contains(importOut.String(), want) {
+			t.Fatalf("expected managed-bundle-import rule_bundle output to contain %q, got %q", want, importOut.String())
+		}
+	}
+	if _, err := os.Stat(filepath.Join(workspacePayload, "http", "example.yaml")); err != nil {
+		t.Fatalf("expected workspace rule bundle copy: %v", err)
+	}
+	if _, err := os.Lstat(installPath); !os.IsNotExist(err) {
+		t.Fatalf("managed-bundle-import rule_bundle must not create install link, stat err=%v", err)
+	}
+
+	var listOut bytes.Buffer
+	listCmd := newRootCommand(&listOut, new(bytes.Buffer))
+	listCmd.SetArgs([]string{"toolchain", "managed-bundles", root, "nuclei-templates"})
+	if err := listCmd.Execute(); err != nil {
+		t.Fatalf("execute managed-bundles rule_bundle read: %v", err)
+	}
+	if !strings.Contains(listOut.String(), "managed-bundle: name=nuclei-templates") || !strings.Contains(listOut.String(), "kind=rule_bundle") || !strings.Contains(listOut.String(), "payload="+workspacePayload) {
+		t.Fatalf("expected imported rule bundle to be readable, got %q", listOut.String())
+	}
+}
+
 func TestToolchainReleaseManagedInstallPlanAndInstallCommands(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
 	if err := app.InitWorkspace(root); err != nil {
@@ -9262,6 +11661,1898 @@ func TestToolchainReleaseManagedInstallPlanAndInstallCommands(t *testing.T) {
 	}
 }
 
+func TestToolchainReleaseManagedCommandsEnforceExpectedSHA256(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	releaseRoot := filepath.Join(t.TempDir(), "release")
+	payloadBody := "#!/bin/sh\nexit 0\n"
+	writeReleaseManagedBundleFixtureForCLITest(t, releaseRoot, "httpx", payloadBody)
+	actualDigest := sha256.Sum256([]byte(payloadBody))
+	actualSHA := hex.EncodeToString(actualDigest[:])
+	wrongDigest := sha256.Sum256([]byte("different release payload"))
+	wrongSHA := hex.EncodeToString(wrongDigest[:])
+	workspaceBundle := filepath.Join(root, "toolchain", "managed-bundles", "httpx")
+	installPath := filepath.Join(root, "toolchain", "bin", "httpx")
+
+	var statusOut bytes.Buffer
+	statusCmd := newRootCommand(&statusOut, new(bytes.Buffer))
+	statusCmd.SetArgs([]string{"toolchain", "release-managed-status", root, releaseRoot, "httpx", "--expected-sha256", wrongSHA})
+	if err := statusCmd.Execute(); err != nil {
+		t.Fatalf("execute release-managed-status with mismatched expected sha256 should print blocked status: %v output=%q", err, statusOut.String())
+	}
+	for _, want := range []string{
+		"release-managed-status: name=httpx",
+		"status=blocked",
+		"digest_status=verified",
+		"expected_sha256=" + wrongSHA,
+		"expected_sha256_status=mismatch",
+		"expected_sha256_mismatch",
+	} {
+		if !strings.Contains(statusOut.String(), want) {
+			t.Fatalf("expected release-managed-status expected sha output to contain %q, got %q", want, statusOut.String())
+		}
+	}
+	if _, err := os.Lstat(workspaceBundle); !os.IsNotExist(err) {
+		t.Fatalf("release-managed-status expected mismatch must not copy into workspace, stat err=%v", err)
+	}
+	if _, err := os.Lstat(installPath); !os.IsNotExist(err) {
+		t.Fatalf("release-managed-status expected mismatch must not create install link, stat err=%v", err)
+	}
+
+	var invalidStatusOut bytes.Buffer
+	invalidStatusCmd := newRootCommand(&invalidStatusOut, new(bytes.Buffer))
+	invalidStatusCmd.SetArgs([]string{"toolchain", "release-managed-status", root, releaseRoot, "httpx", "--expected-sha256", "not-a-sha256"})
+	if err := invalidStatusCmd.Execute(); err == nil || !strings.Contains(err.Error(), "expected sha256 is invalid") {
+		t.Fatalf("expected invalid status expected sha256 rejection, got %v output=%q", err, invalidStatusOut.String())
+	}
+	var listStatusOut bytes.Buffer
+	listStatusCmd := newRootCommand(&listStatusOut, new(bytes.Buffer))
+	listStatusCmd.SetArgs([]string{"toolchain", "release-managed-status", root, releaseRoot, "--expected-sha256", wrongSHA})
+	if err := listStatusCmd.Execute(); err == nil || !strings.Contains(err.Error(), "requires a bundle name") {
+		t.Fatalf("expected release-managed-status expected sha256 to require bundle name, got %v output=%q", err, listStatusOut.String())
+	}
+
+	var planMismatchOut bytes.Buffer
+	planMismatchCmd := newRootCommand(&planMismatchOut, new(bytes.Buffer))
+	planMismatchCmd.SetArgs([]string{"toolchain", "release-managed-install-plan", root, releaseRoot, "web-api-pack", "httpx", "--expected-sha256", wrongSHA})
+	if err := planMismatchCmd.Execute(); err == nil || !strings.Contains(err.Error(), "expected sha256 mismatch") {
+		t.Fatalf("expected release-managed-install-plan expected sha256 mismatch, got %v output=%q", err, planMismatchOut.String())
+	}
+	if _, err := os.Lstat(workspaceBundle); !os.IsNotExist(err) {
+		t.Fatalf("release-managed-install-plan expected mismatch must not copy into workspace, stat err=%v", err)
+	}
+	if _, err := os.Lstat(installPath); !os.IsNotExist(err) {
+		t.Fatalf("release-managed-install-plan expected mismatch must not create install link, stat err=%v", err)
+	}
+
+	var planOut bytes.Buffer
+	planCmd := newRootCommand(&planOut, new(bytes.Buffer))
+	planCmd.SetArgs([]string{"toolchain", "release-managed-install-plan", root, releaseRoot, "web-api-pack", "httpx", "--expected-sha256", strings.ToUpper(actualSHA)})
+	if err := planCmd.Execute(); err != nil {
+		t.Fatalf("execute release-managed-install-plan with matching expected sha256: %v output=%q", err, planOut.String())
+	}
+	if !strings.Contains(planOut.String(), "expected_sha256="+actualSHA) || !strings.Contains(planOut.String(), "expected_sha256_status=matched") {
+		t.Fatalf("expected release-managed-install-plan output to include normalized expected sha256, got %q", planOut.String())
+	}
+
+	var installMismatchOut bytes.Buffer
+	installMismatchCmd := newRootCommand(&installMismatchOut, new(bytes.Buffer))
+	installMismatchCmd.SetArgs([]string{"toolchain", "release-managed-install", root, releaseRoot, "web-api-pack", "httpx", "--expected-sha256", wrongSHA, "--execute"})
+	if err := installMismatchCmd.Execute(); err == nil || !strings.Contains(err.Error(), "expected sha256 mismatch") {
+		t.Fatalf("expected release-managed-install expected sha256 mismatch, got %v output=%q", err, installMismatchOut.String())
+	}
+	if _, err := os.Lstat(workspaceBundle); !os.IsNotExist(err) {
+		t.Fatalf("release-managed-install expected mismatch must not copy into workspace, stat err=%v", err)
+	}
+	if _, err := os.Lstat(installPath); !os.IsNotExist(err) {
+		t.Fatalf("release-managed-install expected mismatch must not create install link, stat err=%v", err)
+	}
+
+	var installOut bytes.Buffer
+	installCmd := newRootCommand(&installOut, new(bytes.Buffer))
+	installCmd.SetArgs([]string{"toolchain", "release-managed-install", root, releaseRoot, "web-api-pack", "httpx", "--expected-sha256", strings.ToUpper(actualSHA), "--execute"})
+	if err := installCmd.Execute(); err != nil {
+		t.Fatalf("execute release-managed-install with matching expected sha256: %v output=%q", err, installOut.String())
+	}
+	for _, want := range []string{
+		"release-managed-install:",
+		"sha256=" + actualSHA,
+		"expected_sha256=" + actualSHA,
+		"expected_sha256_status=matched",
+	} {
+		if !strings.Contains(installOut.String(), want) {
+			t.Fatalf("expected release-managed-install expected sha output to contain %q, got %q", want, installOut.String())
+		}
+	}
+	if _, err := os.Lstat(workspaceBundle); err != nil {
+		t.Fatalf("release-managed-install expected match must copy workspace bundle: %v", err)
+	}
+	if _, err := os.Lstat(installPath); err != nil {
+		t.Fatalf("release-managed-install expected match must create install link: %v", err)
+	}
+}
+
+func TestToolchainReleaseManagedBundlesCommandListsAndReadsWithoutWorkspaceWrites(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	releaseRoot := filepath.Join(t.TempDir(), "release")
+	releasePayload := writeReleaseManagedBundleFixtureForCLITest(t, releaseRoot, "httpx", "#!/bin/sh\nexit 33\n")
+
+	var listOut bytes.Buffer
+	listCmd := newRootCommand(&listOut, new(bytes.Buffer))
+	listCmd.SetArgs([]string{"toolchain", "release-managed-bundles", releaseRoot})
+	if err := listCmd.Execute(); err != nil {
+		t.Fatalf("execute release-managed-bundles: %v", err)
+	}
+	for _, want := range []string{
+		"release-managed-bundle: name=httpx",
+		"status=available",
+		"mode=metadata-only",
+		"kind=binary",
+		"release_payload=" + releasePayload,
+		"release_manifest=" + filepath.Join(releaseRoot, "toolchains", "managed-bundles", "httpx", "bundle.yaml"),
+	} {
+		if !strings.Contains(listOut.String(), want) {
+			t.Fatalf("expected release-managed-bundles output to contain %q, got %q", want, listOut.String())
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(root, "toolchain", "managed-bundles", "httpx")); !os.IsNotExist(err) {
+		t.Fatalf("release-managed-bundles must not copy into workspace, stat err=%v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "toolchain", "bin", "httpx")); !os.IsNotExist(err) {
+		t.Fatalf("release-managed-bundles must not create install link, stat err=%v", err)
+	}
+
+	var readOut bytes.Buffer
+	readCmd := newRootCommand(&readOut, new(bytes.Buffer))
+	readCmd.SetArgs([]string{"toolchain", "release-managed-bundles", releaseRoot, "httpx"})
+	if err := readCmd.Execute(); err != nil {
+		t.Fatalf("execute release-managed-bundles read: %v", err)
+	}
+	if !strings.Contains(readOut.String(), "release_bundle="+filepath.Join(releaseRoot, "toolchains", "managed-bundles", "httpx")) {
+		t.Fatalf("expected read output to include release bundle dir, got %q", readOut.String())
+	}
+}
+
+func TestToolchainManagedBundleCommandsReportProvenanceMetadata(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	writeManagedBundleFixtureForCLITest(t, root, "httpx", "#!/bin/sh\nexit 0\n")
+	appendManagedBundleProvenanceForCLITest(t,
+		filepath.Join(root, "toolchain", "managed-bundles", "httpx", "bundle.yaml"),
+		"https://github.com/projectdiscovery/httpx",
+		"v1.3.0",
+		"2026-06-05T00:00:00Z",
+		"operator",
+	)
+
+	var managedOut bytes.Buffer
+	managedCmd := newRootCommand(&managedOut, new(bytes.Buffer))
+	managedCmd.SetArgs([]string{"toolchain", "managed-bundles", root, "httpx"})
+	if err := managedCmd.Execute(); err != nil {
+		t.Fatalf("execute managed-bundles: %v", err)
+	}
+	for _, want := range []string{
+		"managed-bundle: name=httpx",
+		"provenance_status=recorded",
+		"provenance_source_url=https://github.com/projectdiscovery/httpx",
+		"provenance_upstream_version=v1.3.0",
+		"provenance_retrieved_at=2026-06-05T00:00:00Z",
+		"provenance_verified_by=operator",
+	} {
+		if !strings.Contains(managedOut.String(), want) {
+			t.Fatalf("expected managed-bundles provenance output to contain %q, got %q", want, managedOut.String())
+		}
+	}
+
+	releaseRoot := filepath.Join(t.TempDir(), "release")
+	writeReleaseManagedBundleFixtureForCLITest(t, releaseRoot, "httpx", "#!/bin/sh\nexit 0\n")
+	appendManagedBundleProvenanceForCLITest(t,
+		filepath.Join(releaseRoot, "toolchains", "managed-bundles", "httpx", "bundle.yaml"),
+		"https://github.com/projectdiscovery/httpx",
+		"v1.3.0",
+		"2026-06-05T00:00:00Z",
+		"operator",
+	)
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{name: "release list", args: []string{"toolchain", "release-managed-bundles", releaseRoot, "httpx"}},
+		{name: "release status", args: []string{"toolchain", "release-managed-status", root, releaseRoot, "httpx"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			cmd := newRootCommand(&out, new(bytes.Buffer))
+			cmd.SetArgs(tc.args)
+			if err := cmd.Execute(); err != nil {
+				t.Fatalf("execute %s: %v", tc.name, err)
+			}
+			for _, want := range []string{
+				"provenance_status=recorded",
+				"provenance_source_url=https://github.com/projectdiscovery/httpx",
+				"provenance_upstream_version=v1.3.0",
+				"provenance_retrieved_at=2026-06-05T00:00:00Z",
+				"provenance_verified_by=operator",
+			} {
+				if !strings.Contains(out.String(), want) {
+					t.Fatalf("expected %s provenance output to contain %q, got %q", tc.name, want, out.String())
+				}
+			}
+		})
+	}
+}
+
+func TestToolchainManagedBundleCommandsReportSignatureMetadata(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	writeManagedBundleFixtureForCLITest(t, root, "httpx", "#!/bin/sh\nexit 0\n")
+	workspaceBundle, err := app.ReadManagedToolBundle(root, "httpx")
+	if err != nil {
+		t.Fatalf("read workspace managed bundle before signature append: %v", err)
+	}
+	appendManagedBundleSignatureForCLITest(t,
+		filepath.Join(root, "toolchain", "managed-bundles", "httpx", "bundle.yaml"),
+		"local-cli-key",
+		"2026-06-07T00:00:00Z",
+		"operator",
+		workspaceBundle.Name,
+		workspaceBundle.Kind,
+		workspaceBundle.Version,
+		workspaceBundle.SHA256,
+	)
+
+	var managedOut bytes.Buffer
+	managedCmd := newRootCommand(&managedOut, new(bytes.Buffer))
+	managedCmd.SetArgs([]string{"toolchain", "managed-bundles", root, "httpx"})
+	if err := managedCmd.Execute(); err != nil {
+		t.Fatalf("execute managed-bundles: %v", err)
+	}
+	for _, want := range []string{
+		"signature_status=verified",
+		"signature_algorithm=ed25519",
+		"signature_key_id=local-cli-key",
+		"signature_signed_at=2026-06-07T00:00:00Z",
+		"signature_signed_by=operator",
+	} {
+		if !strings.Contains(managedOut.String(), want) {
+			t.Fatalf("expected managed-bundles signature output to contain %q, got %q", want, managedOut.String())
+		}
+	}
+
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{name: "managed install plan", args: []string{"toolchain", "managed-install-plan", root, "web-api-pack", "httpx"}},
+		{name: "managed install", args: []string{"toolchain", "managed-install", root, "web-api-pack", "httpx", "--execute"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			cmd := newRootCommand(&out, new(bytes.Buffer))
+			cmd.SetArgs(tc.args)
+			if err := cmd.Execute(); err != nil {
+				t.Fatalf("execute %s: %v output=%q", tc.name, err, out.String())
+			}
+			for _, want := range []string{
+				"signature_status=verified",
+				"signature_algorithm=ed25519",
+				"signature_key_id=local-cli-key",
+				"signature_signed_at=2026-06-07T00:00:00Z",
+				"signature_signed_by=operator",
+			} {
+				if !strings.Contains(out.String(), want) {
+					t.Fatalf("expected %s signature output to contain %q, got %q", tc.name, want, out.String())
+				}
+			}
+		})
+	}
+
+	releaseRoot := filepath.Join(t.TempDir(), "release")
+	writeReleaseManagedBundleFixtureForCLITest(t, releaseRoot, "httpx", "#!/bin/sh\nexit 0\n")
+	releaseBundle, err := app.ReadReleaseManagedToolBundle(releaseRoot, "httpx")
+	if err != nil {
+		t.Fatalf("read release managed bundle before signature append: %v", err)
+	}
+	appendManagedBundleSignatureForCLITest(t,
+		filepath.Join(releaseRoot, "toolchains", "managed-bundles", "httpx", "bundle.yaml"),
+		"local-cli-key",
+		"2026-06-07T00:00:00Z",
+		"operator",
+		releaseBundle.Name,
+		releaseBundle.Kind,
+		releaseBundle.Version,
+		releaseBundle.SHA256,
+	)
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{name: "release list", args: []string{"toolchain", "release-managed-bundles", releaseRoot, "httpx"}},
+		{name: "release status", args: []string{"toolchain", "release-managed-status", root, releaseRoot, "httpx"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			cmd := newRootCommand(&out, new(bytes.Buffer))
+			cmd.SetArgs(tc.args)
+			if err := cmd.Execute(); err != nil {
+				t.Fatalf("execute %s: %v", tc.name, err)
+			}
+			for _, want := range []string{
+				"signature_status=verified",
+				"signature_algorithm=ed25519",
+				"signature_key_id=local-cli-key",
+				"signature_signed_at=2026-06-07T00:00:00Z",
+				"signature_signed_by=operator",
+			} {
+				if !strings.Contains(out.String(), want) {
+					t.Fatalf("expected %s signature output to contain %q, got %q", tc.name, want, out.String())
+				}
+			}
+		})
+	}
+
+	releaseInstallRoot := filepath.Join(t.TempDir(), "release-install-workspace")
+	if err := app.InitWorkspace(releaseInstallRoot); err != nil {
+		t.Fatalf("init release install workspace: %v", err)
+	}
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{name: "release install plan", args: []string{"toolchain", "release-managed-install-plan", releaseInstallRoot, releaseRoot, "web-api-pack", "httpx"}},
+		{name: "release install", args: []string{"toolchain", "release-managed-install", releaseInstallRoot, releaseRoot, "web-api-pack", "httpx", "--execute"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			cmd := newRootCommand(&out, new(bytes.Buffer))
+			cmd.SetArgs(tc.args)
+			if err := cmd.Execute(); err != nil {
+				t.Fatalf("execute %s: %v output=%q", tc.name, err, out.String())
+			}
+			for _, want := range []string{
+				"signature_status=verified",
+				"signature_algorithm=ed25519",
+				"signature_key_id=local-cli-key",
+				"signature_signed_at=2026-06-07T00:00:00Z",
+				"signature_signed_by=operator",
+			} {
+				if !strings.Contains(out.String(), want) {
+					t.Fatalf("expected %s signature output to contain %q, got %q", tc.name, want, out.String())
+				}
+			}
+		})
+	}
+}
+
+func TestToolchainManagedBundleCommandsReportUpdateMetadata(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	writeManagedBundleFixtureForCLITest(t, root, "httpx", "#!/bin/sh\nexit 0\n")
+	workspaceBundle, err := app.ReadManagedToolBundle(root, "httpx")
+	if err != nil {
+		t.Fatalf("read workspace bundle: %v", err)
+	}
+	appendManagedBundleUpdateForCLITest(t,
+		filepath.Join(root, "toolchain", "managed-bundles", "httpx", "bundle.yaml"),
+		"1.3.0",
+		workspaceBundle.SHA256,
+		"2026-06-05T00:00:00Z",
+		"current",
+	)
+
+	var managedOut bytes.Buffer
+	managedCmd := newRootCommand(&managedOut, new(bytes.Buffer))
+	managedCmd.SetArgs([]string{"toolchain", "managed-bundles", root, "httpx"})
+	if err := managedCmd.Execute(); err != nil {
+		t.Fatalf("execute managed-bundles: %v", err)
+	}
+	for _, want := range []string{
+		"managed-bundle: name=httpx",
+		"update_status=current",
+		"update_latest_version=1.3.0",
+		"update_latest_sha256=" + workspaceBundle.SHA256,
+		"update_checked_at=2026-06-05T00:00:00Z",
+		"update_message=current",
+	} {
+		if !strings.Contains(managedOut.String(), want) {
+			t.Fatalf("expected managed-bundles update output to contain %q, got %q", want, managedOut.String())
+		}
+	}
+
+	releaseRoot := filepath.Join(t.TempDir(), "release")
+	writeReleaseManagedBundleFixtureForCLITest(t, releaseRoot, "httpx", "#!/bin/sh\nexit 0\n")
+	releaseBundle, err := app.ReadReleaseManagedToolBundle(releaseRoot, "httpx")
+	if err != nil {
+		t.Fatalf("read release bundle: %v", err)
+	}
+	appendManagedBundleUpdateForCLITest(t,
+		filepath.Join(releaseRoot, "toolchains", "managed-bundles", "httpx", "bundle.yaml"),
+		"1.4.0",
+		releaseBundle.SHA256,
+		"2026-06-05T00:00:00Z",
+		"update_available",
+	)
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{name: "release list", args: []string{"toolchain", "release-managed-bundles", releaseRoot, "httpx"}},
+		{name: "release status", args: []string{"toolchain", "release-managed-status", root, releaseRoot, "httpx"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			cmd := newRootCommand(&out, new(bytes.Buffer))
+			cmd.SetArgs(tc.args)
+			if err := cmd.Execute(); err != nil {
+				t.Fatalf("execute %s: %v", tc.name, err)
+			}
+			for _, want := range []string{
+				"update_status=update_available",
+				"update_latest_version=1.4.0",
+				"update_latest_sha256=" + releaseBundle.SHA256,
+				"update_checked_at=2026-06-05T00:00:00Z",
+				"update_message=update_available",
+			} {
+				if !strings.Contains(out.String(), want) {
+					t.Fatalf("expected %s update output to contain %q, got %q", tc.name, want, out.String())
+				}
+			}
+		})
+	}
+}
+
+func TestToolchainManagedUpdateRequestCommandWritesMetadataOnlyArtifact(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	releaseRoot := filepath.Join(t.TempDir(), "release")
+	marker := filepath.Join(t.TempDir(), "managed-update-cli-payload-ran")
+	writeReleaseManagedBundleFixtureForCLITest(t, releaseRoot, "httpx", "#!/bin/sh\ntouch "+marker+"\n")
+	releaseBundle, err := app.ReadReleaseManagedToolBundle(releaseRoot, "httpx")
+	if err != nil {
+		t.Fatalf("read release bundle before update metadata append: %v", err)
+	}
+	latestSHA := strings.Repeat("d", 64)
+	appendManagedBundleUpdateForCLITest(t,
+		filepath.Join(releaseRoot, "toolchains", "managed-bundles", "httpx", "bundle.yaml"),
+		"1.4.0",
+		latestSHA,
+		"2026-06-07T00:00:00Z",
+		"update_available",
+	)
+
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{
+		"toolchain", "managed-update-request", root, releaseRoot, "httpx",
+		"--request",
+		"--requested-by", "operator",
+		"--reason", "prepare update",
+	})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute managed-update-request: %v", err)
+	}
+	requestPath := parseOutputValue(t, out.String(), "managed-update-request:")
+	if requestPath == "" {
+		t.Fatalf("expected managed update request path, got %q", out.String())
+	}
+	for _, want := range []string{
+		"status=pending",
+		"mode=metadata-only",
+		"name=httpx",
+		"kind=binary",
+		"current_version=1.3.0",
+		"current_sha256=" + releaseBundle.SHA256,
+		"latest_version=1.4.0",
+		"latest_sha256=" + latestSHA,
+		"update_status=update_available",
+		"requested_by=operator",
+		"reason=prepare_update",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("expected managed-update-request output to contain %q, got %q", want, out.String())
+		}
+	}
+	if _, err := os.Stat(requestPath); err != nil {
+		t.Fatalf("expected update request artifact to exist: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "toolchain", "managed-bundles", "httpx")); !os.IsNotExist(err) {
+		t.Fatalf("managed-update-request must not copy workspace bundle, stat err=%v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "toolchain", "bin", "httpx")); !os.IsNotExist(err) {
+		t.Fatalf("managed-update-request must not create install link, stat err=%v", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("managed-update-request must not execute payload, marker stat err=%v", err)
+	}
+
+	var listOut bytes.Buffer
+	listCmd := newRootCommand(&listOut, new(bytes.Buffer))
+	listCmd.SetArgs([]string{"toolchain", "managed-update-requests", root})
+	if err := listCmd.Execute(); err != nil {
+		t.Fatalf("execute managed-update-requests list: %v", err)
+	}
+	for _, want := range []string{
+		"managed-update-requests: total=1 pending=1",
+		"managed-update-request: " + requestPath,
+		"latest_version=1.4.0",
+	} {
+		if !strings.Contains(listOut.String(), want) {
+			t.Fatalf("expected managed-update-requests output to contain %q, got %q", want, listOut.String())
+		}
+	}
+
+	var readOut bytes.Buffer
+	readCmd := newRootCommand(&readOut, new(bytes.Buffer))
+	readCmd.SetArgs([]string{"toolchain", "managed-update-requests", root, filepath.Base(requestPath)})
+	if err := readCmd.Execute(); err != nil {
+		t.Fatalf("execute managed-update-requests read: %v", err)
+	}
+	if !strings.Contains(readOut.String(), "managed-update-request: "+requestPath) || !strings.Contains(readOut.String(), "release_root="+releaseRoot) {
+		t.Fatalf("expected managed-update-requests read output to inspect artifact, got %q", readOut.String())
+	}
+}
+
+func TestToolchainManagedUpdateRequestCommandRequiresExplicitRequestGate(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	releaseRoot := filepath.Join(t.TempDir(), "release")
+	writeReleaseManagedBundleFixtureForCLITest(t, releaseRoot, "httpx", "#!/bin/sh\nexit 0\n")
+
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{"toolchain", "managed-update-request", root, releaseRoot, "httpx"})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "requires --request") {
+		t.Fatalf("expected request gate rejection, got err=%v output=%q", err, out.String())
+	}
+	if requests, err := app.ListManagedToolBundleUpdateRequests(root); err != nil || len(requests) != 0 {
+		t.Fatalf("missing request gate must not write artifacts, requests=%#v err=%v", requests, err)
+	}
+}
+
+func TestToolchainManagedUpdateDownloadPlanCommandWritesAndListsMetadataOnly(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	releaseRoot := filepath.Join(t.TempDir(), "release")
+	marker := filepath.Join(t.TempDir(), "managed-update-download-plan-cli-payload-ran")
+	writeReleaseManagedBundleFixtureForCLITest(t, releaseRoot, "httpx", "#!/bin/sh\ntouch "+marker+"\n")
+	latestSHA := strings.Repeat("e", 64)
+	appendManagedBundleUpdateForCLITest(t,
+		filepath.Join(releaseRoot, "toolchains", "managed-bundles", "httpx", "bundle.yaml"),
+		"1.4.0",
+		latestSHA,
+		"2026-06-07T00:00:00Z",
+		"update_available",
+	)
+	request, err := app.CreateManagedToolBundleUpdateRequest(root, releaseRoot, "httpx", app.ManagedToolBundleUpdateRequestOptions{
+		Request:     true,
+		RequestedBy: "operator",
+		Reason:      "prepare update",
+	})
+	if err != nil {
+		t.Fatalf("create managed update request: %v", err)
+	}
+
+	sourceURL := "https://downloads.example.com/httpx/v1.4.0/httpx-linux-amd64.tar.gz"
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{
+		"toolchain", "managed-update-download-plan", root, request.Path,
+		"--plan",
+		"--source-url", sourceURL,
+		"--expected-sha256", strings.ToUpper(latestSHA),
+		"--planned-by", "operator",
+		"--reason", "download mirror reviewed",
+	})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute managed-update-download-plan: %v", err)
+	}
+	planPath := parseOutputValue(t, out.String(), "managed-update-download-plan:")
+	if planPath == "" {
+		t.Fatalf("expected managed update download plan path, got %q", out.String())
+	}
+	for _, want := range []string{
+		"status=pending",
+		"mode=metadata-only",
+		"name=httpx",
+		"kind=binary",
+		"latest_version=1.4.0",
+		"latest_sha256=" + latestSHA,
+		"source_url=" + sourceURL,
+		"expected_sha256=" + latestSHA,
+		"expected_sha256_status=matched",
+		"request=" + request.Path,
+		"planned_by=operator",
+		"reason=download_mirror_reviewed",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("expected managed-update-download-plan output to contain %q, got %q", want, out.String())
+		}
+	}
+	if _, err := os.Stat(planPath); err != nil {
+		t.Fatalf("expected update download plan artifact to exist: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "toolchain", "managed-bundles", "httpx")); !os.IsNotExist(err) {
+		t.Fatalf("managed-update-download-plan must not copy workspace bundle, stat err=%v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "toolchain", "bin", "httpx")); !os.IsNotExist(err) {
+		t.Fatalf("managed-update-download-plan must not create install link, stat err=%v", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("managed-update-download-plan must not execute payload, marker stat err=%v", err)
+	}
+
+	var listOut bytes.Buffer
+	listCmd := newRootCommand(&listOut, new(bytes.Buffer))
+	listCmd.SetArgs([]string{"toolchain", "managed-update-download-plans", root})
+	if err := listCmd.Execute(); err != nil {
+		t.Fatalf("execute managed-update-download-plans list: %v", err)
+	}
+	for _, want := range []string{
+		"managed-update-download-plans: total=1 pending=1",
+		"managed-update-download-plan: " + planPath,
+		"source_url=" + sourceURL,
+	} {
+		if !strings.Contains(listOut.String(), want) {
+			t.Fatalf("expected managed-update-download-plans output to contain %q, got %q", want, listOut.String())
+		}
+	}
+
+	var readOut bytes.Buffer
+	readCmd := newRootCommand(&readOut, new(bytes.Buffer))
+	readCmd.SetArgs([]string{"toolchain", "managed-update-download-plans", root, filepath.Base(planPath)})
+	if err := readCmd.Execute(); err != nil {
+		t.Fatalf("execute managed-update-download-plans read: %v", err)
+	}
+	if !strings.Contains(readOut.String(), "managed-update-download-plan: "+planPath) || !strings.Contains(readOut.String(), "request="+request.Path) {
+		t.Fatalf("expected managed-update-download-plans read output to inspect artifact, got %q", readOut.String())
+	}
+}
+
+func TestToolchainManagedUpdateDownloadPlanCommandRequiresExplicitPlanGate(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	releaseRoot := filepath.Join(t.TempDir(), "release")
+	writeReleaseManagedBundleFixtureForCLITest(t, releaseRoot, "httpx", "#!/bin/sh\nexit 0\n")
+	latestSHA := strings.Repeat("f", 64)
+	appendManagedBundleUpdateForCLITest(t,
+		filepath.Join(releaseRoot, "toolchains", "managed-bundles", "httpx", "bundle.yaml"),
+		"1.4.0",
+		latestSHA,
+		"2026-06-07T00:00:00Z",
+		"update_available",
+	)
+	request, err := app.CreateManagedToolBundleUpdateRequest(root, releaseRoot, "httpx", app.ManagedToolBundleUpdateRequestOptions{Request: true})
+	if err != nil {
+		t.Fatalf("create update request: %v", err)
+	}
+
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{
+		"toolchain", "managed-update-download-plan", root, request.Path,
+		"--source-url", "https://downloads.example.com/httpx.tar.gz",
+		"--expected-sha256", latestSHA,
+	})
+	err = cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "requires --plan") {
+		t.Fatalf("expected plan gate rejection, got err=%v output=%q", err, out.String())
+	}
+	if plans, err := app.ListManagedToolBundleUpdateDownloadPlans(root); err != nil || len(plans) != 0 {
+		t.Fatalf("missing plan gate must not write artifacts, plans=%#v err=%v", plans, err)
+	}
+}
+
+func TestToolchainExecuteManagedUpdateDownloadPlanCommandDownloadsAndListsAudit(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	releaseRoot := filepath.Join(t.TempDir(), "release")
+	marker := filepath.Join(t.TempDir(), "managed-update-download-execution-cli-payload-ran")
+	writeReleaseManagedBundleFixtureForCLITest(t, releaseRoot, "httpx", "#!/bin/sh\ntouch "+marker+"\n")
+	payload := []byte("#!/bin/sh\nexit 43\n")
+	digest := sha256.Sum256(payload)
+	latestSHA := hex.EncodeToString(digest[:])
+	appendManagedBundleUpdateForCLITest(
+		t,
+		filepath.Join(releaseRoot, "toolchains", "managed-bundles", "httpx", "bundle.yaml"),
+		"1.4.0",
+		latestSHA,
+		"2026-06-07T00:00:00Z",
+		"download-execution-cli",
+	)
+	request, err := app.CreateManagedToolBundleUpdateRequest(root, releaseRoot, "httpx", app.ManagedToolBundleUpdateRequestOptions{Request: true})
+	if err != nil {
+		t.Fatalf("create update request: %v", err)
+	}
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(payload)
+	}))
+	t.Cleanup(server.Close)
+	plan, err := app.CreateManagedToolBundleUpdateDownloadPlan(root, request.Path, app.ManagedToolBundleUpdateDownloadPlanOptions{
+		Plan:           true,
+		SourceURL:      server.URL,
+		ExpectedSHA256: latestSHA,
+		PlannedBy:      "operator",
+		Reason:         "download reviewed",
+	})
+	if err != nil {
+		t.Fatalf("create update download plan: %v", err)
+	}
+	oldDefaultClient := http.DefaultClient
+	http.DefaultClient = server.Client()
+	t.Cleanup(func() { http.DefaultClient = oldDefaultClient })
+
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{
+		"toolchain", "execute-managed-update-download-plan", root, plan.Path,
+		"--execute",
+		"--actor", "operator",
+		"--reason", "verified download",
+	})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute managed update download plan: %v output=%q", err, out.String())
+	}
+	executionPath := parseOutputValue(t, out.String(), "managed-update-download-execution:")
+	if executionPath == "" {
+		t.Fatalf("expected managed update download execution path, got %q", out.String())
+	}
+	payloadPath := parseOutputValue(t, out.String(), "payload=")
+	if payloadPath == "" {
+		t.Fatalf("expected staged payload path in output, got %q", out.String())
+	}
+	for _, want := range []string{
+		"status=completed",
+		"mode=execute",
+		"action=download",
+		"name=httpx",
+		"kind=binary",
+		"source_url=" + server.URL,
+		"expected_sha256=" + latestSHA,
+		"actual_sha256=" + latestSHA,
+		"digest_status=matched",
+		"bytes_written=18",
+		"plan=" + plan.Path,
+		"request=" + request.Path,
+		"actor=operator",
+		"reason=verified_download",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("expected execute-managed-update-download-plan output to contain %q, got %q", want, out.String())
+		}
+	}
+	staged, err := os.ReadFile(payloadPath)
+	if err != nil {
+		t.Fatalf("read staged payload: %v", err)
+	}
+	if string(staged) != string(payload) {
+		t.Fatalf("unexpected staged payload: %q", string(staged))
+	}
+	if _, err := os.Lstat(filepath.Join(root, "toolchain", "managed-bundles", "httpx")); !os.IsNotExist(err) {
+		t.Fatalf("execute-managed-update-download-plan must not copy workspace bundle, stat err=%v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "toolchain", "bin", "httpx")); !os.IsNotExist(err) {
+		t.Fatalf("execute-managed-update-download-plan must not create install link, stat err=%v", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("execute-managed-update-download-plan must not execute payload, marker stat err=%v", err)
+	}
+
+	var listOut bytes.Buffer
+	listCmd := newRootCommand(&listOut, new(bytes.Buffer))
+	listCmd.SetArgs([]string{"toolchain", "managed-update-download-executions", root})
+	if err := listCmd.Execute(); err != nil {
+		t.Fatalf("execute managed-update-download-executions list: %v", err)
+	}
+	for _, want := range []string{
+		"managed-update-download-executions: total=1 completed=1 failed=0",
+		"managed-update-download-execution: " + executionPath,
+		"payload=" + payloadPath,
+	} {
+		if !strings.Contains(listOut.String(), want) {
+			t.Fatalf("expected managed-update-download-executions output to contain %q, got %q", want, listOut.String())
+		}
+	}
+
+	var readOut bytes.Buffer
+	readCmd := newRootCommand(&readOut, new(bytes.Buffer))
+	readCmd.SetArgs([]string{"toolchain", "managed-update-download-executions", root, filepath.Base(executionPath)})
+	if err := readCmd.Execute(); err != nil {
+		t.Fatalf("execute managed-update-download-executions read: %v", err)
+	}
+	if !strings.Contains(readOut.String(), "managed-update-download-execution: "+executionPath) || !strings.Contains(readOut.String(), "plan="+plan.Path) {
+		t.Fatalf("expected managed-update-download-executions read output to inspect artifact, got %q", readOut.String())
+	}
+}
+
+func TestToolchainExecuteManagedUpdateDownloadPlanCommandReportsRedirectProvenance(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	releaseRoot := filepath.Join(t.TempDir(), "release")
+	writeReleaseManagedBundleFixtureForCLITest(t, releaseRoot, "httpx", "#!/bin/sh\nexit 0\n")
+	payload := []byte("#!/bin/sh\nexit 45\n")
+	digest := sha256.Sum256(payload)
+	latestSHA := hex.EncodeToString(digest[:])
+	appendManagedBundleUpdateForCLITest(
+		t,
+		filepath.Join(releaseRoot, "toolchains", "managed-bundles", "httpx", "bundle.yaml"),
+		"1.4.0",
+		latestSHA,
+		"2026-06-08T03:05:00Z",
+		"redirect-cli",
+	)
+	request, err := app.CreateManagedToolBundleUpdateRequest(root, releaseRoot, "httpx", app.ManagedToolBundleUpdateRequestOptions{Request: true})
+	if err != nil {
+		t.Fatalf("create update request: %v", err)
+	}
+	rawRedirectLocation := "https://token:secret@redirect.example.com/downloads/httpx.tar.gz?sig=secret#frag"
+	sanitizedRedirectLocation := "https://redirect.example.com/downloads/httpx.tar.gz"
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", rawRedirectLocation)
+		w.WriteHeader(http.StatusFound)
+	}))
+	t.Cleanup(server.Close)
+	plan, err := app.CreateManagedToolBundleUpdateDownloadPlan(root, request.Path, app.ManagedToolBundleUpdateDownloadPlanOptions{
+		Plan:           true,
+		SourceURL:      server.URL,
+		ExpectedSHA256: latestSHA,
+		PlannedBy:      "operator",
+		Reason:         "redirect reviewed",
+	})
+	if err != nil {
+		t.Fatalf("create update download plan: %v", err)
+	}
+	oldDefaultClient := http.DefaultClient
+	http.DefaultClient = server.Client()
+	t.Cleanup(func() { http.DefaultClient = oldDefaultClient })
+
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{
+		"toolchain", "execute-managed-update-download-plan", root, plan.Path,
+		"--execute",
+		"--actor", "operator",
+		"--reason", "redirect provenance",
+	})
+	err = cmd.Execute()
+	if err == nil {
+		t.Fatalf("expected redirect command failure, output=%q", out.String())
+	}
+	if !strings.Contains(err.Error(), "redirect") || !strings.Contains(err.Error(), "302") {
+		t.Fatalf("expected redirect error with status, got err=%v output=%q", err, out.String())
+	}
+	for _, want := range []string{
+		"status=failed",
+		"http_status=302",
+		"redirect_policy=rejected",
+		"redirect_location=" + sanitizedRedirectLocation,
+		"redirect_location_status=redacted",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("expected redirect output to contain %q, got %q", want, out.String())
+		}
+	}
+	combined := out.String() + "\n" + err.Error()
+	for _, leaked := range []string{"token", "secret", "sig=", "frag"} {
+		if strings.Contains(combined, leaked) {
+			t.Fatalf("redirect CLI output/error leaked %q: %s", leaked, combined)
+		}
+	}
+}
+
+func TestToolchainExecuteManagedUpdateDownloadPlanCommandExtractsRuleBundleArchive(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	releaseRoot := filepath.Join(t.TempDir(), "release")
+	writeReleaseManagedRuleBundleFixtureForCLITest(t, releaseRoot, "nuclei-templates", map[string]string{
+		"http/old.yaml": "id: old\n",
+	})
+	updateFiles := map[string]string{
+		"http/new.yaml": "id: cli-new\n",
+		"dns/info.yaml": "id: cli-dns\n",
+	}
+	updateDir := writeManagedRuleBundleImportFixtureForCLITest(t, t.TempDir(), updateFiles)
+	bundleSHA := digestDirectoryForCLITest(t, updateDir)
+	archive := tarGzipRuleBundleArchiveForCLITest(t, updateFiles)
+	archiveDigest := sha256.Sum256(archive)
+	archiveSHA := hex.EncodeToString(archiveDigest[:])
+	appendManagedBundleUpdateForCLITest(
+		t,
+		filepath.Join(releaseRoot, "toolchains", "managed-bundles", "nuclei-templates", "bundle.yaml"),
+		"2026.06.08",
+		bundleSHA,
+		"2026-06-08T01:00:00Z",
+		"archive-cli",
+	)
+	request, err := app.CreateManagedToolBundleUpdateRequest(root, releaseRoot, "nuclei-templates", app.ManagedToolBundleUpdateRequestOptions{Request: true})
+	if err != nil {
+		t.Fatalf("create update request: %v", err)
+	}
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(archive)
+	}))
+	t.Cleanup(server.Close)
+
+	var planOut bytes.Buffer
+	planCmd := newRootCommand(&planOut, new(bytes.Buffer))
+	planCmd.SetArgs([]string{
+		"toolchain", "managed-update-download-plan", root, request.Path,
+		"--plan",
+		"--source-url", server.URL,
+		"--expected-sha256", bundleSHA,
+		"--archive-format", "tar.gz",
+		"--expected-archive-sha256", strings.ToUpper(archiveSHA),
+		"--planned-by", "operator",
+		"--reason", "archive reviewed",
+	})
+	if err := planCmd.Execute(); err != nil {
+		t.Fatalf("execute archive managed-update-download-plan: %v output=%q", err, planOut.String())
+	}
+	planPath := parseOutputValue(t, planOut.String(), "managed-update-download-plan:")
+	if planPath == "" {
+		t.Fatalf("expected archive plan path, got %q", planOut.String())
+	}
+	for _, want := range []string{
+		"kind=rule_bundle",
+		"expected_sha256=" + bundleSHA,
+		"archive_format=tar.gz",
+		"archive_expected_sha256=" + archiveSHA,
+		"archive_expected_sha256_status=matched",
+	} {
+		if !strings.Contains(planOut.String(), want) {
+			t.Fatalf("expected archive plan output to contain %q, got %q", want, planOut.String())
+		}
+	}
+
+	oldDefaultClient := http.DefaultClient
+	http.DefaultClient = server.Client()
+	t.Cleanup(func() { http.DefaultClient = oldDefaultClient })
+	var executeOut bytes.Buffer
+	executeCmd := newRootCommand(&executeOut, new(bytes.Buffer))
+	executeCmd.SetArgs([]string{
+		"toolchain", "execute-managed-update-download-plan", root, planPath,
+		"--execute",
+		"--actor", "operator",
+		"--reason", "archive fetched",
+	})
+	if err := executeCmd.Execute(); err != nil {
+		t.Fatalf("execute archive managed update download plan: %v output=%q", err, executeOut.String())
+	}
+	executionPath := parseOutputValue(t, executeOut.String(), "managed-update-download-execution:")
+	payloadPath := parseOutputValue(t, executeOut.String(), "payload=")
+	archivePath := parseOutputValue(t, executeOut.String(), "archive=")
+	if executionPath == "" || payloadPath == "" || archivePath == "" {
+		t.Fatalf("expected execution, archive, and payload paths, got %q", executeOut.String())
+	}
+	for _, want := range []string{
+		"kind=rule_bundle",
+		"expected_sha256=" + bundleSHA,
+		"actual_sha256=" + bundleSHA,
+		"digest_status=matched",
+		"digest_algorithm=sha256",
+		"digest_scope=directory_canonical_records",
+		"archive_format=tar.gz",
+		"archive_expected_sha256=" + archiveSHA,
+		"archive_actual_sha256=" + archiveSHA,
+		"archive_digest_status=matched",
+		"archive_digest_algorithm=sha256",
+		"archive_digest_scope=file",
+		"archive=" + archivePath,
+		"payload=" + payloadPath,
+	} {
+		if !strings.Contains(executeOut.String(), want) {
+			t.Fatalf("expected archive execution output to contain %q, got %q", want, executeOut.String())
+		}
+	}
+	if info, err := os.Stat(payloadPath); err != nil || !info.IsDir() {
+		t.Fatalf("expected archive payload directory, info=%#v err=%v", info, err)
+	}
+	if got := digestDirectoryForCLITest(t, payloadPath); got != bundleSHA {
+		t.Fatalf("unexpected archive payload digest: got %s want %s", got, bundleSHA)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "toolchain", "rules", "nuclei-templates")); !os.IsNotExist(err) {
+		t.Fatalf("execute-managed-update-download-plan must not create final rules link, stat err=%v", err)
+	}
+}
+
+func TestToolchainExecuteManagedUpdateDownloadPlanCommandExtractsZipRuleBundleArchive(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	releaseRoot := filepath.Join(t.TempDir(), "release")
+	writeReleaseManagedRuleBundleFixtureForCLITest(t, releaseRoot, "nuclei-templates", map[string]string{
+		"http/old.yaml": "id: old\n",
+	})
+	updateFiles := map[string]string{
+		"http/new.yaml": "id: cli-zip-new\n",
+		"dns/info.yaml": "id: cli-zip-dns\n",
+	}
+	updateDir := writeManagedRuleBundleImportFixtureForCLITest(t, t.TempDir(), updateFiles)
+	bundleSHA := digestDirectoryForCLITest(t, updateDir)
+	archive := zipRuleBundleArchiveForCLITest(t, updateFiles)
+	archiveDigest := sha256.Sum256(archive)
+	archiveSHA := hex.EncodeToString(archiveDigest[:])
+	appendManagedBundleUpdateForCLITest(
+		t,
+		filepath.Join(releaseRoot, "toolchains", "managed-bundles", "nuclei-templates", "bundle.yaml"),
+		"2026.06.08",
+		bundleSHA,
+		"2026-06-08T02:00:00Z",
+		"zip-archive-cli",
+	)
+	request, err := app.CreateManagedToolBundleUpdateRequest(root, releaseRoot, "nuclei-templates", app.ManagedToolBundleUpdateRequestOptions{Request: true})
+	if err != nil {
+		t.Fatalf("create update request: %v", err)
+	}
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(archive)
+	}))
+	t.Cleanup(server.Close)
+
+	var planOut bytes.Buffer
+	planCmd := newRootCommand(&planOut, new(bytes.Buffer))
+	planCmd.SetArgs([]string{
+		"toolchain", "managed-update-download-plan", root, request.Path,
+		"--plan",
+		"--source-url", server.URL,
+		"--expected-sha256", bundleSHA,
+		"--archive-format", "zip",
+		"--expected-archive-sha256", strings.ToUpper(archiveSHA),
+		"--planned-by", "operator",
+		"--reason", "zip archive reviewed",
+	})
+	if err := planCmd.Execute(); err != nil {
+		t.Fatalf("execute zip archive managed-update-download-plan: %v output=%q", err, planOut.String())
+	}
+	planPath := parseOutputValue(t, planOut.String(), "managed-update-download-plan:")
+	if planPath == "" {
+		t.Fatalf("expected zip archive plan path, got %q", planOut.String())
+	}
+	for _, want := range []string{
+		"kind=rule_bundle",
+		"expected_sha256=" + bundleSHA,
+		"archive_format=zip",
+		"archive_expected_sha256=" + archiveSHA,
+		"archive_expected_sha256_status=matched",
+	} {
+		if !strings.Contains(planOut.String(), want) {
+			t.Fatalf("expected zip archive plan output to contain %q, got %q", want, planOut.String())
+		}
+	}
+
+	oldDefaultClient := http.DefaultClient
+	http.DefaultClient = server.Client()
+	t.Cleanup(func() { http.DefaultClient = oldDefaultClient })
+	var executeOut bytes.Buffer
+	executeCmd := newRootCommand(&executeOut, new(bytes.Buffer))
+	executeCmd.SetArgs([]string{
+		"toolchain", "execute-managed-update-download-plan", root, planPath,
+		"--execute",
+		"--actor", "operator",
+		"--reason", "zip archive fetched",
+	})
+	if err := executeCmd.Execute(); err != nil {
+		t.Fatalf("execute zip archive managed update download plan: %v output=%q", err, executeOut.String())
+	}
+	executionPath := parseOutputValue(t, executeOut.String(), "managed-update-download-execution:")
+	payloadPath := parseOutputValue(t, executeOut.String(), "payload=")
+	archivePath := parseOutputValue(t, executeOut.String(), "archive=")
+	if executionPath == "" || payloadPath == "" || archivePath == "" {
+		t.Fatalf("expected zip execution, archive, and payload paths, got %q", executeOut.String())
+	}
+	for _, want := range []string{
+		"kind=rule_bundle",
+		"expected_sha256=" + bundleSHA,
+		"actual_sha256=" + bundleSHA,
+		"digest_status=matched",
+		"digest_algorithm=sha256",
+		"digest_scope=directory_canonical_records",
+		"archive_format=zip",
+		"archive_expected_sha256=" + archiveSHA,
+		"archive_actual_sha256=" + archiveSHA,
+		"archive_digest_status=matched",
+		"archive_digest_algorithm=sha256",
+		"archive_digest_scope=file",
+		"archive=" + archivePath,
+		"payload=" + payloadPath,
+	} {
+		if !strings.Contains(executeOut.String(), want) {
+			t.Fatalf("expected zip archive execution output to contain %q, got %q", want, executeOut.String())
+		}
+	}
+	if info, err := os.Stat(payloadPath); err != nil || !info.IsDir() {
+		t.Fatalf("expected zip archive payload directory, info=%#v err=%v", info, err)
+	}
+	if got := digestDirectoryForCLITest(t, payloadPath); got != bundleSHA {
+		t.Fatalf("unexpected zip archive payload digest: got %s want %s", got, bundleSHA)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "toolchain", "rules", "nuclei-templates")); !os.IsNotExist(err) {
+		t.Fatalf("execute-managed-update-download-plan must not create final rules link, stat err=%v", err)
+	}
+}
+
+func TestToolchainExecuteManagedUpdateDownloadPlanCommandExtractsBinaryArchive(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	releaseRoot := filepath.Join(t.TempDir(), "release")
+	marker := filepath.Join(t.TempDir(), "managed-update-binary-archive-cli-payload-ran")
+	writeReleaseManagedBundleFixtureForCLITest(t, releaseRoot, "httpx", "#!/bin/sh\ntouch "+marker+"\n")
+	writeManagedBundleFixtureForCLITest(t, root, "httpx", "#!/bin/sh\nexit 0\n")
+	payload := []byte("#!/bin/sh\nexit 43\n")
+	payloadDigest := sha256.Sum256(payload)
+	payloadSHA := hex.EncodeToString(payloadDigest[:])
+	archive := tarGzipRuleBundleArchiveForCLITest(t, map[string]string{
+		"bin/httpx": string(payload),
+	})
+	archiveDigest := sha256.Sum256(archive)
+	archiveSHA := hex.EncodeToString(archiveDigest[:])
+	appendManagedBundleUpdateForCLITest(
+		t,
+		filepath.Join(releaseRoot, "toolchains", "managed-bundles", "httpx", "bundle.yaml"),
+		"1.4.0",
+		payloadSHA,
+		"2026-06-08T03:00:00Z",
+		"binary-archive-cli",
+	)
+	request, err := app.CreateManagedToolBundleUpdateRequest(root, releaseRoot, "httpx", app.ManagedToolBundleUpdateRequestOptions{Request: true})
+	if err != nil {
+		t.Fatalf("create update request: %v", err)
+	}
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(archive)
+	}))
+	t.Cleanup(server.Close)
+
+	var planOut bytes.Buffer
+	planCmd := newRootCommand(&planOut, new(bytes.Buffer))
+	planCmd.SetArgs([]string{
+		"toolchain", "managed-update-download-plan", root, request.Path,
+		"--plan",
+		"--source-url", server.URL,
+		"--expected-sha256", payloadSHA,
+		"--archive-format", "tar.gz",
+		"--expected-archive-sha256", strings.ToUpper(archiveSHA),
+		"--planned-by", "operator",
+		"--reason", "binary archive reviewed",
+	})
+	if err := planCmd.Execute(); err != nil {
+		t.Fatalf("execute binary archive managed-update-download-plan: %v output=%q", err, planOut.String())
+	}
+	planPath := parseOutputValue(t, planOut.String(), "managed-update-download-plan:")
+	if planPath == "" {
+		t.Fatalf("expected binary archive plan path, got %q", planOut.String())
+	}
+	for _, want := range []string{
+		"kind=binary",
+		"expected_sha256=" + payloadSHA,
+		"archive_format=tar.gz",
+		"archive_expected_sha256=" + archiveSHA,
+		"archive_expected_sha256_status=matched",
+	} {
+		if !strings.Contains(planOut.String(), want) {
+			t.Fatalf("expected binary archive plan output to contain %q, got %q", want, planOut.String())
+		}
+	}
+
+	oldDefaultClient := http.DefaultClient
+	http.DefaultClient = server.Client()
+	t.Cleanup(func() { http.DefaultClient = oldDefaultClient })
+	var executeOut bytes.Buffer
+	executeCmd := newRootCommand(&executeOut, new(bytes.Buffer))
+	executeCmd.SetArgs([]string{
+		"toolchain", "execute-managed-update-download-plan", root, planPath,
+		"--execute",
+		"--actor", "operator",
+		"--reason", "binary archive fetched",
+	})
+	if err := executeCmd.Execute(); err != nil {
+		t.Fatalf("execute binary archive managed update download plan: %v output=%q", err, executeOut.String())
+	}
+	executionPath := parseOutputValue(t, executeOut.String(), "managed-update-download-execution:")
+	payloadPath := parseOutputValue(t, executeOut.String(), "payload=")
+	archivePath := parseOutputValue(t, executeOut.String(), "archive=")
+	if executionPath == "" || payloadPath == "" || archivePath == "" {
+		t.Fatalf("expected binary archive execution, archive, and payload paths, got %q", executeOut.String())
+	}
+	for _, want := range []string{
+		"kind=binary",
+		"expected_sha256=" + payloadSHA,
+		"actual_sha256=" + payloadSHA,
+		"digest_status=matched",
+		"digest_algorithm=sha256",
+		"digest_scope=file",
+		"archive_format=tar.gz",
+		"archive_expected_sha256=" + archiveSHA,
+		"archive_actual_sha256=" + archiveSHA,
+		"archive_digest_status=matched",
+		"archive_digest_algorithm=sha256",
+		"archive_digest_scope=file",
+		"archive=" + archivePath,
+		"payload=" + payloadPath,
+	} {
+		if !strings.Contains(executeOut.String(), want) {
+			t.Fatalf("expected binary archive execution output to contain %q, got %q", want, executeOut.String())
+		}
+	}
+	info, err := os.Stat(payloadPath)
+	if err != nil || info.IsDir() {
+		t.Fatalf("expected binary archive payload file, info=%#v err=%v", info, err)
+	}
+	data, err := os.ReadFile(payloadPath)
+	if err != nil {
+		t.Fatalf("read binary archive payload: %v", err)
+	}
+	actualDigest := sha256.Sum256(data)
+	if got := hex.EncodeToString(actualDigest[:]); got != payloadSHA {
+		t.Fatalf("unexpected binary archive payload digest: got %s want %s", got, payloadSHA)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "toolchain", "bin", "httpx")); !os.IsNotExist(err) {
+		t.Fatalf("execute-managed-update-download-plan must not create final bin link, stat err=%v", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("binary archive CLI download must not execute payload, marker stat err=%v", err)
+	}
+}
+
+func TestToolchainExecuteManagedUpdateDownloadPlanCommandRequiresExplicitExecuteGate(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	releaseRoot := filepath.Join(t.TempDir(), "release")
+	writeReleaseManagedBundleFixtureForCLITest(t, releaseRoot, "httpx", "#!/bin/sh\nexit 0\n")
+	payload := []byte("verified download")
+	digest := sha256.Sum256(payload)
+	latestSHA := hex.EncodeToString(digest[:])
+	appendManagedBundleUpdateForCLITest(
+		t,
+		filepath.Join(releaseRoot, "toolchains", "managed-bundles", "httpx", "bundle.yaml"),
+		"1.4.0",
+		latestSHA,
+		"2026-06-07T00:00:00Z",
+		"download-execute-gate",
+	)
+	request, err := app.CreateManagedToolBundleUpdateRequest(root, releaseRoot, "httpx", app.ManagedToolBundleUpdateRequestOptions{Request: true})
+	if err != nil {
+		t.Fatalf("create update request: %v", err)
+	}
+	plan, err := app.CreateManagedToolBundleUpdateDownloadPlan(root, request.Path, app.ManagedToolBundleUpdateDownloadPlanOptions{
+		Plan:           true,
+		SourceURL:      "https://downloads.example.com/httpx.tar.gz",
+		ExpectedSHA256: latestSHA,
+	})
+	if err != nil {
+		t.Fatalf("create update download plan: %v", err)
+	}
+
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{"toolchain", "execute-managed-update-download-plan", root, plan.Path})
+	err = cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "requires explicit execute") {
+		t.Fatalf("expected execute gate rejection, got err=%v output=%q", err, out.String())
+	}
+	if executions, err := app.ListManagedToolBundleUpdateDownloadExecutions(root); err != nil || len(executions) != 0 {
+		t.Fatalf("missing execute gate must not write execution audits, executions=%#v err=%v", executions, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "toolchain", "managed-update-downloads")); !os.IsNotExist(err) {
+		t.Fatalf("missing execute gate must not write staged downloads, stat err=%v", err)
+	}
+}
+
+func TestToolchainApplyManagedUpdateDownloadExecutionCommandCopiesBundleAndListsAudit(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	releaseRoot := filepath.Join(t.TempDir(), "release")
+	marker := filepath.Join(t.TempDir(), "managed-update-apply-cli-payload-ran")
+	writeReleaseManagedBundleFixtureForCLITest(t, releaseRoot, "httpx", "#!/bin/sh\ntouch "+marker+"\n")
+	writeManagedBundleFixtureForCLITest(t, root, "httpx", "#!/bin/sh\nexit 0\n")
+	payload := []byte("#!/bin/sh\nexit 44\n")
+	digest := sha256.Sum256(payload)
+	latestSHA := hex.EncodeToString(digest[:])
+	appendManagedBundleUpdateForCLITest(
+		t,
+		filepath.Join(releaseRoot, "toolchains", "managed-bundles", "httpx", "bundle.yaml"),
+		"1.4.0",
+		latestSHA,
+		"2026-06-07T00:00:00Z",
+		"apply-cli",
+	)
+	request, err := app.CreateManagedToolBundleUpdateRequest(root, releaseRoot, "httpx", app.ManagedToolBundleUpdateRequestOptions{Request: true})
+	if err != nil {
+		t.Fatalf("create update request: %v", err)
+	}
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(payload)
+	}))
+	t.Cleanup(server.Close)
+	plan, err := app.CreateManagedToolBundleUpdateDownloadPlan(root, request.Path, app.ManagedToolBundleUpdateDownloadPlanOptions{
+		Plan:           true,
+		SourceURL:      server.URL,
+		ExpectedSHA256: latestSHA,
+	})
+	if err != nil {
+		t.Fatalf("create update download plan: %v", err)
+	}
+	download, err := app.ExecuteManagedToolBundleUpdateDownloadPlan(root, plan.Path, app.ManagedToolBundleUpdateDownloadExecutionOptions{
+		Execute:    true,
+		HTTPClient: server.Client(),
+		Actor:      "operator",
+		Reason:     "download before cli apply",
+	})
+	if err != nil {
+		t.Fatalf("execute update download plan: %v", err)
+	}
+
+	var missingApplyOut bytes.Buffer
+	missingApplyCmd := newRootCommand(&missingApplyOut, new(bytes.Buffer))
+	missingApplyCmd.SetArgs([]string{"toolchain", "apply-managed-update-download-execution", root, download.Path})
+	err = missingApplyCmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "requires --apply") {
+		t.Fatalf("expected apply gate rejection, got err=%v output=%q", err, missingApplyOut.String())
+	}
+	if applies, err := app.ListManagedToolBundleUpdateApplyExecutions(root); err != nil || len(applies) != 0 {
+		t.Fatalf("missing apply gate must not write audits, applies=%#v err=%v", applies, err)
+	}
+
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{
+		"toolchain", "apply-managed-update-download-execution", root, download.Path,
+		"--apply",
+		"--actor", "operator",
+		"--reason", "apply verified update",
+	})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute apply-managed-update-download-execution: %v output=%q", err, out.String())
+	}
+	applyPath := parseOutputValue(t, out.String(), "managed-update-apply-execution:")
+	if applyPath == "" {
+		t.Fatalf("expected managed update apply execution path, got %q", out.String())
+	}
+	workspacePayload := filepath.Join(root, "toolchain", "managed-bundles", "httpx", "payload", "httpx")
+	for _, want := range []string{
+		"status=completed",
+		"mode=apply",
+		"action=workspace-copy",
+		"name=httpx",
+		"kind=binary",
+		"latest_version=1.4.0",
+		"expected_sha256=" + latestSHA,
+		"actual_sha256=" + latestSHA,
+		"digest_status=matched",
+		"digest_algorithm=sha256",
+		"digest_scope=file",
+		"download_execution=" + download.Path,
+		"plan=" + plan.Path,
+		"request=" + request.Path,
+		"workspace_payload=" + workspacePayload,
+		"actor=operator",
+		"reason=apply_verified_update",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("expected apply-managed-update-download-execution output to contain %q, got %q", want, out.String())
+		}
+	}
+	appliedPayload, err := os.ReadFile(workspacePayload)
+	if err != nil {
+		t.Fatalf("read applied workspace payload: %v", err)
+	}
+	if string(appliedPayload) != string(payload) {
+		t.Fatalf("unexpected applied payload: %q", string(appliedPayload))
+	}
+	if _, err := os.Lstat(filepath.Join(root, "toolchain", "bin", "httpx")); !os.IsNotExist(err) {
+		t.Fatalf("apply-managed-update-download-execution must not create install link, stat err=%v", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("apply-managed-update-download-execution must not execute payload, marker stat err=%v", err)
+	}
+
+	var listOut bytes.Buffer
+	listCmd := newRootCommand(&listOut, new(bytes.Buffer))
+	listCmd.SetArgs([]string{"toolchain", "managed-update-apply-executions", root})
+	if err := listCmd.Execute(); err != nil {
+		t.Fatalf("execute managed-update-apply-executions list: %v", err)
+	}
+	for _, want := range []string{
+		"managed-update-apply-executions: total=1 completed=1 failed=0",
+		"managed-update-apply-execution: " + applyPath,
+		"workspace_payload=" + workspacePayload,
+	} {
+		if !strings.Contains(listOut.String(), want) {
+			t.Fatalf("expected managed-update-apply-executions output to contain %q, got %q", want, listOut.String())
+		}
+	}
+
+	var readOut bytes.Buffer
+	readCmd := newRootCommand(&readOut, new(bytes.Buffer))
+	readCmd.SetArgs([]string{"toolchain", "managed-update-apply-executions", root, filepath.Base(applyPath)})
+	if err := readCmd.Execute(); err != nil {
+		t.Fatalf("execute managed-update-apply-executions read: %v", err)
+	}
+	if !strings.Contains(readOut.String(), "managed-update-apply-execution: "+applyPath) || !strings.Contains(readOut.String(), "download_execution="+download.Path) {
+		t.Fatalf("expected managed-update-apply-executions read output to inspect artifact, got %q", readOut.String())
+	}
+}
+
+func TestToolchainManagedBundleListReportsBlockedInvalidUpdateMetadata(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	writeManagedBundleFixtureForCLITest(t, root, "httpx", "#!/bin/sh\nexit 0\n")
+	appendManagedBundleUpdateForCLITest(
+		t,
+		filepath.Join(root, "toolchain", "managed-bundles", "httpx", "bundle.yaml"),
+		"1.3.1",
+		"not-a-sha",
+		"2026-06-05T00:00:00Z",
+		"update_available",
+	)
+
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{"toolchain", "managed-bundles", root})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute managed-bundles list with invalid update metadata: %v", err)
+	}
+	for _, want := range []string{
+		"managed-bundle: name=httpx",
+		"status=blocked",
+		"update_status=blocked",
+		"error=managed_bundle_update_latest_sha256",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("expected managed-bundles blocked update output to contain %q, got %q", want, out.String())
+		}
+	}
+
+	var strictOut bytes.Buffer
+	strictCmd := newRootCommand(&strictOut, new(bytes.Buffer))
+	strictCmd.SetArgs([]string{"toolchain", "managed-bundles", root, "httpx"})
+	err := strictCmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "update latest_sha256") {
+		t.Fatalf("expected named managed-bundles strict update rejection, got %v output=%q", err, strictOut.String())
+	}
+}
+
+func TestToolchainReleaseManagedStatusCommandListsWorkspaceImportStateReadOnly(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	releaseRoot := filepath.Join(t.TempDir(), "release")
+	marker := filepath.Join(t.TempDir(), "release-managed-status-payload-ran")
+	releasePayload := writeReleaseManagedBundleFixtureForCLITest(t, releaseRoot, "httpx", "#!/bin/sh\ntouch "+marker+"\n")
+	workspaceBundle := filepath.Join(root, "toolchain", "managed-bundles", "httpx")
+	workspacePayload := filepath.Join(workspaceBundle, "payload", "httpx")
+	installPath := filepath.Join(root, "toolchain", "bin", "httpx")
+
+	var listOut bytes.Buffer
+	listCmd := newRootCommand(&listOut, new(bytes.Buffer))
+	listCmd.SetArgs([]string{"toolchain", "release-managed-status", root, releaseRoot})
+	if err := listCmd.Execute(); err != nil {
+		t.Fatalf("execute release-managed-status: %v", err)
+	}
+	for _, want := range []string{
+		"release-managed-status: name=httpx",
+		"status=available",
+		"mode=read-only",
+		"digest_status=verified",
+		"digest_algorithm=sha256",
+		"digest_scope=file",
+		"import_status=not_imported",
+		"link_status=missing",
+		"release_payload=" + releasePayload,
+		"workspace_bundle=" + workspaceBundle,
+		"workspace_payload=" + workspacePayload,
+		"install=" + installPath,
+	} {
+		if !strings.Contains(listOut.String(), want) {
+			t.Fatalf("expected release-managed-status output to contain %q, got %q", want, listOut.String())
+		}
+	}
+	if _, err := os.Lstat(workspaceBundle); !os.IsNotExist(err) {
+		t.Fatalf("release-managed-status must not copy into workspace, stat err=%v", err)
+	}
+	if _, err := os.Lstat(installPath); !os.IsNotExist(err) {
+		t.Fatalf("release-managed-status must not create install link, stat err=%v", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("release-managed-status must not execute payload, marker stat err=%v", err)
+	}
+
+	if _, err := app.ExecuteReleaseManagedToolBundleInstall(root, releaseRoot, "web-api-pack", "httpx", app.ReleaseManagedToolBundleInstallOptions{Execute: true}); err != nil {
+		t.Fatalf("execute release managed install: %v", err)
+	}
+	var readOut bytes.Buffer
+	readCmd := newRootCommand(&readOut, new(bytes.Buffer))
+	readCmd.SetArgs([]string{"toolchain", "release-managed-status", root, releaseRoot, "httpx"})
+	if err := readCmd.Execute(); err != nil {
+		t.Fatalf("execute release-managed-status read: %v", err)
+	}
+	if !strings.Contains(readOut.String(), "import_status=linked") || !strings.Contains(readOut.String(), "link_status=linked") {
+		t.Fatalf("expected linked import status after install, got %q", readOut.String())
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("release-managed-status read must not execute payload, marker stat err=%v", err)
+	}
+}
+
+func TestToolchainReleaseManagedStatusCommandReportsRuleBundleCanonicalDigestScope(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	releaseRoot := filepath.Join(t.TempDir(), "release")
+	releasePayload := writeReleaseManagedRuleBundleFixtureForCLITest(t, releaseRoot, "nuclei-templates", map[string]string{
+		"http/example.yaml": "id: ouro-cli\ninfo:\n  name: Ouro CLI\n  severity: info\n",
+	})
+	expectedSHA := digestDirectoryForCLITest(t, releasePayload)
+	workspaceBundle := filepath.Join(root, "toolchain", "managed-bundles", "nuclei-templates")
+	workspacePayload := filepath.Join(workspaceBundle, "payload")
+	installPath := filepath.Join(root, "toolchain", "rules", "nuclei-templates")
+
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{"toolchain", "release-managed-status", root, releaseRoot, "nuclei-templates", "--expected-sha256", strings.ToUpper(expectedSHA)})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute release-managed-status rule bundle: %v", err)
+	}
+	for _, want := range []string{
+		"release-managed-status: name=nuclei-templates",
+		"kind=rule_bundle",
+		"digest_status=verified",
+		"digest_algorithm=sha256",
+		"digest_scope=directory_canonical_records",
+		"expected_sha256=" + expectedSHA,
+		"expected_sha256_status=matched",
+		"corpus_status=missing",
+		"corpus_digest_status=missing",
+		"import_status=not_imported",
+		"link_status=missing",
+		"release_payload=" + releasePayload,
+		"workspace_payload=" + workspacePayload,
+		"install=" + installPath,
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("expected release-managed-status rule bundle output to contain %q, got %q", want, out.String())
+		}
+	}
+	if _, err := os.Lstat(workspaceBundle); !os.IsNotExist(err) {
+		t.Fatalf("release-managed-status rule bundle must not copy into workspace, stat err=%v", err)
+	}
+	if _, err := os.Lstat(installPath); !os.IsNotExist(err) {
+		t.Fatalf("release-managed-status rule bundle must not create install link, stat err=%v", err)
+	}
+}
+
+func TestToolchainReleaseManagedStatusCommandReportsRuleBundleCorpusMetadata(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	releaseRoot := filepath.Join(t.TempDir(), "release")
+	releasePayload := writeReleaseManagedRuleBundleFixtureForCLITest(t, releaseRoot, "nuclei-templates", map[string]string{
+		"http/example.yaml": "id: ouro-cli\ninfo:\n  name: Ouro CLI\n  severity: info\n",
+	})
+	expectedSHA := digestDirectoryForCLITest(t, releasePayload)
+	manifestPath := filepath.Join(releaseRoot, "toolchains", "managed-bundles", "nuclei-templates", "bundle.yaml")
+	appendManagedBundleCorpusForCLITest(t, manifestPath, "ouroboros.rule_corpus.v1", "nuclei-templates", "https://github.com/projectdiscovery/nuclei-templates", "2026-06-05T00:00:00Z", "1", "sha256", "directory_canonical_records", expectedSHA)
+
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{"toolchain", "release-managed-status", root, releaseRoot, "nuclei-templates"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute release-managed-status rule bundle with corpus metadata: %v", err)
+	}
+	for _, want := range []string{
+		"release-managed-status: name=nuclei-templates",
+		"corpus_status=recorded",
+		"corpus_name=nuclei-templates",
+		"corpus_source=https://github.com/projectdiscovery/nuclei-templates",
+		"corpus_retrieved_at=2026-06-05T00:00:00Z",
+		"corpus_file_count=1",
+		"corpus_sha256=" + expectedSHA,
+		"corpus_digest_status=matched",
+		"corpus_digest_algorithm=sha256",
+		"corpus_digest_scope=directory_canonical_records",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("expected release-managed-status corpus output to contain %q, got %q", want, out.String())
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(root, "toolchain", "managed-bundles", "nuclei-templates")); !os.IsNotExist(err) {
+		t.Fatalf("release-managed-status corpus read must not copy into workspace, stat err=%v", err)
+	}
+}
+
+func TestToolchainReleaseManagedStatusCommandReportsBlockedAndConflictWithoutWrites(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	releaseRoot := filepath.Join(t.TempDir(), "release")
+	writeReleaseManagedBundleFixtureForCLITest(t, releaseRoot, "httpx", "#!/bin/sh\nexit 0\n")
+	installPath := filepath.Join(root, "toolchain", "bin", "httpx")
+	if err := os.MkdirAll(filepath.Dir(installPath), 0o755); err != nil {
+		t.Fatalf("create install dir: %v", err)
+	}
+	if err := os.WriteFile(installPath, []byte("existing"), 0o755); err != nil {
+		t.Fatalf("write existing install path: %v", err)
+	}
+
+	var conflictOut bytes.Buffer
+	conflictCmd := newRootCommand(&conflictOut, new(bytes.Buffer))
+	conflictCmd.SetArgs([]string{"toolchain", "release-managed-status", root, releaseRoot})
+	if err := conflictCmd.Execute(); err != nil {
+		t.Fatalf("execute release-managed-status conflict: %v", err)
+	}
+	for _, want := range []string{"release-managed-status: name=httpx", "status=available", "import_status=conflict", "link_status=conflict", "managed_install_path_already_exists"} {
+		if !strings.Contains(conflictOut.String(), want) {
+			t.Fatalf("expected conflict output to contain %q, got %q", want, conflictOut.String())
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(root, "toolchain", "managed-bundles", "httpx")); !os.IsNotExist(err) {
+		t.Fatalf("conflict status must not copy workspace bundle, stat err=%v", err)
+	}
+	data, err := os.ReadFile(installPath)
+	if err != nil {
+		t.Fatalf("read existing install path: %v", err)
+	}
+	if string(data) != "existing" {
+		t.Fatalf("conflict status must not rewrite install path, got %q", string(data))
+	}
+
+	manifestPath := filepath.Join(releaseRoot, "toolchains", "managed-bundles", "httpx", "bundle.yaml")
+	manifest, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("read release manifest: %v", err)
+	}
+	if err := os.WriteFile(manifestPath, []byte(strings.Replace(string(manifest), "sha256: ", "sha256: 0000000000000000000000000000000000000000000000000000000000000000 # ", 1)), 0o644); err != nil {
+		t.Fatalf("corrupt release manifest: %v", err)
+	}
+	var blockedOut bytes.Buffer
+	blockedCmd := newRootCommand(&blockedOut, new(bytes.Buffer))
+	blockedCmd.SetArgs([]string{"toolchain", "release-managed-status", root, releaseRoot})
+	if err := blockedCmd.Execute(); err != nil {
+		t.Fatalf("execute release-managed-status blocked: %v", err)
+	}
+	for _, want := range []string{"release-managed-status: name=httpx", "status=blocked", "digest_status=blocked", "import_status=blocked", "sha256_mismatch"} {
+		if !strings.Contains(blockedOut.String(), want) {
+			t.Fatalf("expected blocked output to contain %q, got %q", want, blockedOut.String())
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(root, "toolchain", "managed-bundles", "httpx")); !os.IsNotExist(err) {
+		t.Fatalf("blocked status must not copy workspace bundle, stat err=%v", err)
+	}
+}
+
+func TestToolchainReleaseManagedStatusSourceCommandsSetReadAndClearMetadataOnly(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	releaseRoot := filepath.Join(t.TempDir(), "release")
+	marker := filepath.Join(t.TempDir(), "release-managed-source-payload-ran")
+	writeReleaseManagedBundleFixtureForCLITest(t, releaseRoot, "httpx", "#!/bin/sh\ntouch "+marker+"\n")
+	sourcePath := filepath.Join(root, "toolchain", "release-managed-status-source.json")
+
+	var missingSetOut bytes.Buffer
+	missingSetCmd := newRootCommand(&missingSetOut, new(bytes.Buffer))
+	missingSetCmd.SetArgs([]string{"toolchain", "release-managed-status-source-set", root, releaseRoot})
+	err := missingSetCmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "--set") {
+		t.Fatalf("expected release-managed-status-source-set to require --set, got %v output=%q", err, missingSetOut.String())
+	}
+	if _, err := os.Lstat(sourcePath); !os.IsNotExist(err) {
+		t.Fatalf("status source set without --set must not write marker, stat err=%v", err)
+	}
+
+	var setOut bytes.Buffer
+	setCmd := newRootCommand(&setOut, new(bytes.Buffer))
+	setCmd.SetArgs([]string{"toolchain", "release-managed-status-source-set", root, releaseRoot, "--set", "--set-by", "operator", "--reason", "current release"})
+	if err := setCmd.Execute(); err != nil {
+		t.Fatalf("execute release-managed-status-source-set: %v", err)
+	}
+	for _, want := range []string{
+		"release-managed-status-source: status=current",
+		"mode=metadata-only",
+		"release_root=" + releaseRoot,
+		"source=" + sourcePath,
+		"total=1",
+		"available=1",
+		"not_imported=1",
+		"set_by=operator",
+	} {
+		if !strings.Contains(setOut.String(), want) {
+			t.Fatalf("expected set output to contain %q, got %q", want, setOut.String())
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(root, "toolchain", "managed-bundles", "httpx")); !os.IsNotExist(err) {
+		t.Fatalf("status source set must not copy workspace bundle, stat err=%v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "toolchain", "bin", "httpx")); !os.IsNotExist(err) {
+		t.Fatalf("status source set must not create install link, stat err=%v", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("status source set must not execute payload, marker stat err=%v", err)
+	}
+
+	var readOut bytes.Buffer
+	readCmd := newRootCommand(&readOut, new(bytes.Buffer))
+	readCmd.SetArgs([]string{"toolchain", "release-managed-status-source", root})
+	if err := readCmd.Execute(); err != nil {
+		t.Fatalf("execute release-managed-status-source read: %v", err)
+	}
+	if !strings.Contains(readOut.String(), "release-managed-status-source: status=current") || !strings.Contains(readOut.String(), "release_root="+releaseRoot) {
+		t.Fatalf("expected read output to show current source, got %q", readOut.String())
+	}
+
+	var missingClearOut bytes.Buffer
+	missingClearCmd := newRootCommand(&missingClearOut, new(bytes.Buffer))
+	missingClearCmd.SetArgs([]string{"toolchain", "release-managed-status-source-clear", root})
+	err = missingClearCmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "--clear") {
+		t.Fatalf("expected release-managed-status-source-clear to require --clear, got %v output=%q", err, missingClearOut.String())
+	}
+
+	var clearOut bytes.Buffer
+	clearCmd := newRootCommand(&clearOut, new(bytes.Buffer))
+	clearCmd.SetArgs([]string{"toolchain", "release-managed-status-source-clear", root, "--clear", "--cleared-by", "operator", "--reason", "release archived"})
+	if err := clearCmd.Execute(); err != nil {
+		t.Fatalf("execute release-managed-status-source-clear: %v", err)
+	}
+	if !strings.Contains(clearOut.String(), "release-managed-status-source: status=cleared") || !strings.Contains(clearOut.String(), "cleared_by=operator") {
+		t.Fatalf("expected cleared source output, got %q", clearOut.String())
+	}
+}
+
+func TestToolchainReleaseManagedStatusSourceSetPersistsExpectedPinPolicy(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	releaseRoot := filepath.Join(t.TempDir(), "release")
+	marker := filepath.Join(t.TempDir(), "release-managed-source-pin-payload-ran")
+	payloadBody := "#!/bin/sh\ntouch " + marker + "\n"
+	writeReleaseManagedBundleFixtureForCLITest(t, releaseRoot, "httpx", payloadBody)
+	actualDigest := sha256.Sum256([]byte(payloadBody))
+	actualSHA := hex.EncodeToString(actualDigest[:])
+	wrongDigest := sha256.Sum256([]byte("different release payload"))
+	wrongSHA := hex.EncodeToString(wrongDigest[:])
+	sourcePath := filepath.Join(root, "toolchain", "release-managed-status-source.json")
+
+	var missingBundleOut bytes.Buffer
+	missingBundleCmd := newRootCommand(&missingBundleOut, new(bytes.Buffer))
+	missingBundleCmd.SetArgs([]string{"toolchain", "release-managed-status-source-set", root, releaseRoot, "--set", "--expected-sha256", actualSHA})
+	err := missingBundleCmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "--pin-bundle") {
+		t.Fatalf("expected expected-sha256 without pin-bundle rejection, got %v output=%q", err, missingBundleOut.String())
+	}
+	if _, err := os.Lstat(sourcePath); !os.IsNotExist(err) {
+		t.Fatalf("status source pin validation failure must not write marker, stat err=%v", err)
+	}
+
+	var missingSHAOut bytes.Buffer
+	missingSHACmd := newRootCommand(&missingSHAOut, new(bytes.Buffer))
+	missingSHACmd.SetArgs([]string{"toolchain", "release-managed-status-source-set", root, releaseRoot, "--set", "--pin-bundle", "httpx"})
+	err = missingSHACmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "--expected-sha256") {
+		t.Fatalf("expected pin-bundle without expected-sha256 rejection, got %v output=%q", err, missingSHAOut.String())
+	}
+	if _, err := os.Lstat(sourcePath); !os.IsNotExist(err) {
+		t.Fatalf("status source pin validation failure must not write marker, stat err=%v", err)
+	}
+
+	var setOut bytes.Buffer
+	setCmd := newRootCommand(&setOut, new(bytes.Buffer))
+	setCmd.SetArgs([]string{
+		"toolchain", "release-managed-status-source-set", root, releaseRoot,
+		"--set",
+		"--pin-bundle", "httpx",
+		"--expected-sha256", strings.ToUpper(actualSHA),
+		"--set-by", "operator",
+		"--reason", "pinned release",
+	})
+	if err := setCmd.Execute(); err != nil {
+		t.Fatalf("execute release-managed-status-source-set with expected pin: %v", err)
+	}
+	for _, want := range []string{
+		"release-managed-status-source: status=current",
+		"expected_sha256_bundle=httpx",
+		"expected_sha256=" + actualSHA,
+		"expected_sha256_status=matched",
+		"available=1",
+		"not_imported=1",
+	} {
+		if !strings.Contains(setOut.String(), want) {
+			t.Fatalf("expected pinned source set output to contain %q, got %q", want, setOut.String())
+		}
+	}
+
+	var readOut bytes.Buffer
+	readCmd := newRootCommand(&readOut, new(bytes.Buffer))
+	readCmd.SetArgs([]string{"toolchain", "release-managed-status-source", root})
+	if err := readCmd.Execute(); err != nil {
+		t.Fatalf("execute release-managed-status-source read with expected pin: %v", err)
+	}
+	for _, want := range []string{
+		"expected_sha256_bundle=httpx",
+		"expected_sha256=" + actualSHA,
+		"expected_sha256_status=matched",
+	} {
+		if !strings.Contains(readOut.String(), want) {
+			t.Fatalf("expected pinned source read output to contain %q, got %q", want, readOut.String())
+		}
+	}
+
+	var mismatchOut bytes.Buffer
+	mismatchCmd := newRootCommand(&mismatchOut, new(bytes.Buffer))
+	mismatchCmd.SetArgs([]string{
+		"toolchain", "release-managed-status-source-set", root, releaseRoot,
+		"--set",
+		"--pin-bundle", "httpx",
+		"--expected-sha256", wrongSHA,
+		"--set-by", "operator",
+		"--reason", "rejected release",
+	})
+	if err := mismatchCmd.Execute(); err != nil {
+		t.Fatalf("execute release-managed-status-source-set with mismatched expected pin: %v", err)
+	}
+	for _, want := range []string{
+		"expected_sha256_bundle=httpx",
+		"expected_sha256=" + wrongSHA,
+		"expected_sha256_status=mismatch",
+		"available=0",
+		"blocked=1",
+		"not_imported=0",
+	} {
+		if !strings.Contains(mismatchOut.String(), want) {
+			t.Fatalf("expected mismatched pinned source output to contain %q, got %q", want, mismatchOut.String())
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(root, "toolchain", "managed-bundles", "httpx")); !os.IsNotExist(err) {
+		t.Fatalf("status source pin set must not copy workspace bundle, stat err=%v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "toolchain", "bin", "httpx")); !os.IsNotExist(err) {
+		t.Fatalf("status source pin set must not create install link, stat err=%v", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("status source pin set must not execute payload, marker stat err=%v", err)
+	}
+}
+
 func writeManagedBundleFixtureForCLITest(t *testing.T, root string, name string, payloadBody string) string {
 	t.Helper()
 	bundleDir := filepath.Join(root, "toolchain", "managed-bundles", name)
@@ -9287,6 +13578,127 @@ sha256: ` + hex.EncodeToString(digest[:]) + `
 	return payloadPath
 }
 
+func writeManagedRuleBundleImportFixtureForCLITest(t *testing.T, root string, files map[string]string) string {
+	t.Helper()
+	payloadDir := filepath.Join(root, "nuclei-templates")
+	for rel, body := range files {
+		path := filepath.Join(payloadDir, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("create rule bundle payload dir: %v", err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatalf("write rule bundle payload: %v", err)
+		}
+	}
+	return payloadDir
+}
+
+func digestDirectoryForCLITest(t *testing.T, dir string) string {
+	t.Helper()
+	paths := directoryDigestPathsForCLITest(t, dir)
+	hash := sha256.New()
+	hash.Write([]byte("ouroboros managed rule_bundle directory digest v1\n"))
+	for _, rel := range paths {
+		data, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(rel)))
+		if err != nil {
+			t.Fatalf("read canonical digest file: %v", err)
+		}
+		var field [8]byte
+		relBytes := []byte(rel)
+		binary.BigEndian.PutUint64(field[:], uint64(len(relBytes)))
+		hash.Write(field[:])
+		hash.Write(relBytes)
+		binary.BigEndian.PutUint64(field[:], uint64(len(data)))
+		hash.Write(field[:])
+		digest := sha256.Sum256(data)
+		hash.Write(digest[:])
+	}
+	return hex.EncodeToString(hash.Sum(nil))
+}
+
+func directoryDigestPathsForCLITest(t *testing.T, dir string) []string {
+	t.Helper()
+	paths := []string{}
+	if err := filepath.WalkDir(dir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		paths = append(paths, filepath.ToSlash(rel))
+		return nil
+	}); err != nil {
+		t.Fatalf("walk digest directory: %v", err)
+	}
+	sort.Strings(paths)
+	return paths
+}
+
+func tarGzipRuleBundleArchiveForCLITest(t *testing.T, files map[string]string) []byte {
+	t.Helper()
+	paths := make([]string, 0, len(files))
+	for rel := range files {
+		paths = append(paths, filepath.ToSlash(rel))
+	}
+	sort.Strings(paths)
+
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	for _, rel := range paths {
+		body := []byte(files[rel])
+		if err := tw.WriteHeader(&tar.Header{
+			Name: rel,
+			Mode: 0o644,
+			Size: int64(len(body)),
+		}); err != nil {
+			t.Fatalf("write tar rule bundle header: %v", err)
+		}
+		if _, err := tw.Write(body); err != nil {
+			t.Fatalf("write tar rule bundle body: %v", err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar rule bundle archive: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("close gzip rule bundle archive: %v", err)
+	}
+	return buf.Bytes()
+}
+
+func zipRuleBundleArchiveForCLITest(t *testing.T, files map[string]string) []byte {
+	t.Helper()
+	paths := make([]string, 0, len(files))
+	for rel := range files {
+		paths = append(paths, filepath.ToSlash(rel))
+	}
+	sort.Strings(paths)
+
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for _, rel := range paths {
+		header := &zip.FileHeader{Name: rel, Method: zip.Deflate}
+		header.SetMode(0o777)
+		writer, err := zw.CreateHeader(header)
+		if err != nil {
+			t.Fatalf("write zip rule bundle header: %v", err)
+		}
+		if _, err := writer.Write([]byte(files[rel])); err != nil {
+			t.Fatalf("write zip rule bundle body: %v", err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("close zip rule bundle archive: %v", err)
+	}
+	return buf.Bytes()
+}
+
 func writeReleaseManagedBundleFixtureForCLITest(t *testing.T, releaseRoot string, name string, payloadBody string) string {
 	t.Helper()
 	bundleDir := filepath.Join(releaseRoot, "toolchains", "managed-bundles", name)
@@ -9310,6 +13722,106 @@ sha256: ` + hex.EncodeToString(digest[:]) + `
 		t.Fatalf("write release bundle manifest: %v", err)
 	}
 	return payloadPath
+}
+
+func appendManagedBundleProvenanceForCLITest(t *testing.T, manifestPath, sourceURL, upstreamVersion, retrievedAt, verifiedBy string) {
+	t.Helper()
+	f, err := os.OpenFile(manifestPath, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("open bundle manifest for provenance append: %v", err)
+	}
+	defer f.Close()
+	if _, err := fmt.Fprintf(f, "provenance:\n  source_url: %q\n  upstream_version: %q\n  retrieved_at: %q\n  verified_by: %q\n", sourceURL, upstreamVersion, retrievedAt, verifiedBy); err != nil {
+		t.Fatalf("append bundle provenance: %v", err)
+	}
+}
+
+func appendManagedBundleCorpusForCLITest(t *testing.T, manifestPath, schema, name, source, retrievedAt, fileCount, digestAlgorithm, digestScope, sha256 string) {
+	t.Helper()
+	f, err := os.OpenFile(manifestPath, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("open bundle manifest for corpus append: %v", err)
+	}
+	defer f.Close()
+	if _, err := fmt.Fprintf(
+		f,
+		"corpus:\n  schema: %q\n  name: %q\n  source: %q\n  retrieved_at: %q\n  file_count: %s\n  digest_algorithm: %q\n  digest_scope: %q\n  sha256: %q\n",
+		schema,
+		name,
+		source,
+		retrievedAt,
+		fileCount,
+		digestAlgorithm,
+		digestScope,
+		sha256,
+	); err != nil {
+		t.Fatalf("append bundle corpus metadata: %v", err)
+	}
+}
+
+func appendManagedBundleUpdateForCLITest(t *testing.T, manifestPath, latestVersion, latestSHA256, checkedAt, message string) {
+	t.Helper()
+	f, err := os.OpenFile(manifestPath, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("open bundle manifest for update append: %v", err)
+	}
+	defer f.Close()
+	if _, err := fmt.Fprintf(f, "update:\n  latest_version: %q\n  latest_sha256: %q\n  checked_at: %q\n  message: %q\n", latestVersion, latestSHA256, checkedAt, message); err != nil {
+		t.Fatalf("append bundle update metadata: %v", err)
+	}
+}
+
+func appendManagedBundleSignatureForCLITest(t *testing.T, manifestPath, keyID, signedAt, signedBy, name, kind, version, payloadSHA256 string) {
+	t.Helper()
+	seed := sha256.Sum256([]byte("ouro cli managed bundle signature key"))
+	privateKey := ed25519.NewKeyFromSeed(seed[:])
+	publicKey := privateKey.Public().(ed25519.PublicKey)
+	message := []byte("ouroboros-managed-bundle-signature-v1\nname:" + name + "\nkind:" + kind + "\nversion:" + version + "\npayload_sha256:" + payloadSHA256 + "\n")
+	signature := ed25519.Sign(privateKey, message)
+	f, err := os.OpenFile(manifestPath, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("open bundle manifest for signature append: %v", err)
+	}
+	defer f.Close()
+	if _, err := fmt.Fprintf(
+		f,
+		"signature:\n  algorithm: ed25519\n  key_id: %q\n  public_key: %q\n  payload_sha256: %q\n  signature: %q\n  signed_at: %q\n  signed_by: %q\n",
+		keyID,
+		base64.RawStdEncoding.EncodeToString(publicKey),
+		payloadSHA256,
+		base64.RawStdEncoding.EncodeToString(signature),
+		signedAt,
+		signedBy,
+	); err != nil {
+		t.Fatalf("append bundle signature metadata: %v", err)
+	}
+}
+
+func writeReleaseManagedRuleBundleFixtureForCLITest(t *testing.T, releaseRoot string, name string, files map[string]string) string {
+	t.Helper()
+	bundleDir := filepath.Join(releaseRoot, "toolchains", "managed-bundles", name)
+	payloadDir := filepath.Join(bundleDir, "payload")
+	for rel, body := range files {
+		path := filepath.Join(payloadDir, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("create release rule bundle payload dir: %v", err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatalf("write release rule bundle payload: %v", err)
+		}
+	}
+	digest := digestDirectoryForCLITest(t, payloadDir)
+	manifest := `name: ` + name + `
+kind: rule_bundle
+version: "2026.06.05"
+source: projectdiscovery/` + name + `
+payload: payload
+sha256: ` + digest + `
+`
+	if err := os.WriteFile(filepath.Join(bundleDir, "bundle.yaml"), []byte(manifest), 0o644); err != nil {
+		t.Fatalf("write release rule bundle manifest: %v", err)
+	}
+	return payloadDir
 }
 
 func validAuthoredToolSpecYAMLForCLITest() string {
@@ -9793,6 +14305,7 @@ func TestToolchainExecuteCompilePreviewReviewCommandRequiresExecuteFlag(t *testi
 
 func TestToolchainExecuteCompilePreviewReviewCommandRunsWithExecuteFlag(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
+	skipIfWindows(t)
 	if err := app.InitWorkspace(root); err != nil {
 		t.Fatalf("init workspace: %v", err)
 	}
@@ -9833,6 +14346,141 @@ func TestToolchainExecuteCompilePreviewReviewCommandRunsWithExecuteFlag(t *testi
 	}
 	if data, err := os.ReadFile(marker); err != nil || strings.TrimSpace(string(data)) != "cli-executed" {
 		t.Fatalf("expected compile preview review command to run, data=%q err=%v", data, err)
+	}
+}
+
+func TestToolchainCompilePreviewReviewExecutionDispatchCommandWritesAndListsMetadataOnlyArtifact(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	marker := filepath.Join(t.TempDir(), "compile-preview-review-execution-ran")
+	reviewPath := writeExecutableCompilePreviewReviewCommandFixture(t, root, marker)
+
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{
+		"toolchain", "compile-preview-review-execution-dispatch", root, filepath.Base(reviewPath),
+		"--actor", "alice",
+		"--reason", "reviewed before execution",
+	})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute compile-preview-review-execution-dispatch: %v output=%q", err, out.String())
+	}
+	output := out.String()
+	for _, want := range []string{
+		"compile-preview-review-execution-dispatch:",
+		"status=dry-run",
+		"mode=metadata-only",
+		"review=" + reviewPath,
+		"selection=" + filepath.Join(root, "toolchain", "compile-preview-review-selection.json"),
+		"action=discover_assets",
+		"nodes=1",
+		"actor=alice",
+		"reason=reviewed before execution",
+		"artifact:",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("expected dispatch output to contain %q, got %q", want, output)
+		}
+	}
+	dispatchPath := parseOutputValue(t, output, "artifact:")
+	if _, err := os.Stat(dispatchPath); err != nil {
+		t.Fatalf("expected compile preview review execution dispatch artifact: %v", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("dispatch creation must not run command, marker stat err=%v", err)
+	}
+	if got := countCLIJSON(t, filepath.Join(root, "toolchain", "compile-preview-review-executions")); got != 0 {
+		t.Fatalf("dispatch creation must not write execution artifacts, got %d", got)
+	}
+
+	var listOut bytes.Buffer
+	listCmd := newRootCommand(&listOut, new(bytes.Buffer))
+	listCmd.SetArgs([]string{"toolchain", "compile-preview-review-execution-dispatches", root})
+	if err := listCmd.Execute(); err != nil {
+		t.Fatalf("execute compile-preview-review-execution-dispatches list: %v", err)
+	}
+	for _, want := range []string{
+		"compile-preview-review-execution-dispatches: total=1",
+		"compile-preview-review-execution-dispatch-artifact: " + dispatchPath,
+		"status=dry-run",
+		"mode=metadata-only",
+		"review=" + reviewPath,
+		"actor=alice",
+	} {
+		if !strings.Contains(listOut.String(), want) {
+			t.Fatalf("expected dispatch list output to contain %q, got %q", want, listOut.String())
+		}
+	}
+
+	var readOut bytes.Buffer
+	readCmd := newRootCommand(&readOut, new(bytes.Buffer))
+	readCmd.SetArgs([]string{"toolchain", "compile-preview-review-execution-dispatches", root, filepath.Base(dispatchPath)})
+	if err := readCmd.Execute(); err != nil {
+		t.Fatalf("execute compile-preview-review-execution-dispatches read: %v", err)
+	}
+	if !strings.Contains(readOut.String(), "compile-preview-review-execution-dispatch-artifact: "+dispatchPath) ||
+		!strings.Contains(readOut.String(), "selection="+filepath.Join(root, "toolchain", "compile-preview-review-selection.json")) {
+		t.Fatalf("expected inspected compile preview review execution dispatch, got %q", readOut.String())
+	}
+}
+
+func TestToolchainExecuteCompilePreviewReviewExecutionDispatchCommandRunsWithExecuteFlag(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	skipIfWindows(t)
+	if err := app.InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	marker := filepath.Join(t.TempDir(), "compile-preview-review-execution-dispatch-ran")
+	reviewPath := writeExecutableCompilePreviewReviewCommandFixture(t, root, marker)
+	dispatch, err := app.CreateToolCompilePreviewReviewExecutionDispatch(root, filepath.Base(reviewPath), app.ToolCompilePreviewReviewExecutionDispatchOptions{
+		Actor:  "alice",
+		Reason: "dispatch reviewed",
+	})
+	if err != nil {
+		t.Fatalf("create dispatch fixture: %v", err)
+	}
+
+	var out bytes.Buffer
+	cmd := newRootCommand(&out, new(bytes.Buffer))
+	cmd.SetArgs([]string{
+		"toolchain", "execute-compile-preview-review-execution-dispatch", root, filepath.Base(dispatch.Path),
+		"--execute",
+		"--actor", "bob",
+		"--reason", "approved dispatch execution",
+	})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute compile preview review execution dispatch: %v output=%q", err, out.String())
+	}
+	output := out.String()
+	for _, want := range []string{
+		"compile-preview-review-execution:",
+		"status=completed",
+		"mode=execute",
+		"dispatch=" + dispatch.Path,
+		"review=" + reviewPath,
+		"action=discover_assets",
+		"nodes=1",
+		"events=",
+		"actor=bob",
+		"reason=approved dispatch execution",
+		"artifact:",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("expected dispatch execute output to contain %q, got %q", want, output)
+		}
+	}
+	if data, err := os.ReadFile(marker); err != nil || strings.TrimSpace(string(data)) != "cli-executed" {
+		t.Fatalf("expected dispatch execution command to run, data=%q err=%v", data, err)
+	}
+	executionPath := parseOutputValue(t, output, "artifact:")
+	execution, err := app.ReadToolCompilePreviewReviewExecution(root, filepath.Base(executionPath))
+	if err != nil {
+		t.Fatalf("read dispatch execution artifact: %v", err)
+	}
+	if execution.DispatchPath != dispatch.Path {
+		t.Fatalf("expected execution to link dispatch path, got %#v", execution)
 	}
 }
 
@@ -10400,6 +15048,7 @@ dependencies:
 
 func TestToolchainInstallPlanCommandPrintsMetadataOnlySteps(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
+	skipIfWindows(t)
 	if err := app.InitWorkspace(root); err != nil {
 		t.Fatalf("init workspace: %v", err)
 	}
@@ -10502,6 +15151,7 @@ dependencies:
 
 func TestToolchainInstallRequestCommandWritesPendingRequest(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
+	skipIfWindows(t)
 	if err := app.InitWorkspace(root); err != nil {
 		t.Fatalf("init workspace: %v", err)
 	}
@@ -10555,6 +15205,7 @@ dependencies:
 
 func TestToolchainInstallRequestsCommandListsPendingRequests(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
+	skipIfWindows(t)
 	if err := app.InitWorkspace(root); err != nil {
 		t.Fatalf("init workspace: %v", err)
 	}
@@ -11123,6 +15774,7 @@ dependencies:
 
 func TestToolchainExecuteInstallDispatchCommandRequiresExecuteFlag(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
+	skipIfWindows(t)
 	if err := app.InitWorkspace(root); err != nil {
 		t.Fatalf("init workspace: %v", err)
 	}
@@ -11171,6 +15823,7 @@ dependencies:
 
 func TestToolchainExecuteInstallDispatchCommandRunsWithExecuteFlag(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
+	skipIfWindows(t)
 	if err := app.InitWorkspace(root); err != nil {
 		t.Fatalf("init workspace: %v", err)
 	}
@@ -11245,6 +15898,7 @@ dependencies:
 
 func TestToolchainExecuteInstallDispatchCommandPrintsSafetyWarnings(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
+	skipIfWindows(t)
 	if err := app.InitWorkspace(root); err != nil {
 		t.Fatalf("init workspace: %v", err)
 	}
@@ -11610,6 +16264,7 @@ func TestToolchainExecuteInstallRetryDispatchCommandRequiresExecuteFlag(t *testi
 
 func TestToolchainExecuteInstallRetryDispatchCommandRunsWithExecuteFlag(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
+	skipIfWindows(t)
 	if err := app.InitWorkspace(root); err != nil {
 		t.Fatalf("init workspace: %v", err)
 	}
@@ -11724,6 +16379,7 @@ func TestToolchainInstallRetryExecutionsCommandListsAuditArtifacts(t *testing.T)
 
 func TestToolchainInstallOrchestrateCommandWritesMetadataOnlyArtifact(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
+	skipIfWindows(t)
 	if err := app.InitWorkspace(root); err != nil {
 		t.Fatalf("init workspace: %v", err)
 	}
@@ -11767,6 +16423,7 @@ func TestToolchainInstallOrchestrateCommandWritesMetadataOnlyArtifact(t *testing
 
 func TestToolchainInstallOrchestrateCommandExecuteRunsApprovedDispatch(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
+	skipIfWindows(t)
 	if err := app.InitWorkspace(root); err != nil {
 		t.Fatalf("init workspace: %v", err)
 	}
@@ -11805,6 +16462,7 @@ func TestToolchainInstallOrchestrateCommandExecuteRunsApprovedDispatch(t *testin
 
 func TestToolchainInstallOrchestrationsCommandListsAndInspectsArtifacts(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
+	skipIfWindows(t)
 	if err := app.InitWorkspace(root); err != nil {
 		t.Fatalf("init workspace: %v", err)
 	}
@@ -17498,6 +22156,7 @@ func TestRuntimeWorkerTransportServeHTTPCommandPersistsOneRequest(t *testing.T) 
 
 func TestRuntimeWorkerTransportServeHTTPCommandRequiresCurrentSafetyAuthorizationBeforePersistingRequest(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
+	skipIfWindows(t)
 	if err := app.InitWorkspace(root); err != nil {
 		t.Fatalf("init workspace: %v", err)
 	}
@@ -18127,6 +22786,7 @@ func TestRuntimeWorkerTransportDaemonControlCommandWritesAndListsRequests(t *tes
 
 func TestRuntimeWorkerTransportDaemonControlCommandRequiresCurrentSafetyAuthorizationBeforeWriting(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
+	skipIfWindows(t)
 	if err := app.InitWorkspace(root); err != nil {
 		t.Fatalf("init workspace: %v", err)
 	}
@@ -19600,6 +24260,7 @@ dependencies:
 
 func TestToolchainHealthCommandShowsContainerImageDigestMismatch(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "workspace")
+	skipIfWindows(t)
 	if err := app.InitWorkspace(root); err != nil {
 		t.Fatalf("init workspace: %v", err)
 	}

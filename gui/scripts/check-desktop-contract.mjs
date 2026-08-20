@@ -1,8 +1,9 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const root = new URL('..', import.meta.url).pathname;
-const repoRoot = new URL('../..', import.meta.url).pathname;
+const root = fileURLToPath(new URL('..', import.meta.url));
+const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
 let failed = false;
 
 for (const file of ['src/main/main.js', 'src/main/env.js', 'src/main/preload.js', 'src/main/backend.js', 'src/main/workspace.js', 'src/main/desktop-state.js', 'scripts/package-desktop.mjs']) {

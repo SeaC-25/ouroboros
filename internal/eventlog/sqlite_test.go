@@ -3,6 +3,7 @@ package eventlog
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -103,6 +104,51 @@ func TestSQLiteStoreEnablesWALMode(t *testing.T) {
 	}
 }
 
+func TestOpenSQLiteReadOnlyListsRunIDsWithoutWALSidecars(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "events.db")
+	store, err := OpenSQLite(path)
+	if err != nil {
+		t.Fatalf("open sqlite store: %v", err)
+	}
+	if _, err := store.Append(ctx, Event{RunID: "run-a", Type: EventGoal, Payload: json.RawMessage(`{"goal":"a"}`)}); err != nil {
+		t.Fatalf("append run-a: %v", err)
+	}
+	if _, err := store.Append(ctx, Event{RunID: "run-b", Type: EventGoal, Payload: json.RawMessage(`{"goal":"b"}`)}); err != nil {
+		t.Fatalf("append run-b: %v", err)
+	}
+	if _, err := store.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+		t.Fatalf("checkpoint wal: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close writable store: %v", err)
+	}
+	removeSQLiteSidecarIfExists(t, path+"-wal")
+	removeSQLiteSidecarIfExists(t, path+"-shm")
+
+	readOnly, err := OpenSQLiteReadOnly(path)
+	if err != nil {
+		t.Fatalf("open read-only sqlite store: %v", err)
+	}
+	defer readOnly.Close()
+	runIDs, err := readOnly.ListRunIDs(ctx)
+	if err != nil {
+		t.Fatalf("list run ids read-only: %v", err)
+	}
+	if len(runIDs) != 2 || runIDs[0] != "run-a" || runIDs[1] != "run-b" {
+		t.Fatalf("unexpected read-only run ids: %#v", runIDs)
+	}
+	if _, err := readOnly.Append(ctx, Event{RunID: "run-c", Type: EventGoal, Payload: json.RawMessage(`{"goal":"c"}`)}); err == nil {
+		t.Fatalf("read-only sqlite store must reject appends")
+	}
+	if _, err := os.Stat(path + "-wal"); !os.IsNotExist(err) {
+		t.Fatalf("read-only sqlite open must not create wal sidecar, stat err=%v", err)
+	}
+	if _, err := os.Stat(path + "-shm"); !os.IsNotExist(err) {
+		t.Fatalf("read-only sqlite open must not create shm sidecar, stat err=%v", err)
+	}
+}
+
 func TestEventTypesAreDeclared(t *testing.T) {
 	types := []EventType{
 		EventGoal,
@@ -121,6 +167,13 @@ func TestEventTypesAreDeclared(t *testing.T) {
 		if eventType == "" {
 			t.Fatalf("event type must not be empty")
 		}
+	}
+}
+
+func removeSQLiteSidecarIfExists(t *testing.T, path string) {
+	t.Helper()
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("remove sqlite sidecar %s: %v", path, err)
 	}
 }
 

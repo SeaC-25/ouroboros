@@ -527,7 +527,7 @@ func TestRenewRuntimeWorkerQueueClaimExtendsClaimedArtifact(t *testing.T) {
 	if renewed.RenewedBy != "operator" || renewed.RenewReason != "keep active worker assignment alive" {
 		t.Fatalf("expected renewal audit metadata, got %#v", renewed)
 	}
-	if renewed.LeaseSeconds != int64((10 * time.Minute) / time.Second) {
+	if renewed.LeaseSeconds != int64((10*time.Minute)/time.Second) {
 		t.Fatalf("expected updated lease seconds, got %#v", renewed)
 	}
 	if renewed.ExpiresAt != now.Add(12*time.Minute).Format(time.RFC3339Nano) {

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -56,6 +57,113 @@ func TestModelWithReplaySnapshotUpdatesGraphAndRuntimeTabs(t *testing.T) {
 	timelineRows := model.graphStack.RuntimeTabs.Select(RuntimeTabTimelineLanes).ActiveRows()
 	if !containsRow(timelineRows, "mission: 1") || !containsRow(timelineRows, "blackboard: 3") {
 		t.Fatalf("timeline rows not projected: %#v", timelineRows)
+	}
+}
+
+func TestModelWithReplaySnapshotShowsProviderGenerationRows(t *testing.T) {
+	snapshot, err := eventlog.BuildReplaySnapshot([]eventlog.Event{
+		{
+			ID:    1,
+			RunID: "run-model-generation",
+			Type:  eventlog.EventVerification,
+			Payload: mustReplayProjectionJSON(map[string]any{
+				"kind":                     "model_generation",
+				"source":                   "closed-loop-planner-generation",
+				"agent_id":                 "closed-loop-planner",
+				"role":                     "planner",
+				"status":                   "completed",
+				"execution_mode":           "provider-generation",
+				"budget_status":            "within_limit",
+				"ledger_write":             true,
+				"assistant_text_persisted": false,
+				"streaming":                true,
+				"stream_completed":         true,
+				"stream_chunk_count":       3,
+				"stream_digest":            "sha256:stream-generation",
+				"stream_preview":           "Provider generation streamed the first attack hypothesis.",
+				"text_digest":              "sha256:planner-generation",
+				"text_preview":             "Provider generation selected the first attack hypothesis.",
+				"model_usage": map[string]any{
+					"run_id":        "run-model-generation",
+					"agent_id":      "closed-loop-planner",
+					"role":          "planner",
+					"provider":      "openai",
+					"model":         "gpt-provider",
+					"input_tokens":  321,
+					"output_tokens": 45,
+					"cost":          0.019,
+					"latency_ms":    1450,
+				},
+			}),
+			CreatedAt: time.Date(2026, 6, 4, 15, 40, 0, 0, time.UTC),
+		},
+	})
+	if err != nil {
+		t.Fatalf("build replay snapshot: %v", err)
+	}
+
+	model := NewModel().WithReplaySnapshot(snapshot)
+	rows := model.graphStack.RuntimeTabs.Select(RuntimeTabModelRuntime).ActiveRows()
+
+	for _, want := range []string{
+		"tokens: 321 in / 45 out",
+		"run model generation: source=closed-loop-planner-generation",
+		"provider=openai model=gpt-provider tokens=321/45",
+		"budget=within_limit ledger_write=true mode=provider-generation status=completed",
+		"assistant_text_persisted=false",
+		"streaming=true stream_completed=true stream_chunk_count=3 stream_digest=sha256:stream-generation",
+		"stream_preview=Provider generation streamed the first attack hypothesis.",
+		"digest=sha256:planner-generation",
+		"preview=Provider generation selected the first attack hypothesis.",
+	} {
+		if !containsRow(rows, want) {
+			t.Fatalf("expected provider generation row %q, got %#v", want, rows)
+		}
+	}
+}
+
+func TestModelWithReplaySnapshotShowsToolPlanPreviewRows(t *testing.T) {
+	artifactPath := "/tmp/ouro/model tool-plan preview\tmode=execute validity=invalid"
+	previewText := "Plan previews path=/tmp/ouro/evil.json mode=process validity=invalid"
+	snapshot := eventlog.ReplaySnapshot{
+		Status: eventlog.ReplayStatus{
+			Model: "gpt-tool-plan",
+		},
+		ModelUsagePreviews: []eventlog.ReplayModelUsagePreview{
+			{
+				Kind:          "model_tool_plan_preview",
+				Source:        "closed-loop-planner-tool-plan",
+				AgentID:       "closed-loop-planner",
+				Role:          "planner",
+				Provider:      "local-openai",
+				Model:         "gpt-plan",
+				Status:        "valid",
+				ExecutionMode: "metadata-only",
+				ArtifactPath:  artifactPath,
+				TextDigest:    "sha256:tool-plan-preview",
+				TextPreview:   previewText,
+				InputTokens:   512,
+				OutputTokens:  64,
+				Cost:          0.000321,
+			},
+		},
+	}
+
+	model := NewModel().WithReplaySnapshot(snapshot)
+	rows := model.graphStack.RuntimeTabs.Select(RuntimeTabModelRuntime).ActiveRows()
+
+	for _, want := range []string{
+		"model tool plan preview: source=closed-loop-planner-tool-plan agent=closed-loop-planner role=planner",
+		"provider=local-openai model=gpt-plan tokens=512/64 cost=$0.000321",
+		"action=unknown validity=valid mode=metadata-only",
+		"path=" + runtimeRowText(artifactPath) + " path_b64=" + base64.RawURLEncoding.EncodeToString([]byte(artifactPath)),
+		"digest=sha256:tool-plan-preview",
+		"preview=" + runtimeRowText(previewText),
+		"preview_b64=" + base64.RawURLEncoding.EncodeToString([]byte(previewText)),
+	} {
+		if !containsRow(rows, want) {
+			t.Fatalf("expected tool plan preview row %q, got %#v", want, rows)
+		}
 	}
 }
 

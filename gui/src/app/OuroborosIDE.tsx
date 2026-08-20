@@ -25,8 +25,8 @@ import {
 import type { LucideIcon } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import type { KeyboardEvent } from 'react';
-import { closeDesktopWindow, connectIDEEventStream, createDesktopWorkspace, exportEvidenceGraph, exportReport, fetchAIActions, fetchAIChat, loadDesktopStatus, loadExecutionArtifacts, loadExecutionLogs, loadIDEData, loadWorkspaceFile, minimizeDesktopWindow, onDesktopBackendStatus, onDesktopMenuAction, openRecentDesktopWorkspace, restartDesktopBackend, retryExecution, runAIAction, runToolchainAction, saveMission, saveProviderConfig, saveToolchainPack, saveWorkspaceFile, saveWorkspaceSettings, searchWorkspace, selectDesktopWorkspace, sendAIChatMessage, startExecution, startMission, stopExecution, toggleMaximizeDesktopWindow } from './api';
-import type { AgentTask, AIAction, AIActionRunRequest, AIActionRunResponse, BlackboardItem, ChatActionResult, ChatMessage, DesktopStatus, ExecutionArtifact, ExecutionLog, ExecutionStep, GraphEdge, GraphNode, HarnessCase, IDEData, IDEEvent, IDEMode, MissionState, OrchestratorRun, ProviderSettings, ReplayEvent, ReportDocument, ReportFinding, Severity, ToolAction, ToolchainPackSettings, WorkspaceFileContent, WorkspaceItem, WorkspaceSearchResult, WorkspaceSettings } from './types';
+import { closeDesktopWindow, connectIDEEventStream, createDesktopWorkspace, exportEvidenceGraph, exportReport, fetchAIActions, fetchAIBlackboard, fetchAIAgents, fetchAIHarnessCases, fetchAIHarnessResults, fetchAIChat, fetchAIPrompts, loadDesktopStatus, loadExecutionArtifacts, loadExecutionLogs, loadIDEData, loadWorkspaceFile, minimizeDesktopWindow, onDesktopBackendStatus, onDesktopMenuAction, openRecentDesktopWorkspace, restartDesktopBackend, retryExecution, runAIAction, runToolchainAction, saveMission, saveProviderConfig, saveToolchainPack, saveWorkspaceFile, saveWorkspaceSettings, searchWorkspace, selectDesktopWorkspace, sendAIChatMessage, startExecution, startMission, stopExecution, toggleMaximizeDesktopWindow } from './api';
+import type { AgentTask, AIAction, AIActionRunRequest, AIActionRunResponse, BlackboardItem, ChatActionResult, ChatMessage, DesktopStatus, ExecutionArtifact, ExecutionLog, ExecutionStep, GraphEdge, GraphNode, HarnessCase, HarnessRun, IDEData, IDEEvent, IDEMode, MissionState, OrchestratorRun, PromptRecord, ProviderSettings, ReplayEvent, ReportDocument, ReportFinding, Severity, SwarmWorkflowRun, ToolAction, ToolchainPackSettings, WorkspaceFileContent, WorkspaceItem, WorkspaceSearchResult, WorkspaceSettings } from './types';
 import { zhCN } from './zh-cn';
 
 const modes: Array<{ id: IDEMode; icon: LucideIcon }> = [
@@ -145,6 +145,13 @@ export function OuroborosIDE() {
   const [chatStatus, setChatStatus] = useState('');
   const [chatSummary, setChatSummary] = useState('');
   const [chatRefs, setChatRefs] = useState<string[]>([]);
+  const [aiBlackboard, setAIBlackboard] = useState<BlackboardItem[]>([]);
+  const [aiAgents, setAIAgents] = useState<AgentTask[]>([]);
+  const [aiPrompts, setAIPrompts] = useState<PromptRecord[]>([]);
+  const [aiHarnessCases, setAIHarnessCases] = useState<HarnessCase[]>([]);
+  const [aiHarnessResults, setAIHarnessResults] = useState<HarnessRun[]>([]);
+  const [aiSwarmRuns, setAISwarmRuns] = useState<SwarmWorkflowRun[]>([]);
+  const [aiStateStatus, setAIStateStatus] = useState('');
 
   useEffect(() => {
     function handleShortcut(event: KeyboardEvent) {
@@ -229,6 +236,7 @@ export function OuroborosIDE() {
     void refreshIfMounted();
     void refreshAIActions();
     void refreshAIChat();
+    void refreshAIWorkspaceState();
     void connectIDEEventStream(event => {
       if (shouldRefreshForEvent(event)) {
         void refreshIfMounted();
@@ -556,6 +564,29 @@ export function OuroborosIDE() {
     }
   }
 
+  async function refreshAIWorkspaceState() {
+    setAIStateStatus(zhCN.aiActions.loading);
+    try {
+      const [blackboard, agents, prompts, cases, results, swarmRuns] = await Promise.all([
+        fetchAIBlackboard(),
+        fetchAIAgents(),
+        fetchAIPrompts(),
+        fetchAIHarnessCases(),
+        fetchAIHarnessResults(),
+        fetchAISwarmRuns(),
+      ]);
+      setAIBlackboard(blackboard);
+      setAIAgents(agents);
+      setAIPrompts(prompts);
+      setAIHarnessCases(cases);
+      setAIHarnessResults(results);
+      setAISwarmRuns(swarmRuns);
+      setAIStateStatus(`${zhCN.aiActions.loaded}: ${blackboard.length + agents.length + prompts.length + cases.length + results.length + swarmRuns.length}`);
+    } catch {
+      setAIStateStatus(zhCN.aiActions.loadFailed);
+    }
+  }
+
   async function sendChatMessage() {
     const message = chatDraft.trim();
     if (!message) {
@@ -578,7 +609,7 @@ export function OuroborosIDE() {
       setChatMessages(current => [...current, response.message]);
       setChatRefs(response.context ?? []);
       setChatStatus('');
-      await refresh();
+      await Promise.all([refresh(), refreshAIWorkspaceState()]);
     } catch {
       setChatStatus(zhCN.aiChat.sendFailed);
     }
@@ -587,7 +618,7 @@ export function OuroborosIDE() {
   async function runSelectedAIAction(action: AIAction) {
     const request = buildAIActionRequest(action, aiActionInputs);
     if (!request) {
-      setAIActionStatus(zhCN.aiActions.orchestratorRequired);
+      setAIActionStatus(zhCN.aiActions.actionInputRequired);
       return;
     }
     setAIActionRunningId(action.id);
@@ -599,8 +630,8 @@ export function OuroborosIDE() {
         setExecutionStatus(`${zhCN.execution.selected}: ${result.execution.id}`);
       }
       setAIActionStatus(`${zhCN.aiActions.result}: ${result.result.kind}`);
-      await refresh();
-      window.setTimeout(() => void refresh(), 1000);
+      await Promise.all([refresh(), refreshAIWorkspaceState()]);
+      window.setTimeout(() => void refreshAIWorkspaceState(), 1000);
     } catch {
       setAIActionStatus(zhCN.aiActions.runFailed);
     } finally {
@@ -717,6 +748,13 @@ export function OuroborosIDE() {
                   aiActionStatus={aiActionStatus}
                   aiActionResult={aiActionResult}
                   aiActionRunningId={aiActionRunningId}
+                  aiBlackboard={aiBlackboard}
+                  aiAgents={aiAgents}
+                  aiPrompts={aiPrompts}
+                  aiHarnessCases={aiHarnessCases}
+                  aiHarnessResults={aiHarnessResults}
+                  aiStateStatus={aiStateStatus}
+                  onRefreshAIState={() => void refreshAIWorkspaceState()}
                   onMissionDraftChange={updateMissionDraft}
                   onSaveMission={() => void saveCurrentMission()}
                   onStartMission={() => void startCurrentMission()}
@@ -875,12 +913,79 @@ function buildAIOrchestratorInput(action: AIAction, aiActionInputs: Record<strin
   ) as AIActionRunRequest['input'];
 }
 
+function splitAIActionList(value: string | undefined, separator = ','): string[] | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const parts = value.split(separator).map(item => item.trim()).filter(Boolean);
+  return parts.length > 0 ? parts : undefined;
+}
+
+function splitAIActionLines(value: string | undefined): string[] | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const parts = value.split('\n').map(item => item.trim()).filter(Boolean);
+  return parts.length > 0 ? parts : undefined;
+}
+
 function buildAIActionRequest(action: AIAction, aiActionInputs: Record<string, string>): AIActionRunRequest | null {
   if (isOrchestratorAIAction(action)) {
     const orchestratorInput = buildAIOrchestratorInput(action, aiActionInputs);
     return orchestratorInput ? { actionId: action.id, input: orchestratorInput } : null;
   }
-  return null;
+  const fields = {
+    title: aiActionInputValue(aiActionInputs, action.id, 'title').trim(),
+    goal: aiActionInputValue(aiActionInputs, action.id, 'goal').trim(),
+    kind: aiActionInputValue(aiActionInputs, action.id, 'kind').trim(),
+    command: aiActionInputValue(aiActionInputs, action.id, 'command').trim(),
+    expectedResult: aiActionInputValue(aiActionInputs, action.id, 'expectedResult').trim(),
+    priority: aiActionInputValue(aiActionInputs, action.id, 'priority').trim(),
+    source: aiActionInputValue(aiActionInputs, action.id, 'source').trim(),
+    filePath: aiActionInputValue(aiActionInputs, action.id, 'filePath').trim(),
+    content: aiActionInputValue(aiActionInputs, action.id, 'content').trim(),
+    role: aiActionInputValue(aiActionInputs, action.id, 'role').trim(),
+    promptName: aiActionInputValue(aiActionInputs, action.id, 'promptName').trim(),
+    promptContent: aiActionInputValue(aiActionInputs, action.id, 'promptContent').trim(),
+    inputText: aiActionInputValue(aiActionInputs, action.id, 'inputText').trim(),
+    roles: splitAIActionList(aiActionInputs[aiActionInputKey(action.id, 'roles')]),
+    commands: splitAIActionList(aiActionInputs[aiActionInputKey(action.id, 'commands')], ';'),
+    agents: splitAIActionLines(aiActionInputs[aiActionInputKey(action.id, 'agents')]),
+    executionId: aiActionInputValue(aiActionInputs, action.id, 'executionId').trim(),
+    reason: aiActionInputValue(aiActionInputs, action.id, 'reason').trim(),
+  };
+  const input = Object.fromEntries(Object.entries(fields).filter(([, value]) => value)) as AIActionRunRequest['input'];
+  if (Object.keys(input).length === 0) {
+    return null;
+  }
+  if (action.id === 'file.write' && (!input.filePath || !input.content)) {
+    return null;
+  }
+  if (action.id === 'blackboard.create' && !input.content) {
+    return null;
+  }
+  if (action.id === 'agent.create' && !input.goal) {
+    return null;
+  }
+  if (action.id === 'prompt.save' && (!(input.title || input.promptName) || !(input.content || input.promptContent))) {
+    return null;
+  }
+  if (action.id === 'harness.create' && !(input.title || input.goal)) {
+    return null;
+  }
+  if (action.id === 'harness.run' && !input.harnessCaseId && (!input.promptName || !input.inputText)) {
+    return null;
+  }
+  if (action.id === 'swarm.run' && !input.goal) {
+    return null;
+  }
+  if (action.id === 'failure.recover' && !input.executionId) {
+    return null;
+  }
+  if (action.id === 'report.generate' && !(input.title || input.goal)) {
+    return null;
+  }
+  return { actionId: action.id, input };
 }
 
 function aiActionKindLabel(action: AIAction) {
@@ -895,6 +1000,24 @@ function aiActionKindLabel(action: AIAction) {
   }
   if (action.kind === 'report') {
     return zhCN.aiActions.reportKind;
+  }
+  if (action.kind === 'blackboard') {
+    return zhCN.aiActions.blackboardKind;
+  }
+  if (action.kind === 'agent') {
+    return zhCN.aiActions.agentKind;
+  }
+  if (action.kind === 'harness') {
+    return zhCN.aiActions.harnessKind;
+  }
+  if (action.kind === 'prompt') {
+    return zhCN.aiActions.promptKind;
+  }
+  if (action.kind === 'swarm') {
+    return zhCN.aiActions.swarmKind;
+  }
+  if (action.kind === 'failure') {
+    return zhCN.aiActions.failureKind;
   }
   return zhCN.aiActions.toolKind;
 }
@@ -1125,6 +1248,12 @@ function MissionWorkbench({
   aiActionStatus,
   aiActionResult,
   aiActionRunningId,
+  aiBlackboard,
+  aiAgents,
+  aiPrompts,
+  aiHarnessCases,
+  aiHarnessResults,
+  aiStateStatus,
   chatMessages,
   chatDraft,
   chatStatus,
@@ -1144,6 +1273,7 @@ function MissionWorkbench({
   onAIActionInputChange,
   onRefreshAIActions,
   onRunAIAction,
+  onRefreshAIState,
   onStopExecution,
   onRetryExecution,
   onLoadExecutionLogs,
@@ -1174,6 +1304,12 @@ function MissionWorkbench({
   aiActionStatus: string;
   aiActionResult: AIActionRunResponse | null;
   aiActionRunningId: string;
+  aiBlackboard: BlackboardItem[];
+  aiAgents: AgentTask[];
+  aiPrompts: PromptRecord[];
+  aiHarnessCases: HarnessCase[];
+  aiHarnessResults: HarnessRun[];
+  aiStateStatus: string;
   chatMessages: ChatMessage[];
   chatDraft: string;
   chatStatus: string;
@@ -1193,6 +1329,7 @@ function MissionWorkbench({
   onAIActionInputChange: (inputID: string, value: string) => void;
   onRefreshAIActions: () => void;
   onRunAIAction: (action: AIAction) => void;
+  onRefreshAIState: () => void;
   onStopExecution: (id: string) => void;
   onRetryExecution: (id: string) => void;
   onLoadExecutionLogs: (id: string) => void;
@@ -1253,6 +1390,16 @@ function MissionWorkbench({
             refs={chatRefs}
             onDraftChange={onChatDraftChange}
             onSendMessage={onSendChatMessage}
+          />
+          <AIWorkspaceStatePanel
+            blackboard={aiBlackboard}
+            agents={aiAgents}
+            prompts={aiPrompts}
+            harnessCases={aiHarnessCases}
+            harnessResults={aiHarnessResults}
+            swarmRuns={aiSwarmRuns}
+            status={aiStateStatus}
+            onRefresh={onRefreshAIState}
           />
           <div className="composer">
             <span>{zhCN.aiChat.title} &gt;</span>
@@ -1396,6 +1543,7 @@ function AIActionPanel({
   onRunAction: (action: AIAction) => void;
 }) {
   const orchestratorActions = actions.filter(isOrchestratorAIAction);
+  const workspaceActions = actions.filter(action => !isOrchestratorAIAction(action));
   return (
     <section className="tool-launch-panel">
       <PanelTitle icon={Network} title={zhCN.aiActions.title} meta={status || zhCN.aiActions.meta} />
@@ -1405,7 +1553,7 @@ function AIActionPanel({
           {zhCN.commandPalette.refresh}
         </button>
       </div>
-      {orchestratorActions.length === 0 && <EmptyState text={status || zhCN.aiActions.noOrchestratorAction} />}
+      {orchestratorActions.length === 0 && workspaceActions.length === 0 && <EmptyState text={status || zhCN.aiActions.empty} />}
       {orchestratorActions.map(action => {
         const running = runningActionId === action.id;
         return (
@@ -1425,6 +1573,32 @@ function AIActionPanel({
                 <button type="button" className="primary-action" onClick={() => onRunAction(action)} disabled={running || !buildAIActionRequest(action, inputs)}>
                   <Radar size={14} />
                   {running ? zhCN.aiActions.running : zhCN.aiActions.orchestratorRun}
+                </button>
+              </div>
+            </div>
+          </article>
+        );
+      })}
+      {workspaceActions.map(action => {
+        const running = runningActionId === action.id;
+        const request = buildAIActionRequest(action, inputs);
+        return (
+          <article key={action.id} className="tool-action-row" style={{ gridTemplateColumns: 'minmax(180px, 0.8fr) minmax(320px, 1.2fr)', alignItems: 'start' }}>
+            <div className="tool-action-main">
+              <strong>{action.label}</strong>
+              <DetailGrid rows={[
+                [zhCN.aiActions.actionKind, aiActionKindLabel(action)],
+                [zhCN.aiActions.actionStatus, action.status],
+                [zhCN.aiActions.id, action.id],
+              ]} />
+              {action.description && <small>{action.description}</small>}
+            </div>
+            <div>
+              <AIActionSimpleInput action={action} inputs={inputs} onInputChange={onInputChange} onRunAction={onRunAction} />
+              <div className="mission-launch-actions">
+                <button type="button" className="primary-action" onClick={() => onRunAction(action)} disabled={running || !request}>
+                  <Radar size={14} />
+                  {running ? zhCN.aiActions.running : action.label}
                 </button>
               </div>
             </div>
@@ -1491,10 +1665,121 @@ function OrchestratorActionInput({
   );
 }
 
+function AIActionSimpleInput({
+  action,
+  inputs,
+  onInputChange,
+  onRunAction,
+}: {
+  action: AIAction;
+  inputs: Record<string, string>;
+  onInputChange: (inputID: string, value: string) => void;
+  onRunAction: (action: AIAction) => void;
+}) {
+  const updateStructuredInput = (field: string, value: string) => onInputChange(aiActionInputKey(action.id, field), value);
+  const runOnEnter = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === 'Enter') {
+      onRunAction(action);
+    }
+  };
+  const field = (label: string, placeholder: string, name: string, className = '') => (
+    <label className={className}>
+      <span>{label}</span>
+      <input value={aiActionInputValue(inputs, action.id, name)} onChange={event => updateStructuredInput(name, event.target.value)} onKeyDown={runOnEnter} placeholder={placeholder} />
+    </label>
+  );
+  if (action.id === 'swarm.run') {
+    return (
+      <div className="mission-launch-grid">
+        {field(zhCN.aiActions.swarmGoalInput, zhCN.aiActions.swarmGoalPlaceholder, 'goal', 'mission-command')}
+        {field(zhCN.aiActions.swarmRolesInput, zhCN.aiActions.swarmRolesPlaceholder, 'roles')}
+        {field(zhCN.aiActions.swarmCommandsInput, zhCN.aiActions.swarmCommandsPlaceholder, 'commands', 'mission-command')}
+        {field(zhCN.aiActions.swarmAgentsInput, zhCN.aiActions.swarmAgentsPlaceholder, 'agents', 'mission-command')}
+        {field(zhCN.aiActions.orchestratorTitleInput, zhCN.aiActions.orchestratorTitlePlaceholder, 'title')}
+      </div>
+    );
+  }
+
+  if (action.id === 'failure.recover') {
+    return (
+      <div className="mission-launch-grid">
+        {field(zhCN.aiActions.executionIdInput, zhCN.aiActions.executionIdPlaceholder, 'executionId')}
+        {field(zhCN.aiActions.reasonInput, zhCN.aiActions.reasonPlaceholder, 'reason', 'mission-command')}
+      </div>
+    );
+  }
+
+  if (action.id === 'report.generate') {
+    return (
+      <div className="mission-launch-grid">
+        {field(zhCN.aiActions.reportGenerateTitleInput, zhCN.aiActions.reportGenerateTitlePlaceholder, 'title')}
+        {field(zhCN.aiActions.reportGenerateGoalInput, zhCN.aiActions.reportGenerateGoalPlaceholder, 'goal', 'mission-command')}
+        {field(zhCN.aiActions.reportGenerateFilePathInput, zhCN.aiActions.reportGenerateFilePathPlaceholder, 'filePath')}
+      </div>
+    );
+  }
+  if (action.id === 'harness.run') {
+    return (
+      <div className="mission-launch-grid">
+        {field(zhCN.aiActions.harnessCaseId, zhCN.aiActions.harnessCaseIdPlaceholder, 'harnessCaseId')}
+        {field(zhCN.aiActions.harnessPromptNameInput, zhCN.aiActions.harnessPromptNamePlaceholder, 'promptName')}
+        {field(zhCN.aiActions.harnessInputTextInput, zhCN.aiActions.harnessInputTextPlaceholder, 'inputText', 'mission-command')}
+      </div>
+    );
+  }
+  if (action.id === 'file.write') {
+    return (
+      <div className="mission-launch-grid">
+        {field(zhCN.aiActions.orchestratorFilePathInput, zhCN.aiActions.orchestratorFilePathPlaceholder, 'filePath')}
+        {field(zhCN.aiActions.fileContentInput, zhCN.aiActions.fileContentPlaceholder, 'content', 'mission-command')}
+      </div>
+    );
+  }
+  if (action.id === 'blackboard.create') {
+    return (
+      <div className="mission-launch-grid">
+        {field(zhCN.aiActions.blackboardContentInput, zhCN.aiActions.blackboardContentPlaceholder, 'content')}
+      </div>
+    );
+  }
+  if (action.id === 'agent.create') {
+    return (
+      <div className="mission-launch-grid">
+        {field(zhCN.aiActions.agentRoleInput, zhCN.aiActions.agentRolePlaceholder, 'role')}
+        {field(zhCN.aiActions.agentGoalInput, zhCN.aiActions.agentGoalPlaceholder, 'goal', 'mission-command')}
+      </div>
+    );
+  }
+  if (action.id === 'prompt.save') {
+    return (
+      <div className="mission-launch-grid">
+        {field(zhCN.aiActions.promptNameInput, zhCN.aiActions.promptNamePlaceholder, 'promptName')}
+        {field(zhCN.aiActions.promptContentInput, zhCN.aiActions.promptContentPlaceholder, 'promptContent', 'mission-command')}
+      </div>
+    );
+  }
+  if (action.id === 'harness.create') {
+    return (
+      <div className="mission-launch-grid">
+        {field(zhCN.aiActions.orchestratorTitleInput, zhCN.aiActions.orchestratorTitlePlaceholder, 'title')}
+        {field(zhCN.aiActions.orchestratorGoalInput, zhCN.aiActions.orchestratorGoalPlaceholder, 'goal')}
+        {field(zhCN.aiActions.orchestratorKindInput, zhCN.aiActions.orchestratorKindPlaceholder, 'kind')}
+        {field(zhCN.aiActions.orchestratorCommandInput, zhCN.aiActions.orchestratorCommandPlaceholder, 'command', 'mission-command')}
+        {field(zhCN.aiActions.orchestratorExpectedResultInput, zhCN.aiActions.orchestratorExpectedResultPlaceholder, 'expectedResult', 'mission-command')}
+        {field(zhCN.aiActions.orchestratorSourceInput, zhCN.aiActions.orchestratorSourcePlaceholder, 'source')}
+        {field(zhCN.aiActions.orchestratorFilePathInput, zhCN.aiActions.orchestratorFilePathPlaceholder, 'filePath')}
+        {field(zhCN.aiActions.harnessPromptNameInput, zhCN.aiActions.harnessPromptNamePlaceholder, 'promptName')}
+      </div>
+    );
+  }
+  return null;
+}
+
 function AIActionResultPanel({ result }: { result: AIActionRunResponse }) {
+  const isOrchestratorResult = result.result.kind === 'orchestrator_run';
   return (
     <section className="detail-panel compact-detail">
-      <PanelTitle icon={Network} title={zhCN.aiActions.result} meta={result.result.kind} />
+      <PanelTitle icon={Network} title={zhCN.aiActions.result} meta={isOrchestratorResult ? zhCN.aiActions.orchestratorRunResult : result.result.kind} />
       <DetailGrid rows={[
         [zhCN.aiActions.actionLabel, result.action.label],
         [zhCN.aiActions.actionStatus, result.action.status],
@@ -1502,16 +1787,17 @@ function AIActionResultPanel({ result }: { result: AIActionRunResponse }) {
         [zhCN.aiActions.resultSummary, result.result.summary],
         [zhCN.aiActions.executionId, result.execution?.id || result.result.execution?.id],
       ]} />
-      {result.result.kind === 'orchestrator_run' && (
-        <div className="execution-detail">
-          <strong>{zhCN.aiActions.orchestratorRunResult}</strong>
-          {result.result.orchestratorRun ? <AIActionOrchestratorRun run={result.result.orchestratorRun} /> : <EmptyState text={zhCN.aiActions.noOrchestratorRun} />}
-          {result.result.blackboardItem && <AIActionBlackboardItem item={result.result.blackboardItem} />}
-          {result.result.agentTask && <AIActionAgentTask task={result.result.agentTask} />}
-          {result.result.harnessCase && <AIActionHarnessCase testCase={result.result.harnessCase} />}
-          {result.result.execution && <AIActionExecution execution={result.result.execution} />}
-        </div>
-      )}
+      {result.result.fileDiff && <pre className="diff-output">{result.result.fileDiff}</pre>}
+      <div className="execution-detail">
+        {result.result.orchestratorRun && <AIActionOrchestratorRun run={result.result.orchestratorRun} />}
+        {result.result.blackboardItem && <AIActionBlackboardItem item={result.result.blackboardItem} />}
+        {result.result.agentTask && <AIActionAgentTask task={result.result.agentTask} />}
+        {result.result.harnessCase && <AIActionHarnessCase testCase={result.result.harnessCase} />}
+        {result.result.prompt && <AIActionPrompt prompt={result.result.prompt} />}
+        {result.result.harnessRun && <AIActionHarnessRun run={result.result.harnessRun} />}
+        {result.result.swarmRun && <AIActionSwarmRun run={result.result.swarmRun} />}
+        {result.result.execution && <AIActionExecution execution={result.result.execution} />}
+      </div>
     </section>
   );
 }
@@ -1611,6 +1897,80 @@ function AIActionHarnessCase({ testCase }: { testCase: HarnessCase }) {
   );
 }
 
+function AIActionPrompt({ prompt }: { prompt: PromptRecord }) {
+  return (
+    <article>
+      <strong>{zhCN.aiActions.promptRecord}</strong>
+      <DetailGrid rows={[
+        [zhCN.aiActions.id, prompt.id],
+        [zhCN.aiActions.promptNameField, prompt.name],
+        [zhCN.aiActions.createdAt, formatDetailTime(prompt.createdAt)],
+      ]} />
+      {prompt.content && <pre className="detail-body">{prompt.content}</pre>}
+      <RawFieldList fields={prompt} />
+    </article>
+  );
+}
+
+function AIActionHarnessRun({ run }: { run: HarnessRun }) {
+  return (
+    <article>
+      <strong>{zhCN.aiActions.harnessRun}</strong>
+      <DetailGrid rows={[
+        [zhCN.aiActions.id, run.id],
+        [zhCN.aiActions.promptNameField, run.promptName],
+        [zhCN.aiActions.inputField, run.input],
+        [zhCN.aiActions.modelField, run.model],
+        [zhCN.aiActions.createdAt, formatDetailTime(run.createdAt)],
+      ]} />
+      {run.output && <pre className="detail-body">{run.output}</pre>}
+      <RawFieldList fields={run} />
+    </article>
+  );
+}
+
+function AIActionSwarmRun({ run }: { run: SwarmWorkflowRun }) {
+  return (
+    <article>
+      <strong>{zhCN.aiActions.swarmRunResult}</strong>
+      <DetailGrid rows={[
+        [zhCN.aiActions.id, run.id],
+        [zhCN.aiActions.status, run.status],
+        [zhCN.aiActions.titleField, run.title],
+        [zhCN.aiActions.goal, run.goal],
+        [zhCN.aiActions.createdAt, formatDetailTime(run.createdAt)],
+        [zhCN.aiActions.updatedAt, formatDetailTime(run.updatedAt)],
+      ]} />
+      {run.summary && <p className="detail-body">{run.summary}</p>}
+      {(run.tasks ?? []).length > 0 && (
+        <div>
+          <strong>{zhCN.aiActions.swarmTasks}</strong>
+          {(run.tasks ?? []).map(task => <div key={task.id} className="ai-state-row"><span>{task.role} · {task.goal} · {task.status}</span></div>)}
+        </div>
+      )}
+      {(run.facts ?? []).length > 0 && (
+        <div>
+          <strong>{zhCN.aiActions.swarmFacts}</strong>
+          {(run.facts ?? []).map(fact => <div key={fact.id ?? fact.content} className="ai-state-row"><span>{fact.content || fact.title || fact.statement}</span></div>)}
+        </div>
+      )}
+      {(run.executions ?? []).length > 0 && (
+        <div>
+          <strong>{zhCN.aiActions.swarmExecutions}</strong>
+          {(run.executions ?? []).map(execution => <div key={execution.id} className="ai-state-row"><span>{execution.id} · {execution.command} · {execution.status}</span></div>)}
+        </div>
+      )}
+      {(run.timeline ?? []).length > 0 && (
+        <div>
+          <strong>{zhCN.aiActions.swarmTimeline}</strong>
+          {(run.timeline ?? []).map((step, index) => <div key={`${step.step}-${index}`} className="ai-state-row"><span>{step.step} · {step.detail}</span></div>)}
+        </div>
+      )}
+      <RawFieldList fields={run} />
+    </article>
+  );
+}
+
 function AIActionExecution({ execution }: { execution: ExecutionStep }) {
   return (
     <article>
@@ -1627,6 +1987,76 @@ function AIActionExecution({ execution }: { execution: ExecutionStep }) {
         [zhCN.aiActions.updatedAt, formatDetailTime(execution.completedAt)],
       ]} />
     </article>
+  );
+}
+
+function AIWorkspaceStatePanel({
+  blackboard,
+  agents,
+  prompts,
+  harnessCases,
+  harnessResults,
+  swarmRuns,
+  status,
+  onRefresh,
+}: {
+  blackboard: BlackboardItem[];
+  agents: AgentTask[];
+  prompts: PromptRecord[];
+  harnessCases: HarnessCase[];
+  harnessResults: HarnessRun[];
+  swarmRuns: SwarmWorkflowRun[];
+  status: string;
+  onRefresh: () => void;
+}) {
+  return (
+    <section className="tool-launch-panel">
+      <PanelTitle icon={Network} title={zhCN.aiState.title} meta={status || zhCN.aiState.meta} />
+      <div className="row-actions">
+        <button type="button" onClick={onRefresh}>
+          <RefreshCw size={14} />
+          {zhCN.commandPalette.refresh}
+        </button>
+      </div>
+      <div className="ai-state-grid">
+        <div>
+          <strong>{zhCN.aiActions.blackboardItem}</strong>
+          {blackboard.length === 0 ? <EmptyState text={zhCN.aiState.empty} /> : blackboard.slice(0, 5).map(item => (
+            <div key={item.id ?? item.content} className="ai-state-row"><span>{item.content || item.title || item.statement}</span></div>
+          ))}
+        </div>
+        <div>
+          <strong>{zhCN.aiActions.agentTask}</strong>
+          {agents.length === 0 ? <EmptyState text={zhCN.aiState.empty} /> : agents.slice(0, 5).map(task => (
+            <div key={task.id} className="ai-state-row"><span>{task.role} · {task.goal}</span></div>
+          ))}
+        </div>
+        <div>
+          <strong>{zhCN.aiActions.promptRecord}</strong>
+          {prompts.length === 0 ? <EmptyState text={zhCN.aiState.empty} /> : prompts.slice(0, 5).map(prompt => (
+            <div key={prompt.id} className="ai-state-row"><span>{prompt.name}</span></div>
+          ))}
+        </div>
+        <div>
+          <strong>{zhCN.aiActions.harnessCase}</strong>
+          {harnessCases.length === 0 ? <EmptyState text={zhCN.aiState.empty} /> : harnessCases.slice(0, 5).map(testCase => (
+            <div key={testCase.id} className="ai-state-row"><span>{testCase.id} · {testCase.title}</span></div>
+          ))}
+        </div>
+        <div>
+          <strong>{zhCN.aiActions.harnessRun}</strong>
+          {harnessResults.length === 0 ? <EmptyState text={zhCN.aiState.empty} /> : harnessResults.slice(0, 5).map(run => (
+            <div key={run.id} className="ai-state-row"><span>{run.promptName} · {run.model || ''}</span></div>
+          ))}
+        </div>
+        <div>
+          <strong>{zhCN.aiActions.swarmRun}</strong>
+          {swarmRuns.length === 0 ? <EmptyState text={zhCN.aiState.empty} /> : swarmRuns.slice(0, 5).map(run => (
+            <div key={run.id} className="ai-state-row"><span>{run.id} · {run.goal || run.title} · {run.status}</span></div>
+          ))}
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -3129,7 +3559,9 @@ function AIChatPanel({
                 {(message.actions ?? []).map((action, index) => (
                   <div className="chat-action-result" key={`${action.kind}-${index}`}>
                     <div><strong>{chatActionKindLabel(action.kind)}</strong> <span>{action.summary}</span></div>
+                    {action.status && <small>状态: {action.status}{action.exitCode !== undefined ? ` · 退出码: ${action.exitCode}` : ''}</small>}
                     {action.path && <small>{action.path}</small>}
+                    {action.diff && <pre className="diff-output">{action.diff}</pre>}
                     {action.output && <pre>{action.output}</pre>}
                   </div>
                 ))}

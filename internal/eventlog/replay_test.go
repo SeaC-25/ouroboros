@@ -69,6 +69,196 @@ func TestBuildReplaySnapshotReconstructsStateFromFixtureEvents(t *testing.T) {
 	}
 }
 
+func TestBuildReplaySnapshotProjectsModelUsagePreviews(t *testing.T) {
+	base := time.Date(2026, 6, 4, 15, 25, 0, 0, time.UTC)
+	events := []Event{
+		{
+			ID:    1,
+			RunID: "run-model-preview",
+			Type:  EventVerification,
+			Payload: mustFixtureJSON(map[string]any{
+				"kind":           "model_usage_preview",
+				"source":         "closed-loop-planner-preview",
+				"agent_id":       "closed-loop-planner",
+				"role":           "planner",
+				"execution_mode": "metadata-only",
+				"budget_status":  "not_enforced",
+				"ledger_write":   false,
+				"model_usage": map[string]any{
+					"provider":      "local-openai",
+					"model":         "gpt-preview",
+					"input_tokens":  12,
+					"output_tokens": 3,
+					"cost":          0.0042,
+				},
+			}),
+			CreatedAt: base,
+		},
+	}
+
+	snapshot, err := BuildReplaySnapshot(events)
+	if err != nil {
+		t.Fatalf("build replay snapshot: %v", err)
+	}
+
+	if snapshot.ModelUsage.InputTokens != 12 || snapshot.ModelUsage.OutputTokens != 3 || snapshot.ModelUsage.Cost != 0.0042 {
+		t.Fatalf("expected preview usage to aggregate into model usage, got %#v", snapshot.ModelUsage)
+	}
+	if snapshot.Status.Model != "gpt-preview" || snapshot.Status.Cost != 0.0042 {
+		t.Fatalf("expected preview usage to update replay status, got %#v", snapshot.Status)
+	}
+	if len(snapshot.ModelUsagePreviews) != 1 {
+		t.Fatalf("expected one model usage preview, got %#v", snapshot.ModelUsagePreviews)
+	}
+	preview := snapshot.ModelUsagePreviews[0]
+	if preview.Source != "closed-loop-planner-preview" || preview.AgentID != "closed-loop-planner" || preview.Role != "planner" {
+		t.Fatalf("unexpected preview identity: %#v", preview)
+	}
+	if preview.Provider != "local-openai" || preview.Model != "gpt-preview" || preview.InputTokens != 12 || preview.OutputTokens != 3 {
+		t.Fatalf("unexpected preview usage fields: %#v", preview)
+	}
+	if preview.ExecutionMode != "metadata-only" || preview.BudgetStatus != "not_enforced" || preview.LedgerWrite {
+		t.Fatalf("unexpected preview gate fields: %#v", preview)
+	}
+}
+
+func TestBuildReplaySnapshotProjectsModelGenerationAsActualUsage(t *testing.T) {
+	base := time.Date(2026, 6, 4, 15, 40, 0, 0, time.UTC)
+	events := []Event{
+		{
+			ID:    1,
+			RunID: "run-model-generation",
+			Type:  EventVerification,
+			Payload: mustFixtureJSON(map[string]any{
+				"kind":                     "model_generation",
+				"source":                   "closed-loop-planner-generation",
+				"agent_id":                 "closed-loop-planner",
+				"role":                     "planner",
+				"status":                   "completed",
+				"execution_mode":           "provider-generation",
+				"budget_status":            "within_limit",
+				"ledger_write":             true,
+				"assistant_text_persisted": false,
+				"streaming":                true,
+				"stream_completed":         true,
+				"stream_chunk_count":       3,
+				"stream_digest":            "sha256:stream-generation",
+				"stream_preview":           "Provider generation streamed the first attack hypothesis.",
+				"text_digest":              "sha256:planner-generation",
+				"text_preview":             "Provider generation selected the first attack hypothesis.",
+				"model_usage": map[string]any{
+					"run_id":        "run-model-generation",
+					"agent_id":      "closed-loop-planner",
+					"role":          "planner",
+					"provider":      "openai",
+					"model":         "gpt-provider",
+					"input_tokens":  321,
+					"output_tokens": 45,
+					"cost":          0.019,
+					"latency_ms":    1450,
+				},
+			}),
+			CreatedAt: base,
+		},
+	}
+
+	snapshot, err := BuildReplaySnapshot(events)
+	if err != nil {
+		t.Fatalf("build replay snapshot without full assistant text: %v", err)
+	}
+
+	if snapshot.ModelUsage.InputTokens != 321 || snapshot.ModelUsage.OutputTokens != 45 || snapshot.ModelUsage.Cost != 0.019 || snapshot.ModelUsage.Latency != 1450*time.Millisecond {
+		t.Fatalf("expected generation usage to aggregate into actual model usage, got %#v", snapshot.ModelUsage)
+	}
+	if snapshot.Status.Model != "gpt-provider" || snapshot.Status.Cost != 0.019 {
+		t.Fatalf("expected generation usage to update replay status, got %#v", snapshot.Status)
+	}
+	if len(snapshot.ModelUsagePreviews) != 1 {
+		t.Fatalf("expected one model generation runtime preview, got %#v", snapshot.ModelUsagePreviews)
+	}
+	generation := snapshot.ModelUsagePreviews[0]
+	if generation.Source != "closed-loop-planner-generation" || generation.AgentID != "closed-loop-planner" || generation.Role != "planner" {
+		t.Fatalf("unexpected generation identity: %#v", generation)
+	}
+	if generation.Provider != "openai" || generation.Model != "gpt-provider" || generation.InputTokens != 321 || generation.OutputTokens != 45 {
+		t.Fatalf("unexpected generation usage fields: %#v", generation)
+	}
+	if generation.ExecutionMode != "provider-generation" || generation.BudgetStatus != "within_limit" || !generation.LedgerWrite {
+		t.Fatalf("unexpected generation gate fields: %#v", generation)
+	}
+	if !generation.Streaming || !generation.StreamCompleted || generation.StreamChunkCount != 3 || generation.StreamDigest != "sha256:stream-generation" {
+		t.Fatalf("unexpected generation stream fields: %#v", generation)
+	}
+	if generation.StreamPreview != "Provider generation streamed the first attack hypothesis." {
+		t.Fatalf("unexpected generation stream preview: %#v", generation)
+	}
+}
+
+func TestBuildReplaySnapshotProjectsModelToolPlanPreview(t *testing.T) {
+	base := time.Date(2026, 6, 5, 1, 15, 0, 0, time.UTC)
+	events := []Event{
+		{
+			ID:    1,
+			RunID: "run-tool-plan-preview",
+			Type:  EventVerification,
+			Payload: mustFixtureJSON(map[string]any{
+				"kind":                           "model_tool_plan_preview",
+				"source":                         "closed-loop-planner-generation",
+				"agent_id":                       "closed-loop-planner",
+				"role":                           "planner",
+				"status":                         "completed",
+				"execution_mode":                 "metadata-only",
+				"provider":                       "local-openai",
+				"model":                          "gpt-plan",
+				"action":                         "enumerate_paths",
+				"semantic_action":                "enumerate_paths",
+				"valid":                          true,
+				"validity":                       "valid",
+				"marker_preview":                 "ouro_action: enumerate_paths",
+				"model_output_digest":            "sha256:model-output",
+				"model_generation_artifact_path": "/tmp/ouro/runtime/model-generations/generation.json",
+				"compile_preview_review_path":    "/tmp/ouro/toolchain/compile-preview-reviews/review.json",
+				"compile_preview_nodes":          3,
+				"compile_preview_warnings":       1,
+				"artifact_path":                  "/tmp/ouro/runtime/model-tool-plan-previews/preview.json",
+				"artifact_digest":                "sha256:artifact",
+				"assistant_text_persisted":       false,
+				"executed_tools":                 0,
+				"worker_dispatch":                false,
+				"target_contact":                 false,
+			}),
+			CreatedAt: base,
+		},
+	}
+
+	snapshot, err := BuildReplaySnapshot(events)
+	if err != nil {
+		t.Fatalf("build replay snapshot: %v", err)
+	}
+	if snapshot.ModelUsage.InputTokens != 0 || snapshot.ModelUsage.OutputTokens != 0 || snapshot.Status.Cost != 0 {
+		t.Fatalf("tool-plan preview must not count as model token usage, got usage=%#v status=%#v", snapshot.ModelUsage, snapshot.Status)
+	}
+	if len(snapshot.ModelUsagePreviews) != 1 {
+		t.Fatalf("expected one model tool-plan preview, got %#v", snapshot.ModelUsagePreviews)
+	}
+	preview := snapshot.ModelUsagePreviews[0]
+	if preview.Kind != "model_tool_plan_preview" || preview.Source != "closed-loop-planner-generation" || preview.AgentID != "closed-loop-planner" || preview.Role != "planner" {
+		t.Fatalf("unexpected tool-plan preview identity: %#v", preview)
+	}
+	if preview.Provider != "local-openai" || preview.Model != "gpt-plan" || preview.SemanticAction != "enumerate_paths" || preview.Validity != "valid" {
+		t.Fatalf("unexpected tool-plan preview route/action fields: %#v", preview)
+	}
+	if preview.ArtifactPath != "/tmp/ouro/runtime/model-tool-plan-previews/preview.json" || preview.ArtifactDigest != "sha256:artifact" || preview.CompilePreviewReviewPath == "" {
+		t.Fatalf("unexpected tool-plan preview artifact links: %#v", preview)
+	}
+	if preview.AssistantTextPersisted || preview.ExecutedTools != 0 || preview.WorkerDispatch || preview.TargetContact {
+		t.Fatalf("tool-plan preview must remain read-only metadata, got %#v", preview)
+	}
+	if preview.TextPreview != "ouro_action: enumerate_paths" || preview.TextDigest != "sha256:model-output" {
+		t.Fatalf("expected marker preview and model output digest, got %#v", preview)
+	}
+}
+
 func TestBuildReplaySnapshotRejectsMixedRunIDs(t *testing.T) {
 	events := replayFixtureEvents()
 	events[1].RunID = "other-run"

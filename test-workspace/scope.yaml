@@ -1,0 +1,7 @@
+version: 1
+scope:
+  target_policy: enforce
+  targets: []
+  exclusions: []
+execution:
+  isolation: process

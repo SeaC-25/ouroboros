@@ -1,9 +1,10 @@
 import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
-const guiRoot = new URL('..', import.meta.url).pathname;
-const root = new URL('../..', import.meta.url).pathname;
+const guiRoot = fileURLToPath(new URL('..', import.meta.url));
+const root = fileURLToPath(new URL('../..', import.meta.url));
 const dryRun = process.argv.includes('--dry-run');
 const packageDirMode = process.argv.includes('--dir');
 const binaryName = process.platform === 'win32' ? 'ouro.exe' : 'ouro';

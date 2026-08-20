@@ -340,7 +340,7 @@ for (let i = 0; i < 160; i += 1) {
   if (last?.ready) {
     await fs.writeFile(runtimeOut, JSON.stringify(last, null, 2) + '\n');
     await fs.writeFile(domOut, `${last.bodyText || ''}\n`);
-    await evaluate(`window.ouroboros?.closeWindow?.()`);
+    void evaluate(`window.ouroboros?.closeWindow?.()`).catch(() => {});
     socket.close();
     process.exit(0);
   }

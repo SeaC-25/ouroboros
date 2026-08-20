@@ -50,6 +50,44 @@ type ReplayStatus struct {
 	Cost           float64
 }
 
+type ReplayModelUsagePreview struct {
+	Kind                        string
+	Source                      string
+	AgentID                     string
+	Role                        string
+	Provider                    string
+	Model                       string
+	Status                      string
+	ExecutionMode               string
+	BudgetStatus                string
+	LedgerWrite                 bool
+	AssistantTextPersisted      bool
+	TextDigest                  string
+	TextPreview                 string
+	Streaming                   bool
+	StreamChunkCount            int
+	StreamCompleted             bool
+	StreamDigest                string
+	StreamPreview               string
+	SemanticAction              string
+	Validity                    string
+	MarkerPreview               string
+	ModelOutputDigest           string
+	ModelGenerationArtifactPath string
+	CompilePreviewReviewPath    string
+	CompilePreviewNodes         int
+	CompilePreviewWarnings      int
+	ArtifactPath                string
+	ArtifactDigest              string
+	ExecutedTools               int
+	WorkerDispatch              bool
+	TargetContact               bool
+	InputTokens                 int
+	OutputTokens                int
+	Cost                        float64
+	LatencyMS                   int64
+}
+
 type ReplayToolchainStatus struct {
 	Name             string
 	Health           string
@@ -113,17 +151,18 @@ type ReplayDependencyStatus struct {
 }
 
 type ReplaySnapshot struct {
-	RunID          string
-	Events         []Event
-	Blackboard     blackboard.ProjectState
-	Evidence       evidence.Graph
-	Timeline       []ReplayTimelineEvent
-	ModelUsage     modelruntime.Aggregate
-	Agents         []ReplayAgent
-	Status         ReplayStatus
-	Toolchain      []ReplayToolchainStatus
-	ToolExecutions []ReplayToolExecution
-	ToolAdmissions []ReplayToolAdmission
+	RunID              string
+	Events             []Event
+	Blackboard         blackboard.ProjectState
+	Evidence           evidence.Graph
+	Timeline           []ReplayTimelineEvent
+	ModelUsage         modelruntime.Aggregate
+	ModelUsagePreviews []ReplayModelUsagePreview
+	Agents             []ReplayAgent
+	Status             ReplayStatus
+	Toolchain          []ReplayToolchainStatus
+	ToolExecutions     []ReplayToolExecution
+	ToolAdmissions     []ReplayToolAdmission
 }
 
 func BuildReplaySnapshot(events []Event) (ReplaySnapshot, error) {
@@ -147,6 +186,7 @@ func BuildReplaySnapshot(events []Event) (ReplaySnapshot, error) {
 	toolchainByName := map[string]ReplayToolchainStatus{}
 	toolExecutionsByID := map[string]ReplayToolExecution{}
 	toolAdmissionsByID := map[string]ReplayToolAdmission{}
+	modelUsagePreviews := []ReplayModelUsagePreview{}
 	timeline := make([]ReplayTimelineEvent, 0, len(sortedEvents))
 
 	for _, event := range sortedEvents {
@@ -220,10 +260,17 @@ func BuildReplaySnapshot(events []Event) (ReplaySnapshot, error) {
 		if payload.DepthChains > 0 {
 			status.DepthChains = payload.DepthChains
 		}
+		if preview, ok := payload.modelToolPlanPreview(); ok {
+			modelUsagePreviews = append(modelUsagePreviews, preview)
+			continue
+		}
 		if usage, ok := payload.usageRecord(event.RunID); ok {
 			ledger.Record(usage)
 			if usage.Model != "" {
 				status.Model = usage.Model
+			}
+			if preview, ok := payload.modelUsagePreview(usage); ok {
+				modelUsagePreviews = append(modelUsagePreviews, preview)
 			}
 		}
 	}
@@ -236,17 +283,18 @@ func BuildReplaySnapshot(events []Event) (ReplaySnapshot, error) {
 	status.Cost = ledger.ByRun(runID).Cost
 
 	return ReplaySnapshot{
-		RunID:          runID,
-		Events:         sortedEvents,
-		Blackboard:     state,
-		Evidence:       evidence.Project(state),
-		Timeline:       timeline,
-		ModelUsage:     ledger.ByRun(runID),
-		Agents:         agents,
-		Status:         status,
-		Toolchain:      toolchainStatuses,
-		ToolExecutions: toolExecutions,
-		ToolAdmissions: toolAdmissions,
+		RunID:              runID,
+		Events:             sortedEvents,
+		Blackboard:         state,
+		Evidence:           evidence.Project(state),
+		Timeline:           timeline,
+		ModelUsage:         ledger.ByRun(runID),
+		ModelUsagePreviews: modelUsagePreviews,
+		Agents:             agents,
+		Status:             status,
+		Toolchain:          toolchainStatuses,
+		ToolExecutions:     toolExecutions,
+		ToolAdmissions:     toolAdmissions,
 	}, nil
 }
 
@@ -291,64 +339,90 @@ func sortedReplayEvents(events []Event) ([]Event, string, error) {
 }
 
 type replayPayload struct {
-	ID                       string               `json:"id"`
-	FactID                   string               `json:"fact_id"`
-	IntentID                 string               `json:"intent_id"`
-	HintID                   string               `json:"hint_id"`
-	Kind                     string               `json:"kind"`
-	Statement                string               `json:"statement"`
-	Confidence               float64              `json:"confidence"`
-	Source                   string               `json:"source"`
-	Goal                     string               `json:"goal"`
-	SourceFacts              []string             `json:"source_facts"`
-	State                    string               `json:"state"`
-	ResultFact               string               `json:"result_fact"`
-	Message                  string               `json:"message"`
-	AgentID                  string               `json:"agent_id"`
-	Role                     string               `json:"role"`
-	ProgressPercent          int                  `json:"progress_percent"`
-	Provider                 string               `json:"provider"`
-	Model                    string               `json:"model"`
-	InputTokens              int                  `json:"input_tokens"`
-	OutputTokens             int                  `json:"output_tokens"`
-	CacheReadTokens          int                  `json:"cache_read_tokens"`
-	CacheWriteTokens         int                  `json:"cache_write_tokens"`
-	Cost                     float64              `json:"cost"`
-	LatencyMS                int64                `json:"latency_ms"`
-	Failed                   bool                 `json:"failed"`
-	ModelUsage               *usagePayload        `json:"model_usage"`
-	ContextPercent           int                  `json:"context_percent"`
-	BreadthPercent           int                  `json:"breadth_percent"`
-	DepthChains              int                  `json:"depth_chains"`
-	ToolHealth               string               `json:"tool_health"`
-	Tool                     string               `json:"tool"`
-	Health                   string               `json:"health"`
-	Status                   string               `json:"status"`
-	ExecutionID              string               `json:"execution_id"`
-	ExecutionStatus          string               `json:"execution_status"`
-	Capability               string               `json:"capability"`
-	WorkerStatus             string               `json:"worker_status"`
-	WorkerCapability         string               `json:"worker_capability"`
-	WaitReason               string               `json:"wait_reason"`
-	AdmissionID              string               `json:"admission_id"`
-	AdmissionAction          string               `json:"admission_action"`
-	AdmissionCapability      string               `json:"admission_capability"`
-	AdmissionDecision        string               `json:"admission_decision"`
-	WorkerID                 string               `json:"worker_id"`
-	ExecutionPolicy          string               `json:"execution_policy"`
-	PolicyReason             string               `json:"policy_reason"`
-	Isolation                string               `json:"isolation"`
-	ContainerOverrides       bool                 `json:"container_overrides"`
-	WorkerPoolMaxConcurrency int                  `json:"worker_pool_max_concurrency"`
-	PackMaxConcurrency       int                  `json:"pack_max_concurrency"`
-	ResourceCPUUnits         int                  `json:"resource_cpu_units"`
-	ResourceMemoryMB         int                  `json:"resource_memory_mb"`
-	ResourceLimitCPUUnits    int                  `json:"resource_limit_cpu_units"`
-	ResourceLimitMemoryMB    int                  `json:"resource_limit_memory_mb"`
-	InstalledVersion         string               `json:"installed_version"`
-	LatestVersion            string               `json:"latest_version"`
-	Dependencies             []dependencyPayload  `json:"dependencies"`
-	InstallPlan              []installPlanPayload `json:"install_plan"`
+	ID                          string               `json:"id"`
+	FactID                      string               `json:"fact_id"`
+	IntentID                    string               `json:"intent_id"`
+	HintID                      string               `json:"hint_id"`
+	Kind                        string               `json:"kind"`
+	Statement                   string               `json:"statement"`
+	Confidence                  float64              `json:"confidence"`
+	Source                      string               `json:"source"`
+	Goal                        string               `json:"goal"`
+	SourceFacts                 []string             `json:"source_facts"`
+	State                       string               `json:"state"`
+	ResultFact                  string               `json:"result_fact"`
+	Message                     string               `json:"message"`
+	AgentID                     string               `json:"agent_id"`
+	Role                        string               `json:"role"`
+	ProgressPercent             int                  `json:"progress_percent"`
+	Provider                    string               `json:"provider"`
+	Model                       string               `json:"model"`
+	InputTokens                 int                  `json:"input_tokens"`
+	OutputTokens                int                  `json:"output_tokens"`
+	CacheReadTokens             int                  `json:"cache_read_tokens"`
+	CacheWriteTokens            int                  `json:"cache_write_tokens"`
+	Cost                        float64              `json:"cost"`
+	LatencyMS                   int64                `json:"latency_ms"`
+	Failed                      bool                 `json:"failed"`
+	ModelUsage                  *usagePayload        `json:"model_usage"`
+	ExecutionMode               string               `json:"execution_mode"`
+	BudgetStatus                string               `json:"budget_status"`
+	LedgerWrite                 bool                 `json:"ledger_write"`
+	AssistantTextPersisted      bool                 `json:"assistant_text_persisted"`
+	TextDigest                  string               `json:"text_digest"`
+	TextPreview                 string               `json:"text_preview"`
+	Streaming                   bool                 `json:"streaming"`
+	StreamChunkCount            int                  `json:"stream_chunk_count"`
+	StreamCompleted             bool                 `json:"stream_completed"`
+	StreamDigest                string               `json:"stream_digest"`
+	StreamPreview               string               `json:"stream_preview"`
+	Action                      string               `json:"action"`
+	SemanticAction              string               `json:"semantic_action"`
+	Valid                       bool                 `json:"valid"`
+	Validity                    string               `json:"validity"`
+	MarkerPreview               string               `json:"marker_preview"`
+	ModelOutputDigest           string               `json:"model_output_digest"`
+	ModelGenerationArtifactPath string               `json:"model_generation_artifact_path"`
+	CompilePreviewReviewPath    string               `json:"compile_preview_review_path"`
+	CompilePreviewNodes         int                  `json:"compile_preview_nodes"`
+	CompilePreviewWarnings      int                  `json:"compile_preview_warnings"`
+	ArtifactPath                string               `json:"artifact_path"`
+	ArtifactDigest              string               `json:"artifact_digest"`
+	ExecutedTools               int                  `json:"executed_tools"`
+	WorkerDispatch              bool                 `json:"worker_dispatch"`
+	TargetContact               bool                 `json:"target_contact"`
+	ContextPercent              int                  `json:"context_percent"`
+	BreadthPercent              int                  `json:"breadth_percent"`
+	DepthChains                 int                  `json:"depth_chains"`
+	ToolHealth                  string               `json:"tool_health"`
+	Tool                        string               `json:"tool"`
+	Health                      string               `json:"health"`
+	Status                      string               `json:"status"`
+	ExecutionID                 string               `json:"execution_id"`
+	ExecutionStatus             string               `json:"execution_status"`
+	Capability                  string               `json:"capability"`
+	WorkerStatus                string               `json:"worker_status"`
+	WorkerCapability            string               `json:"worker_capability"`
+	WaitReason                  string               `json:"wait_reason"`
+	AdmissionID                 string               `json:"admission_id"`
+	AdmissionAction             string               `json:"admission_action"`
+	AdmissionCapability         string               `json:"admission_capability"`
+	AdmissionDecision           string               `json:"admission_decision"`
+	WorkerID                    string               `json:"worker_id"`
+	ExecutionPolicy             string               `json:"execution_policy"`
+	PolicyReason                string               `json:"policy_reason"`
+	Isolation                   string               `json:"isolation"`
+	ContainerOverrides          bool                 `json:"container_overrides"`
+	WorkerPoolMaxConcurrency    int                  `json:"worker_pool_max_concurrency"`
+	PackMaxConcurrency          int                  `json:"pack_max_concurrency"`
+	ResourceCPUUnits            int                  `json:"resource_cpu_units"`
+	ResourceMemoryMB            int                  `json:"resource_memory_mb"`
+	ResourceLimitCPUUnits       int                  `json:"resource_limit_cpu_units"`
+	ResourceLimitMemoryMB       int                  `json:"resource_limit_memory_mb"`
+	InstalledVersion            string               `json:"installed_version"`
+	LatestVersion               string               `json:"latest_version"`
+	Dependencies                []dependencyPayload  `json:"dependencies"`
+	InstallPlan                 []installPlanPayload `json:"install_plan"`
 }
 
 type dependencyPayload struct {
@@ -713,6 +787,85 @@ func (p replayPayload) usageRecord(defaultRunID string) (modelruntime.UsageRecor
 	}, true
 }
 
+func (p replayPayload) modelUsagePreview(usage modelruntime.UsageRecord) (ReplayModelUsagePreview, bool) {
+	kind := strings.TrimSpace(p.Kind)
+	if kind != "model_usage_preview" && kind != "model_generation" {
+		return ReplayModelUsagePreview{}, false
+	}
+	source := firstNonEmpty(p.Source, "model-usage")
+	executionMode := firstNonEmpty(p.ExecutionMode, "metadata-only")
+	budgetStatus := firstNonEmpty(p.BudgetStatus, "not_enforced")
+	if kind == "model_generation" {
+		source = firstNonEmpty(p.Source, "model-generation")
+		executionMode = firstNonEmpty(p.ExecutionMode, "provider-generation")
+	}
+	return ReplayModelUsagePreview{
+		Kind:                   kind,
+		Source:                 source,
+		AgentID:                usage.AgentID,
+		Role:                   usage.Role,
+		Provider:               usage.Provider,
+		Model:                  usage.Model,
+		Status:                 strings.TrimSpace(p.Status),
+		ExecutionMode:          executionMode,
+		BudgetStatus:           budgetStatus,
+		LedgerWrite:            p.LedgerWrite,
+		AssistantTextPersisted: p.AssistantTextPersisted,
+		TextDigest:             strings.TrimSpace(p.TextDigest),
+		TextPreview:            compactReplayText(p.TextPreview),
+		Streaming:              p.Streaming,
+		StreamChunkCount:       p.StreamChunkCount,
+		StreamCompleted:        p.StreamCompleted,
+		StreamDigest:           strings.TrimSpace(p.StreamDigest),
+		StreamPreview:          compactReplayText(p.StreamPreview),
+		InputTokens:            usage.InputTokens,
+		OutputTokens:           usage.OutputTokens,
+		Cost:                   usage.Cost,
+		LatencyMS:              int64(usage.Latency / time.Millisecond),
+	}, true
+}
+
+func (p replayPayload) modelToolPlanPreview() (ReplayModelUsagePreview, bool) {
+	if strings.TrimSpace(p.Kind) != "model_tool_plan_preview" {
+		return ReplayModelUsagePreview{}, false
+	}
+	action := firstNonEmpty(p.SemanticAction, p.Action)
+	validity := strings.TrimSpace(p.Validity)
+	if validity == "" {
+		if p.Valid {
+			validity = "valid"
+		} else {
+			validity = "invalid"
+		}
+	}
+	return ReplayModelUsagePreview{
+		Kind:                        "model_tool_plan_preview",
+		Source:                      firstNonEmpty(p.Source, "model-tool-plan-preview"),
+		AgentID:                     strings.TrimSpace(p.AgentID),
+		Role:                        strings.TrimSpace(p.Role),
+		Provider:                    strings.TrimSpace(p.Provider),
+		Model:                       strings.TrimSpace(p.Model),
+		Status:                      strings.TrimSpace(p.Status),
+		ExecutionMode:               firstNonEmpty(p.ExecutionMode, "metadata-only"),
+		AssistantTextPersisted:      p.AssistantTextPersisted,
+		TextDigest:                  strings.TrimSpace(p.ModelOutputDigest),
+		TextPreview:                 compactReplayText(p.MarkerPreview),
+		SemanticAction:              strings.TrimSpace(action),
+		Validity:                    validity,
+		MarkerPreview:               compactReplayText(p.MarkerPreview),
+		ModelOutputDigest:           strings.TrimSpace(p.ModelOutputDigest),
+		ModelGenerationArtifactPath: strings.TrimSpace(p.ModelGenerationArtifactPath),
+		CompilePreviewReviewPath:    strings.TrimSpace(p.CompilePreviewReviewPath),
+		CompilePreviewNodes:         p.CompilePreviewNodes,
+		CompilePreviewWarnings:      p.CompilePreviewWarnings,
+		ArtifactPath:                strings.TrimSpace(p.ArtifactPath),
+		ArtifactDigest:              strings.TrimSpace(p.ArtifactDigest),
+		ExecutedTools:               p.ExecutedTools,
+		WorkerDispatch:              p.WorkerDispatch,
+		TargetContact:               p.TargetContact,
+	}, true
+}
+
 func sortedReplayAgents(agentsByID map[string]ReplayAgent) []ReplayAgent {
 	agents := make([]ReplayAgent, 0, len(agentsByID))
 	for _, agent := range agentsByID {
@@ -743,4 +896,8 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func compactReplayText(value string) string {
+	return strings.Join(strings.Fields(value), " ")
 }

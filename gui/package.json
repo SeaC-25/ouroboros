@@ -5,8 +5,8 @@
   "type": "module",
   "main": "dist/main/main.js",
   "scripts": {
-    "dev": "vite --host 127.0.0.1 & VITE_PID=$!; sleep 2; VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron src/main/main.js; kill $VITE_PID",
-    "build": "vite build && mkdir -p dist/main && cp src/main/*.js dist/main/",
+    "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && electron src/main/main.js\"",
+    "build": "vite build && node scripts/copy-main.mjs",
     "preview": "vite preview --host 127.0.0.1",
     "test:contract": "node scripts/check-gui-contract.mjs",
     "test:product-contract": "node scripts/check-product-contract.mjs",

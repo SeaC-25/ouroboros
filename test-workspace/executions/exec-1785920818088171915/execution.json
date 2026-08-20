@@ -1,0 +1,15 @@
+{
+  "id": "exec-1785920818088171915",
+  "retryOf": "exec-1785920817986621081",
+  "command": "bash",
+  "args": [
+    "-c",
+    "ls /does-not-exist-ouro"
+  ],
+  "status": "failed",
+  "startedAt": 1785920818,
+  "completedAt": 1785920818,
+  "exitCode": 2,
+  "logPath": "executions/exec-1785920818088171915/output.log",
+  "artifactDir": "executions/exec-1785920818088171915/artifacts"
+}

@@ -1988,6 +1988,11 @@ kbd {
   margin-top: 0.2rem;
 }
 
+.chat-action-result .diff-output {
+  border-left: 2px solid var(--ouro-accent, #f05050);
+  color: rgba(255,255,255,0.82);
+}
+
 .chat-action-result pre {
   margin-top: 0.35rem;
   white-space: pre-wrap;

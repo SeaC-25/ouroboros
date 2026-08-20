@@ -90,7 +90,7 @@ export interface ToolAction {
   argumentHint: string;
 }
 
-export type AIActionKind = 'command' | 'tool' | 'file' | 'report' | 'blackboard' | 'agent' | 'harness' | 'orchestrator';
+export type AIActionKind = 'command' | 'tool' | 'file' | 'report' | 'blackboard' | 'agent' | 'harness' | 'orchestrator' | 'prompt' | 'swarm' | 'failure';
 
 export interface AIAction {
   id: string;
@@ -121,9 +121,19 @@ export interface AIActionRunRequest {
     priority?: string;
     source?: string;
     filePath?: string;
+    content?: string;
+    role?: string;
+    promptName?: string;
+    promptContent?: string;
+    inputText?: string;
     blackboardItemId?: string;
     agentTaskId?: string;
     harnessCaseId?: string;
+    roles?: string[];
+    commands?: string[];
+    agents?: string[];
+    executionId?: string;
+    reason?: string;
   };
   arguments?: string;
 }
@@ -173,6 +183,8 @@ export interface HarnessCase {
   command?: string;
   expectedResult?: string;
   promptId?: string;
+  promptName?: string;
+  inputText?: string;
   agentRole?: string;
   source?: string;
   filePath?: string;
@@ -203,14 +215,36 @@ export interface OrchestratorRun {
   [key: string]: unknown;
 }
 
+export interface PromptRecord {
+  id?: string;
+  name?: string;
+  content?: string;
+  createdAt?: number;
+  [key: string]: unknown;
+}
+
+export interface HarnessRun {
+  id?: string;
+  promptName?: string;
+  input?: string;
+  output?: string;
+  model?: string;
+  createdAt?: number;
+  [key: string]: unknown;
+}
+
 export interface AIActionResult {
   kind: string;
   operation?: string;
   summary?: string;
+  fileDiff?: string;
   orchestratorRun?: OrchestratorRun;
   blackboardItem?: BlackboardItem;
   agentTask?: AgentTask;
   harnessCase?: HarnessCase;
+  prompt?: PromptRecord;
+  harnessRun?: HarnessRun;
+  swarmRun?: SwarmWorkflowRun;
   execution?: ExecutionStep;
 }
 
@@ -376,6 +410,10 @@ export interface ChatActionResult {
   summary: string;
   path?: string;
   output?: string;
+  diff?: string;
+  status?: string;
+  exitCode?: number;
+  executionId?: string;
 }
 
 export interface ChatMessage {
@@ -396,4 +434,26 @@ export interface ChatResponse {
 export interface ChatPostResponse {
   message: ChatMessage;
   context?: string[];
+}
+
+export interface SwarmWorkflowRun {
+  id?: string;
+  title?: string;
+  goal?: string;
+  status?: string;
+  tasks?: AgentTask[];
+  facts?: BlackboardItem[];
+  executions?: ExecutionStep[];
+  summary?: string;
+  createdAt?: number;
+  updatedAt?: number;
+  agentOutput?: Record<string, string>;
+  timeline?: Array<{ step?: string; detail?: string; createdAt?: number; [key: string]: unknown }>;
+  inputs?: {
+    title?: string;
+    goal?: string;
+    roles?: string[];
+    commands?: string[];
+  };
+  [key: string]: unknown;
 }

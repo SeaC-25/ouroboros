@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/base64"
 	"fmt"
 	"sort"
 	"strings"
@@ -172,13 +173,130 @@ func agentGraphNodesFromReplay(agents []eventlog.ReplayAgent) []AgentGraphNode {
 }
 
 func modelRuntimeRows(snapshot eventlog.ReplaySnapshot) []string {
-	return []string{
+	rows := []string{
 		"model: " + valueOrDefault(snapshot.Status.Model, "not-set"),
 		fmt.Sprintf("tokens: %d in / %d out", snapshot.ModelUsage.InputTokens, snapshot.ModelUsage.OutputTokens),
 		fmt.Sprintf("cache: %d read / %d write", snapshot.ModelUsage.CacheReadTokens, snapshot.ModelUsage.CacheWriteTokens),
 		fmt.Sprintf("cost: $%.2f", snapshot.ModelUsage.Cost),
 		fmt.Sprintf("failures: %d", snapshot.ModelUsage.FailureCount),
 	}
+	for _, preview := range snapshot.ModelUsagePreviews {
+		if preview.Kind == "model_generation" {
+			row := fmt.Sprintf(
+				"run model generation: source=%s provider=%s model=%s tokens=%d/%d cost=$%.6f budget=%s ledger_write=%t mode=%s status=%s assistant_text_persisted=%t",
+				runtimeRowValue(preview.Source, "model-generation"),
+				runtimeRowValue(preview.Provider, "unknown"),
+				runtimeRowValue(preview.Model, "not-set"),
+				preview.InputTokens,
+				preview.OutputTokens,
+				preview.Cost,
+				runtimeRowValue(preview.BudgetStatus, "not_enforced"),
+				preview.LedgerWrite,
+				runtimeRowValue(preview.ExecutionMode, "provider-generation"),
+				runtimeRowValue(preview.Status, "unknown"),
+				preview.AssistantTextPersisted,
+			)
+			if preview.LatencyMS > 0 {
+				row += fmt.Sprintf(" latency_ms=%d", preview.LatencyMS)
+			}
+			if preview.TextDigest != "" {
+				row += " digest=" + runtimeRowValue(preview.TextDigest, "")
+			}
+			if preview.Streaming {
+				row += fmt.Sprintf(
+					" streaming=true stream_completed=%t stream_chunk_count=%d",
+					preview.StreamCompleted,
+					preview.StreamChunkCount,
+				)
+				if preview.StreamDigest != "" {
+					row += " stream_digest=" + runtimeRowValue(preview.StreamDigest, "")
+				}
+				if preview.StreamPreview != "" {
+					row += " stream_preview=" + runtimeRowText(preview.StreamPreview)
+				}
+			}
+			if preview.TextPreview != "" {
+				row += " preview=" + runtimeRowText(preview.TextPreview)
+			}
+			rows = append(rows, row)
+			continue
+		}
+		if preview.Kind == "model_tool_plan_preview" {
+			rows = append(rows, modelToolPlanPreviewRuntimeRow(preview))
+			continue
+		}
+		rows = append(rows, fmt.Sprintf(
+			"run model usage preview: source=%s provider=%s model=%s tokens=%d/%d cost=$%.6f budget=%s ledger_write=%t mode=%s",
+			runtimeRowValue(preview.Source, "model-usage"),
+			runtimeRowValue(preview.Provider, "unknown"),
+			runtimeRowValue(preview.Model, "not-set"),
+			preview.InputTokens,
+			preview.OutputTokens,
+			preview.Cost,
+			runtimeRowValue(preview.BudgetStatus, "not_enforced"),
+			preview.LedgerWrite,
+			runtimeRowValue(preview.ExecutionMode, "metadata-only"),
+		))
+	}
+	return rows
+}
+
+func modelToolPlanPreviewRuntimeRow(preview eventlog.ReplayModelUsagePreview) string {
+	action := runtimeRowValue(preview.SemanticAction, "unknown")
+	validity := runtimeRowValue(firstReplayPreviewStringField(preview.Validity, preview.Status), "unknown")
+	row := fmt.Sprintf(
+		"model tool plan preview: source=%s agent=%s role=%s provider=%s model=%s tokens=%d/%d cost=$%.6f action=%s validity=%s mode=%s",
+		runtimeRowValue(preview.Source, "model-tool-plan"),
+		runtimeRowValue(preview.AgentID, "unknown"),
+		runtimeRowValue(preview.Role, "unknown"),
+		runtimeRowValue(preview.Provider, "unknown"),
+		runtimeRowValue(preview.Model, "not-set"),
+		preview.InputTokens,
+		preview.OutputTokens,
+		preview.Cost,
+		action,
+		validity,
+		runtimeRowValue(preview.ExecutionMode, "metadata-only"),
+	)
+	if path := strings.TrimSpace(preview.ArtifactPath); path != "" {
+		row += " path=" + runtimeRowText(path) + " path_b64=" + runtimeRowValueB64(path)
+	}
+	digest := firstReplayPreviewStringField(
+		preview.ArtifactDigest,
+		preview.TextDigest,
+	)
+	if digest != "" {
+		row += " digest=" + runtimeRowValue(digest, "")
+	}
+	if preview.TextPreview != "" {
+		row += " preview=" + runtimeRowText(preview.TextPreview) + " preview_b64=" + runtimeRowValueB64(preview.TextPreview)
+	}
+	return row
+}
+
+func firstReplayPreviewStringField(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func runtimeRowValue(value string, fallback string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		value = fallback
+	}
+	return strings.Join(strings.Fields(value), "_")
+}
+
+func runtimeRowText(value string) string {
+	return strings.Join(strings.Fields(value), " ")
+}
+
+func runtimeRowValueB64(value string) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(value))
 }
 
 func agentRuntimeRows(snapshot eventlog.ReplaySnapshot) []string {

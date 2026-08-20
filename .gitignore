@@ -1,7 +1,9 @@
-.analysis/
+﻿.analysis/
 .worktrees
 bin/
 dist/
+gui/dist/
+gui/node_modules/
 
 *.log
 *.out
@@ -17,3 +19,7 @@ workspace/
 workspaces/
 tmp/
 temp/
+
+# root-level build artifacts
+/ouro.exe
+/ouro

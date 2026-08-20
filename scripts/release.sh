@@ -65,10 +65,34 @@ If this archive includes managed tool bundles, the installer copies them to:
 \${PREFIX}/share/ouroboros/toolchains/managed-bundles
 \`\`\`
 
+The bundled nuclei-templates seed carries offline corpus metadata, including
+corpus_status, corpus_name, corpus_source, corpus_retrieved_at,
+corpus_file_count, corpus_sha256, corpus_digest_status,
+corpus_digest_algorithm, and corpus_digest_scope, so operators can verify
+the packaged rule-corpus index without downloading, syncing, or executing it.
+
 Import a bundled tool into a workspace explicitly:
 
 \`\`\`sh
-ouro toolchain release-managed-install <workspace> "\${PREFIX}/share/ouroboros" web-api-pack httpx --execute
+ouro toolchain release-managed-bundles "\${PREFIX}/share/ouroboros"
+ouro toolchain release-managed-status <workspace> "\${PREFIX}/share/ouroboros" nuclei-templates
+ouro toolchain release-managed-status <workspace> "\${PREFIX}/share/ouroboros" nuclei-templates --expected-sha256 <sha256>
+ouro toolchain release-managed-status-source-set <workspace> "\${PREFIX}/share/ouroboros" --set --set-by operator --reason "current release"
+ouro toolchain release-managed-status-source-set <workspace> "\${PREFIX}/share/ouroboros" --set --pin-bundle nuclei-templates --expected-sha256 <sha256> --set-by operator --reason "pinned release"
+ouro toolchain release-managed-status-source <workspace>
+ouro toolchain managed-update-request <workspace> "\${PREFIX}/share/ouroboros" <bundle> --request --requested-by operator --reason "review update"
+ouro toolchain managed-update-requests <workspace>
+ouro toolchain release-managed-install <workspace> "\${PREFIX}/share/ouroboros" web-api-pack nuclei-templates --expected-sha256 <sha256> --execute
+\`\`\`
+
+Import operator-supplied local binary or rule-bundle payloads as workspace-managed
+bundles without running them or creating final install links:
+
+\`\`\`sh
+ouro toolchain managed-bundle-import <workspace> httpx ./httpx --kind binary --version 1.3.0 --source operator-local/httpx --expected-sha256 <sha256> --import
+ouro toolchain managed-bundle-import <workspace> nuclei-templates ./nuclei-templates --kind rule_bundle --version 2026.06.05 --source operator-local/nuclei-templates --expected-sha256 <sha256> --import
+ouro toolchain managed-bundles <workspace> httpx
+ouro toolchain managed-install-plan <workspace> web-api-pack httpx
 \`\`\`
 EOF
 

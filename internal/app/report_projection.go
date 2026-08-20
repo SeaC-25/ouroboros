@@ -25,6 +25,7 @@ type ReportProjectionResult struct {
 	Status       string
 	Mode         string
 	ReportPath   string
+	ReportSHA256 string
 	EventCount   int
 	ReplayDigest string
 	Written      bool
@@ -87,6 +88,7 @@ func ProjectRunReport(ctx context.Context, root string, runID string, options Re
 		return ReportProjectionResult{}, err
 	}
 	markdown := report.RenderMarkdown(report.Project(snapshot.Evidence))
+	reportDigest := sha256.Sum256([]byte(markdown))
 	if _, err := writeReportProjectionMarkdown(root, runID, markdown); err != nil {
 		return ReportProjectionResult{}, err
 	}
@@ -109,6 +111,7 @@ func ProjectRunReport(ctx context.Context, root string, runID string, options Re
 	}
 	result.Status = "completed"
 	result.Mode = "write"
+	result.ReportSHA256 = hex.EncodeToString(reportDigest[:])
 	result.EventCount = len(events)
 	result.Written = true
 	return result, nil
