@@ -1,4 +1,4 @@
-import {
+﻿import {
   Activity,
   ChevronRight,
   CircleDot,
@@ -150,7 +150,7 @@ export function OuroborosIDE() {
   const [aiPrompts, setAIPrompts] = useState<PromptRecord[]>([]);
   const [aiHarnessCases, setAIHarnessCases] = useState<HarnessCase[]>([]);
   const [aiHarnessResults, setAIHarnessResults] = useState<HarnessRun[]>([]);
-  const [aiSwarmRuns, setAISwarmRuns] = useState<SwarmWorkflowRun[]>([]);
+  const [swarmData, setSwarmData] = useState<SwarmWorkflowRun[]>([]);
   const [aiStateStatus, setAIStateStatus] = useState('');
 
   useEffect(() => {
@@ -580,7 +580,7 @@ export function OuroborosIDE() {
       setAIPrompts(prompts);
       setAIHarnessCases(cases);
       setAIHarnessResults(results);
-      setAISwarmRuns(swarmRuns);
+      setSwarmData(swarmRuns);
       setAIStateStatus(`${zhCN.aiActions.loaded}: ${blackboard.length + agents.length + prompts.length + cases.length + results.length + swarmRuns.length}`);
     } catch {
       setAIStateStatus(zhCN.aiActions.loadFailed);
@@ -1397,7 +1397,7 @@ function MissionWorkbench({
             prompts={aiPrompts}
             harnessCases={aiHarnessCases}
             harnessResults={aiHarnessResults}
-            swarmRuns={aiSwarmRuns}
+            swarmRuns={swarmData}
             status={aiStateStatus}
             onRefresh={onRefreshAIState}
           />
