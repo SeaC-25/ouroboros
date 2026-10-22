@@ -2,10 +2,14 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/ouroboros/ouroboros/internal/nativetools"
@@ -78,11 +82,7 @@ func executeNativeGoTool(ctx context.Context, request ToolExecutionRequest) (Too
 		defer cancel()
 	}
 
-	output, err := nativetools.Run(runCtx, operation, nativetools.Target{Kind: target.Kind, Value: target.Value}, nativetools.Options{
-		Timeout:    nativeToolTimeout(request),
-		MaxWorkers: nativeToolWorkers(request),
-		ParserID:   parserIDForRequest(request),
-	})
+	output, err := runNativeToolGuarded(runCtx, operation, target, request)
 	if err != nil {
 		result.Transcript = err.Error()
 		return result, true, err
@@ -94,6 +94,68 @@ func executeNativeGoTool(ctx context.Context, request ToolExecutionRequest) (Too
 	result.Status = "completed"
 	return result, true, nil
 }
+
+// runNativeToolGuarded wraps nativetools.Run with the S4 resilience spine:
+//
+//  1. Memory watermark gate — a bloated heap (regex backtrack, huge archive
+//     decompress) pauses new dispatch instead of OOM-killing the process.
+//  2. Panic recovery — an in-process tool panic must never take down the
+//     whole agent; it converts into a per-execution error.
+//  3. Hard timeout with orphan-goroutine accounting — a leaked goroutine
+//     (the select below returns on timeout while the goroutine still runs)
+//     is counted so the scheduler can degrade concurrency.
+func runNativeToolGuarded(ctx context.Context, operation string, target ScopeTarget, request ToolExecutionRequest) (string, error) {
+	if nativeToolMemoryPressure() {
+		debug.FreeOSMemory()
+		return "", ErrMemoryPressureBackoff
+	}
+
+	type runOutcome struct {
+		output string
+		err    error
+	}
+	done := make(chan runOutcome, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				done <- runOutcome{output: "", err: fmt.Errorf("nativetool panic recovered [%s]: %v", operation, r)}
+			}
+		}()
+		out, err := nativetools.Run(ctx, operation, nativetools.Target{Kind: target.Kind, Value: target.Value}, nativetools.Options{
+			Timeout:    nativeToolTimeout(request),
+			MaxWorkers: nativeToolWorkers(request),
+			ParserID:   parserIDForRequest(request),
+		})
+		done <- runOutcome{output: out, err: err}
+	}()
+
+	select {
+	case outcome := <-done:
+		return outcome.output, outcome.err
+	case <-ctx.Done():
+		// The goroutine may still be running (orphaned). Count it; the
+		// scheduler reads this metric to back off concurrency.
+		nativeToolOrphanGoroutines.Add(1)
+		return "", fmt.Errorf("nativetool hard timeout [%s]: %w", operation, ctx.Err())
+	}
+}
+
+// ErrMemoryPressureBackoff is returned (not panicked) when the heap exceeds
+// the dispatch watermark; callers should requeue, not fail the run.
+var ErrMemoryPressureBackoff = errors.New("native tool deferred: memory pressure")
+
+// nativeToolMemoryPressure reports whether the Go heap exceeds the dispatch
+// watermark. Configurable for tests; default 75% of a 4 GiB budget.
+var nativeToolHeapWatermarkBytes uint64 = 3 * 1024 * 1024 * 1024
+
+func nativeToolMemoryPressure() bool {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	return m.HeapAlloc > nativeToolHeapWatermarkBytes
+}
+
+// nativeToolOrphanGoroutines counts goroutines abandoned by hard timeout.
+var nativeToolOrphanGoroutines atomic.Int64
 
 // nativeGoTargetFor selects the scope target the handler operates on, using the
 // operation's preferred target kinds first and falling back to any non-excluded

@@ -1872,7 +1872,7 @@ func (commandToolExecutionRunner) Execute(ctx context.Context, request ToolExecu
 		defer cancel()
 	}
 
-	cmd := exec.CommandContext(commandCtx, resolved, runCommand[1:]...)
+	cmd := guardedCommand(commandCtx, resolved, runCommand[1:]...)
 	cmd.Dir = commandWorkingDirectory(request, result.AttemptDir)
 	cmd.Env = commandWorkerEnvironment(request, result.AttemptDir, executionID)
 	output, err := cmd.CombinedOutput()
@@ -2914,7 +2914,7 @@ func executeContainerRunCommand(ctx context.Context, request ToolExecutionReques
 	}
 
 	args := containerRunArguments(request, result.ExecutionID, runCommand)
-	cmd := exec.CommandContext(commandCtx, resolved, args...)
+	cmd := guardedCommand(commandCtx, resolved, args...)
 	cmd.Dir = request.WorkspaceRoot
 	cmd.Env = containerEngineEnvironment()
 	output, err := cmd.CombinedOutput()
