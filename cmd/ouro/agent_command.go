@@ -20,7 +20,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -30,8 +32,10 @@ import (
 	"github.com/ouroboros/ouroboros/internal/conveyor"
 	"github.com/ouroboros/ouroboros/internal/evidencegate"
 	"github.com/ouroboros/ouroboros/internal/eventlog"
+	"github.com/ouroboros/ouroboros/internal/kbsearch"
 	"github.com/ouroboros/ouroboros/internal/nativetools"
 	"github.com/ouroboros/ouroboros/internal/scopegate"
+	"github.com/ouroboros/ouroboros/internal/sessionguard"
 	"github.com/spf13/cobra"
 )
 
@@ -117,7 +121,23 @@ func runAgent(ctx context.Context, out io.Writer, opts *agentRunOptions) error {
 	if err := guarded.Validate(); err != nil {
 		return fmt.Errorf("scope policy invalid: %w", err)
 	}
-	httpClient := guarded.GuardHTTPClient()
+	baseClient := guarded.GuardHTTPClient()
+
+	// Session layer (sessionguard): a cookie jar keeps auth state across
+	// tool calls, and a redirect guard hard-blocks logout-semantic paths
+	// so no probe can silently tear the session down (GateMesh §横切面).
+	baseClient.Jar, _ = cookiejar.New(nil)
+	httpClient := &http.Client{
+		Transport: baseClient.Transport,
+		Jar:       baseClient.Jar,
+		Timeout:   baseClient.Timeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if sessionguard.IsDestructiveAuthPath(req.URL) {
+				return fmt.Errorf("blocked logout-semantic path: %s", req.URL.Path)
+			}
+			return nil // every hop still dials through the guarded transport
+		},
+	}
 
 	// Workspace.
 	ws := opts.workspace
@@ -143,6 +163,21 @@ func runAgent(ctx context.Context, out io.Writer, opts *agentRunOptions) error {
 		return fmt.Errorf("open lease ledger: %w", err)
 	}
 
+	// Crash resume: recover orphaned RUNNING leases from a previous run.
+	// Requeued ones are marked FAILED (retryable); quarantined ones ABORTED
+	// (poison-pill — the tool×entity combination crashed twice).
+	requeued, quarantined, err := leases.RecoverOrphans(ctx, time.Now().UnixMilli())
+	if err != nil {
+		return fmt.Errorf("recover orphan leases: %w", err)
+	}
+	if len(requeued) > 0 || len(quarantined) > 0 {
+		fmt.Fprintf(out, "agent: resumed — %d orphan leases requeued, %d quarantined\n",
+			len(requeued), len(quarantined))
+		for _, q := range quarantined {
+			fmt.Fprintf(out, "agent: poison-pill %s×%s (switch tool on retry)\n", q.ToolName, q.EntityID)
+		}
+	}
+
 	// S6 gates.
 	progress := cognition.NewProgressGate(cognition.ProgressConfig{})
 	budget := cognition.NewBudgetGate(cognition.BudgetConfig{
@@ -150,6 +185,17 @@ func runAgent(ctx context.Context, out io.Writer, opts *agentRunOptions) error {
 		MaxTokens:    opts.maxTokens,
 		MaxWallClock: opts.wallClock,
 	})
+
+	// Knowledge base (optional at runtime, required for pivot hints):
+	// container path /opt/ouro/kb_vectors.db, dev fallback beside the repo.
+	var kb *kbsearch.Reader
+	for _, kbPath := range []string{"/opt/ouro/kb_vectors.db", "assets/kb_vectors.db"} {
+		if r, err := kbsearch.Open(kbPath); err == nil {
+			kb = r
+			defer r.Close()
+			break
+		}
+	}
 
 	// Flag capture regex.
 	var flagRe *regexp.Regexp
@@ -234,7 +280,7 @@ func runAgent(ctx context.Context, out io.Writer, opts *agentRunOptions) error {
 			Step: stepsTaken, Entity: best.Entity.ID, Action: best.Spec.Action,
 			Outcome: outcome, Tool: best.Spec.Tool, Output: tailFor(output, 400),
 		})
-		_ = leases.Transition(ctx, key, eventlog.LeaseArtifactSaved, artifactPath(ws, stepsTaken))
+		_ = leases.Transition(ctx, key, eventlog.LeaseArtifactSaved, writeAttemptArtifact(ws, stepsTaken, best, output, execErr))
 
 		// Flag capture across real tool output.
 		if flagRe != nil {
@@ -272,7 +318,34 @@ func runAgent(ctx context.Context, out io.Writer, opts *agentRunOptions) error {
 			newComponents = 1
 		}
 		if progress.RecordStep(newComponents) {
-			steps = append(steps, agentStepLog{stepsTaken, best.Entity.ID, "progress_gate", "stalled", "", ""})
+			// STALLED — Forced Pivot Protocol (GateMesh §Progress gate):
+			// 1) record the pivot against this entity's cap
+			// 2) failure-as-a-query: KB retrieval on the output features
+			// 3) orthogonal jump: drop the current quadrant for this entity
+			//    (mark high-value orthogonal actions eligible by clearing
+			//    the done-set entries of unexplored quadrants)
+			pivotErr := progress.RecordPivot(best.Entity.ID)
+			pivotNote := "stalled"
+			if pivotErr == nil {
+				pivotNote = "stalled→pivot"
+				if kb != nil {
+					terms := kbTermsFromOutput(output)
+					if len(terms) > 0 {
+						hits, err := kb.Search(terms, 3)
+						if err == nil && len(hits) > 0 {
+							pivotNote = "stalled→pivot kb:" + hits[0].Section
+							for i, h := range hits {
+								steps = append(steps, agentStepLog{stepsTaken, best.Entity.ID,
+									"kb_hint", fmt.Sprintf("hit%d %s: %s", i+1, h.Section, firstLine(h.Text, 100)), "", ""})
+							}
+						}
+					}
+				}
+				// Orthogonal jump: clear done-marks on a different quadrant's
+				// actions for this entity so the selector explores them next.
+				clearOrthogonalQuadrant(done, best.Entity.ID, best.Spec.Action)
+			}
+			steps = append(steps, agentStepLog{stepsTaken, best.Entity.ID, "progress_gate", pivotNote, "", ""})
 		}
 		_ = leases.Transition(ctx, key, eventlog.LeaseCommitted, artifactPath(ws, stepsTaken))
 	}
@@ -297,35 +370,61 @@ func executeConveyorAction(ctx context.Context, c conveyor.Candidate, client *ht
 	target := nativetools.Target{Kind: targetKindFor(c.Entity), Value: c.Entity.ID}
 	opts := nativetools.Options{Timeout: 60 * time.Second, MaxWorkers: 8, HTTPClient: client}
 
+	var output string
+	var err error
 	switch c.Spec.Action {
 	case "http_probe":
-		return nativetools.HTTPProbe(ctx, target.Value, opts)
+		output, err = nativetools.HTTPProbe(ctx, target.Value, opts)
 	case "body_fetch":
-		return nativetools.Crawl(ctx, target.Value, opts)
+		output, err = nativetools.Crawl(ctx, target.Value, opts)
 	case "auth_login":
-		return nativetools.TestAuth(ctx, target.Value, opts)
+		output, err = nativetools.TestAuth(ctx, target.Value, opts)
 	case "port_scan":
-		return nativetools.PortScan(ctx, target.Value, opts)
+		output, err = nativetools.PortScan(ctx, target.Value, opts)
 	case "fingerprint", "service_fingerprint":
-		return nativetools.FingerprintServices(ctx, target.Value, opts)
+		output, err = nativetools.FingerprintServices(ctx, target.Value, opts)
 	case "cms_scan":
-		return nativetools.HTTPProbe(ctx, target.Value, opts)
+		output, err = nativetools.HTTPProbe(ctx, target.Value, opts)
 	case "osint":
-		return nativetools.DiscoverSubdomains(ctx, target.Value, opts)
+		output, err = nativetools.DiscoverSubdomains(ctx, target.Value, opts)
 	case "shallow_dir":
-		return nativetools.PathFuzz(ctx, target.Value, opts)
+		// Fast track: in-process wordlist probe (milliseconds).
+		output, err = nativetools.PathFuzz(ctx, target.Value, opts)
+		// Deep track: fastsec heavy dictionary (4707 paths) as a guarded
+		// subprocess; absent binary degrades to native-only output.
+		if deep, derr := fastsecDeepScan(ctx, c.Entity.ID); derr == nil && strings.TrimSpace(deep) != "" {
+			output = output + "\n" + deep
+		}
 	case "sqli_probe":
-		return nativetools.DetectInjection(ctx, target.Value, opts)
+		output, err = nativetools.DetectInjection(ctx, target.Value, opts)
 	case "xss_probe":
-		return nativetools.ScanReflectedXSS(ctx, target.Value, opts)
+		output, err = nativetools.ScanReflectedXSS(ctx, target.Value, opts)
 	case "nuclei_subset":
-		return nativetools.ScanTemplates(ctx, target.Value, opts)
+		output, err = nativetools.ScanTemplates(ctx, target.Value, opts)
 	case "verify_finding":
 		// Internal action: replay probe as the verification vehicle.
-		return nativetools.HTTPProbe(ctx, target.Value, opts)
+		output, err = nativetools.HTTPProbe(ctx, target.Value, opts)
 	default:
 		return "", fmt.Errorf("no real binding for action %q — refusing to fake it", c.Spec.Action)
 	}
+	return output, err
+}
+
+// fastsecDeepScan runs the fastsec binary (heavy dictionaries) as a
+// process-group-guarded subprocess. Absent binary or failure returns an
+// error; the caller degrades to native-only output.
+func fastsecDeepScan(ctx context.Context, targetURL string) (string, error) {
+	// Derive scheme://host[:port] from the target URL for -dir.
+	parts := strings.SplitN(targetURL, "/", 4)
+	if len(parts) < 3 || parts[2] == "" {
+		return "", fmt.Errorf("fastsec: cannot derive base URL from %q", targetURL)
+	}
+	base := parts[0] + "//" + parts[2]
+	runCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(runCtx, "fastsec", "-dir", base, "-delay-min", "5", "-delay-max", "15")
+	out, err := cmd.CombinedOutput()
+	return string(out), err
 }
 
 func targetKindFor(e conveyor.Entity) string {
@@ -383,6 +482,19 @@ func seedEntities(objective string) []conveyor.Entity {
 	return out
 }
 
+// writeAttemptArtifact persists the FULL tool output (not the report's
+// truncated view) for audit/replay; returns the path for the lease ledger.
+func writeAttemptArtifact(ws string, step int, c conveyor.Candidate, output string, execErr error) string {
+	path := artifactPath(ws, step)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return path
+	}
+	body := fmt.Sprintf("action=%s\nentity=%s\ntool=%s\nerror=%v\n\n%s\n",
+		c.Spec.Action, c.Entity.ID, c.Spec.Tool, execErr, output)
+	_ = os.WriteFile(path, []byte(body), 0o644)
+	return path
+}
+
 func artifactPath(ws string, step int) string {
 	return filepath.Join(ws, "attempts", fmt.Sprintf("step-%03d.txt", step))
 }
@@ -437,4 +549,56 @@ func writeAgentReport(path, objective string, steps []agentStepLog, findings []a
 		}
 	}
 	return os.WriteFile(path, []byte(b.String()), 0o644)
+}
+
+// kbTermsFromOutput extracts failure-feature terms for KB retrieval
+// (failure-as-a-query): distinctive tokens from error output, WAF names,
+// status codes.
+func kbTermsFromOutput(output string) []string {
+	features := map[string]bool{}
+	lower := strings.ToLower(output)
+	// WAF / server signatures worth looking up.
+	for _, sig := range []string{"cloudfront", "cloudflare", "akamai", "waf", "403", "401", "500",
+		"nginx", "apache", "iis", "tomcat", "jenkins", "login", "redirect"} {
+		if strings.Contains(lower, sig) {
+			features[sig] = true
+		}
+	}
+	out := make([]string, 0, len(features))
+	for f := range features {
+		out = append(out, f)
+	}
+	if len(out) > 4 {
+		out = out[:4] // bounded query
+	}
+	return out
+}
+
+// quadrantOf maps an action to its orthogonal quadrant (GateMesh §机制2):
+// A=frontal attack, B=topology/history, C=white-box/static, D=identity/protocol.
+func quadrantOf(action string) string {
+	switch action {
+	case "sqli_probe", "xss_probe", "nuclei_subset":
+		return "A"
+	case "osint", "shallow_dir", "http_probe":
+		return "B"
+	case "body_fetch", "cms_scan", "fingerprint", "verify_finding":
+		return "C"
+	case "auth_login", "port_scan", "service_fingerprint":
+		return "D"
+	}
+	return "B"
+}
+
+// clearOrthogonalQuadrant re-opens done-marks on actions from a DIFFERENT
+// quadrant for this entity, forcing the selector to explore sideways.
+func clearOrthogonalQuadrant(done map[string]bool, entityID, stalledAction string) {
+	stalledQ := quadrantOf(stalledAction)
+	for _, action := range []string{"http_probe", "body_fetch", "auth_login", "port_scan",
+		"fingerprint", "cms_scan", "osint", "shallow_dir", "sqli_probe", "xss_probe",
+		"nuclei_subset", "verify_finding"} {
+		if quadrantOf(action) != stalledQ {
+			delete(done, entityID+"\x00"+action)
+		}
+	}
 }
