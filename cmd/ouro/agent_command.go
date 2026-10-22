@@ -21,17 +21,19 @@ import (
 	"io"
 	"net/http"
 	"net/http/cookiejar"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ouroboros/ouroboros/internal/cognition"
 	"github.com/ouroboros/ouroboros/internal/conveyor"
-	"github.com/ouroboros/ouroboros/internal/evidencegate"
 	"github.com/ouroboros/ouroboros/internal/eventlog"
+	"github.com/ouroboros/ouroboros/internal/evidencegate"
 	"github.com/ouroboros/ouroboros/internal/kbsearch"
 	"github.com/ouroboros/ouroboros/internal/nativetools"
 	"github.com/ouroboros/ouroboros/internal/scopegate"
@@ -138,6 +140,10 @@ func runAgent(ctx context.Context, out io.Writer, opts *agentRunOptions) error {
 			return nil // every hop still dials through the guarded transport
 		},
 	}
+
+	// Session canary (sessionguard): armed after a successful auth_login.
+	var sessionCanary *sessionguard.Canary
+	var canaryMu sync.Mutex
 
 	// Workspace.
 	ws := opts.workspace
@@ -253,7 +259,7 @@ func runAgent(ctx context.Context, out io.Writer, opts *agentRunOptions) error {
 		}
 
 		// Idempotency: claim before executing.
-		key := eventlog.IdempotencyKey(best.Entity.ID, best.Spec.Tool, best.Spec.Action)
+		key := eventlog.IdempotencyKey(fmt.Sprintf("%s#s%d", best.Entity.ID, best.Entity.SessionGen), best.Spec.Tool, best.Spec.Action)
 		if err := leases.Claim(ctx, eventlog.ExecutionLease{
 			Key: key, EntityID: best.Entity.ID, ToolName: best.Spec.Tool,
 			WorkerID: "agent", TimeoutMS: 120000,
@@ -282,6 +288,69 @@ func runAgent(ctx context.Context, out io.Writer, opts *agentRunOptions) error {
 			Outcome: outcome, Tool: best.Spec.Tool, Output: tailFor(output, 400),
 		})
 		_ = leases.Transition(ctx, key, eventlog.LeaseArtifactSaved, writeAttemptArtifact(ws, stepsTaken, best, output, execErr))
+
+		// Session canary lifecycle (sessionguard, GateMesh §横切面):
+		// arm after a successful auth_login; tick on later steps and probe
+		// when due. Probe semantics: froze=true means the session FAILED the
+		// probe (status/body drift) → re-open auth_login. Transport errors
+		// are inconclusive — never tear down on them.
+		canaryMu.Lock()
+		if best.Spec.Action == "auth_login" && execErr == nil && informativeOutput(output) {
+			probeURL := strings.TrimRight(best.Entity.ID, "/") + "/admin/secret"
+			if c, cerr := sessionguard.NewCanary("primary", sessionguard.CanaryConfig{
+				ProbeURL:       probeURL,
+				ExpectedStatus: http.StatusOK,
+				Client:         httpClient,
+				ProbeMethod:    http.MethodGet, // many servers 501 on HEAD; GET proves the session
+				EveryN:         3,
+				Interval:       30 * time.Second,
+			}); cerr == nil {
+				sessionCanary = c
+				// Bump the entity's session generation: idempotency keys for
+				// re-opened actions now differ from pre-login runs.
+				for i := range entities {
+					if entities[i].ID == best.Entity.ID {
+						entities[i].SessionGen++
+						break
+					}
+				}
+				// A fresh session unlocks gated content: re-open the crawl so
+				// body_fetch/shallow_dir pick up login-only pages.
+				delete(done, best.Entity.ID+"\x00"+"body_fetch")
+				delete(done, best.Entity.ID+"\x00"+"shallow_dir")
+				steps = append(steps, agentStepLog{stepsTaken, best.Entity.ID, "canary", "armed → " + probeURL, "", ""})
+				// Harvest gated content once while the fresh session is hot:
+				// the probe endpoint body participates in flag capture.
+				if body, gerr := fetchWithSession(ctx, httpClient, probeURL); gerr == nil {
+					if flagRe != nil {
+						for _, m := range flagRe.FindAllString(body, -1) {
+							if !flags[m] {
+								flags[m] = true
+								fmt.Fprintf(out, "agent: FLAG captured: %s\n", m)
+							}
+						}
+					}
+					steps = append(steps, agentStepLog{stepsTaken, best.Entity.ID, "canary", "harvest " + firstLine(body, 80), "", ""})
+				}
+			}
+		} else if sessionCanary != nil {
+			if frozen, reason := sessionCanary.Frozen(); frozen {
+				steps = append(steps, agentStepLog{stepsTaken, best.Entity.ID, "canary", "frozen:" + reason, "", ""})
+				delete(done, best.Entity.ID+"\x00"+"auth_login")
+				sessionCanary = nil
+			} else if sessionCanary.Tick() {
+				froze, perr := sessionCanary.ProbeNow(nil)
+				switch {
+				case perr != nil:
+					steps = append(steps, agentStepLog{stepsTaken, best.Entity.ID, "canary", "probe-error: " + perr.Error(), "", ""})
+				case froze:
+					steps = append(steps, agentStepLog{stepsTaken, best.Entity.ID, "canary", "probe-miss → re-auth", "", ""})
+					delete(done, best.Entity.ID+"\x00"+"auth_login")
+					sessionCanary = nil
+				}
+			}
+		}
+		canaryMu.Unlock()
 
 		// Flag capture across real tool output.
 		if flagRe != nil {
@@ -380,7 +449,14 @@ func executeConveyorAction(ctx context.Context, c conveyor.Candidate, client *ht
 	case "body_fetch":
 		output, err = nativetools.Crawl(ctx, target.Value, opts)
 	case "auth_login":
-		output, err = nativetools.TestAuth(ctx, target.Value, opts)
+		// Known-credential login (KaliMCP account-node semantics): POST
+		// seeded creds directly; the shared cookie jar keeps the session.
+		// No creds → TestAuth dictionary walk.
+		if user, pass, hasCreds := c.Entity.Credentials(); hasCreds {
+			output, err = loginWithCredentials(ctx, target.Value, user, pass, client)
+		} else {
+			output, err = nativetools.TestAuth(ctx, target.Value, opts)
+		}
 	case "port_scan":
 		output, err = nativetools.PortScan(ctx, target.Value, opts)
 	case "fingerprint", "service_fingerprint":
@@ -452,6 +528,42 @@ func (r nativeReproducer) Reproduce(ctx context.Context, reproduceCmd string) (s
 	return executeConveyorAction(ctx, c, r.client)
 }
 
+// loginWithCredentials POSTs known credentials to the target's /login form.
+// The shared cookie jar keeps the session for subsequent steps.
+func loginWithCredentials(ctx context.Context, target, user, pass string, client *http.Client) (string, error) {
+	form := url.Values{"username": {user}, "password": {pass}}
+	loginURL := strings.TrimRight(target, "/") + "/login"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, loginURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return "", fmt.Errorf("login request build: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("login request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	return fmt.Sprintf(`{"action":"auth_login","url":%q,"status_code":%d,"body_length":%d,"logged_in":%t}`,
+		loginURL, resp.StatusCode, len(body), resp.StatusCode == http.StatusOK), nil
+}
+
+// fetchWithSession GETs a URL through the sessioned (cookie-jar) client
+// and returns the response body (bounded).
+func fetchWithSession(ctx context.Context, client *http.Client, u string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	return string(body), nil
+}
+
 func hasCredentials(e conveyor.Entity) bool { return e.Has(conveyor.CapAuthSession) }
 
 // seedEntities extracts bare scope items from free text.
@@ -464,10 +576,21 @@ func seedEntities(objective string) []conveyor.Entity {
 			continue
 		}
 		var e conveyor.Entity
+		var creds string
+		// Credential syntax: user:pass@http://target/ arms the entity with
+		// an auth session (KaliMCP account-node semantics).
+		if at := strings.LastIndex(tok, "@"); at > 0 &&
+			(strings.HasPrefix(tok[at+1:], "http://") || strings.HasPrefix(tok[at+1:], "https://")) {
+			creds = tok[:at]
+			tok = tok[at+1:]
+		}
 		switch {
 		case strings.HasPrefix(tok, "http://") || strings.HasPrefix(tok, "https://"):
-			e = conveyor.Entity{ID: tok, Confidence: 0.9, Source: conveyor.SourceDefault,
-				Capabilities: map[conveyor.Capability]bool{conveyor.CapWebEndpoint: true}}
+			caps := map[conveyor.Capability]bool{conveyor.CapWebEndpoint: true}
+			if creds != "" {
+				caps[conveyor.CapAuthSession] = true
+			}
+			e = conveyor.Entity{ID: tok, Confidence: 0.9, Source: conveyor.SourceDefault, Capabilities: caps, UserPass: creds}
 		case strings.Contains(tok, ".") && !strings.Contains(tok, " "):
 			e = conveyor.Entity{ID: tok, Confidence: 0.7, Source: conveyor.SourceDefault,
 				Capabilities: map[conveyor.Capability]bool{conveyor.CapDomain: true, conveyor.CapHost: true}}

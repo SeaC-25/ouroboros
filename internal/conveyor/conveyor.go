@@ -7,6 +7,7 @@
 // (confidence − source penalty − 0.01 × phase order).
 package conveyor
 
+import "strings"
 // Capability is a marker an entity carries (KaliMCP node semantics mapped to
 // flat strings; hypergraph-style N-to-1 combos are expressed as multi-capability
 // requires lists).
@@ -74,6 +75,27 @@ type Entity struct {
 	Confidence   float64
 	Source       Source
 	Capabilities map[Capability]bool
+	// UserPass carries seeded credentials ("user:pass") when the entity was
+	// armed with an auth session (KaliMCP account-node semantics).
+	UserPass string
+	// SessionGen increments on each successful re-authentication so the
+	// agent's idempotency keys distinguish pre-login from post-login runs
+	// of the same action (a login changes preconditions → re-execution is
+	// legitimate, not a duplicate).
+	SessionGen int
+}
+
+// Credentials splits UserPass into user and password. hasCreds is false
+// when no credentials are known.
+func (e Entity) Credentials() (user, pass string, hasCreds bool) {
+	if e.UserPass == "" {
+		return "", "", false
+	}
+	parts := strings.SplitN(e.UserPass, ":", 2)
+	if len(parts) != 2 || parts[0] == "" {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
 }
 
 // Has reports whether the entity carries a capability.
