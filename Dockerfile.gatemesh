@@ -1,0 +1,51 @@
+# GateMesh 参赛镜像（doc/gatemesh-architecture-v1.md §S7）
+#
+# 多阶段构建：
+#   stage 1 (builder): Go 1.26 编译 ouro 静态二进制（modernc.org/sqlite 纯 Go，无 CGO）
+#   stage 2 (runtime): gcr.io/distroless/base-debian12 —— 无 shell、无包管理器、最小攻击面
+#
+# 镜像内容：ouro（含 sessionguard/scopegate/conveyor/cognition/evidencegate/
+#           eventlog leases）+ fastsec（KaliMCP 出品的 Go 扫描引擎）+ KB 资产
+#
+# 入口：ouro agent run --objective "..." --auto-accept --report /out/report.md
+#       （S6 交付后接线；当前入口为 serve/run 以便先行冒烟）
+
+FROM golang:1.26 AS builder
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY cmd/ cmd/
+COPY internal/ internal/
+COPY configs/ configs/
+
+# 静态编译：CGO_ENABLED=0 + trimpath；tags 关闭不需要的平台特性
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath \
+    -ldflags="-s -w" \
+    -o /out/ouro ./cmd/ouro
+
+# ---- runtime ----
+FROM gcr.io/distroless/base-debian12:nonroot
+
+WORKDIR /workspace
+
+# ouro 主二进制
+COPY --from=builder /out/ouro /usr/local/bin/ouro
+
+# fastsec（Go 单二进制，从 KaliMCP 构建产物注入；build 时 --build-arg 或预放置）
+# 构建上下文需含 fastsec-linux-amd64（在 F:/KaliMCP-EXtreme/tools/fastsec 交叉编译）
+COPY fastsec-linux-amd64 /usr/local/bin/fastsec
+RUN ["/usr/local/bin/fastsec", "-help"]  # distroless 无 shell；用 ENTRYPOINT 校验由 CI 替代
+
+# KB 资产（265 chunks 知识库，供 kb 检索）
+COPY assets/kb_vectors.db /opt/ouro/kb_vectors.db
+
+# 工作区卷（证据/报告/eventlog 落盘处）
+VOLUME ["/workspace", "/out"]
+
+# 非 root（distroless nonroot 变体内置 uid 65532）
+USER nonroot
+
+ENTRYPOINT ["/usr/local/bin/ouro"]
+CMD ["run", "/workspace"]
