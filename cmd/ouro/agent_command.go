@@ -260,6 +260,7 @@ func runAgent(ctx context.Context, out io.Writer, opts *agentRunOptions) error {
 		}); err != nil {
 			done[best.Entity.ID+"\x00"+best.Spec.Action] = true
 			stepsTaken++
+			_ = budget.Step() // duplicate rejections consume budget too
 			steps = append(steps, agentStepLog{stepsTaken, best.Entity.ID, best.Spec.Action, "duplicate-or-quarantined", best.Spec.Tool, ""})
 			continue
 		}
@@ -311,10 +312,11 @@ func runAgent(ctx context.Context, out io.Writer, opts *agentRunOptions) error {
 			})
 		}
 
-		// Progress accounting: real component delta = did the tool produce
-		// output (new surface) or not.
+		// Progress accounting: "did this step learn anything NEW?" A dead
+		// port's empty crawl or an all-closed portscan XML is not progress
+		// (nativetools returns well-formed-but-empty output for those).
 		newComponents := 0
-		if execErr == nil && strings.TrimSpace(output) != "" {
+		if execErr == nil && informativeOutput(output) {
 			newComponents = 1
 		}
 		if progress.RecordStep(newComponents) {
@@ -505,6 +507,29 @@ func tailFor(s string, n int) string {
 		return s
 	}
 	return "…" + s[len(s)-n:]
+}
+
+// informativeOutput judges whether tool output carries new knowledge:
+// JSON with non-empty results, a 2xx probe status, or an open port.
+// Empty-but-valid shapes (dead targets) score zero so IGR detects stalls.
+func informativeOutput(output string) bool {
+	s := strings.TrimSpace(output)
+	if s == "" {
+		return false
+	}
+	if strings.Contains(s, `"results":[]`) {
+		return false
+	}
+	if strings.Contains(s, "<ports></ports>") {
+		return false
+	}
+	if strings.Contains(s, `"status_code":2`) || strings.Contains(s, `<port `) || strings.Contains(s, "[+]") {
+		return true
+	}
+	if strings.Contains(s, `"response"`) && strings.Contains(s, `"status_code"`) {
+		return true
+	}
+	return false
 }
 
 func firstLine(s string, n int) string {
