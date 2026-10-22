@@ -3,33 +3,35 @@ package main
 // GateMesh competition entrypoint: `ouro agent run --objective ...`
 // (doc/gatemesh-architecture-v1.md §S7).
 //
-// Wires the six S1–S6 packages into one autonomous loop:
+// Wires the six S1–S6 packages into one autonomous loop with REAL execution:
 //
-//	scopegate    → transport-level scope enforcement (the only gate that
-//	               cannot be turned off in --auto-accept)
-//	sessionguard → auth sessions with COW snapshots + canary
-//	conveyor     → 12-action reflex belt (RuleRouter scoring, zero LLM)
+//	scopegate    → every outbound dial passes the CIDR/domain whitelist
+//	               (the only gate that cannot be turned off)
+//	conveyor     → 12-action reflex belt picks the next action (zero LLM)
+//	nativetools  → the action ACTUALLY RUNS (http_probe dials, path_fuzz
+//	               fuzzes, port_scan scans …) through guarded execution
+//	evidencegate → tool findings must pass E2→E3 differential promotion
 //	cognition    → Progress gate (anti-capitulation) + Budget gate (hard caps)
-//	evidencegate → E2→E3 differential promotion
-//	eventlog     → idempotency ledger (crash resume)
-//
-// The loop itself is deliberately boring: pick the best conveyor candidate,
-// execute through the guarded native-tool path, record, repeat until the
-// Budget gate hard-stops or no candidates remain and pivots are exhausted.
+//	eventlog     → idempotency ledger (crash resume) + flag regex capture
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/ouroboros/ouroboros/internal/cognition"
 	"github.com/ouroboros/ouroboros/internal/conveyor"
+	"github.com/ouroboros/ouroboros/internal/evidencegate"
 	"github.com/ouroboros/ouroboros/internal/eventlog"
+	"github.com/ouroboros/ouroboros/internal/nativetools"
+	"github.com/ouroboros/ouroboros/internal/scopegate"
 	"github.com/spf13/cobra"
 )
 
@@ -43,15 +45,15 @@ func newAgentCommand(out io.Writer) *cobra.Command {
 }
 
 type agentRunOptions struct {
-	objective    string
-	workspace    string
-	autoAccept   bool
-	maxSteps     int
-	maxTokens    int64
-	wallClock    time.Duration
-	flagFormat   string
-	reportPath   string
-	scopePolicy  string
+	objective   string
+	workspace   string
+	autoAccept  bool
+	maxSteps    int
+	maxTokens   int64
+	wallClock   time.Duration
+	flagFormat  string
+	reportPath  string
+	scopePolicy string
 }
 
 func newAgentRunCommand(out io.Writer) *cobra.Command {
@@ -59,10 +61,11 @@ func newAgentRunCommand(out io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "run",
 		Short: "Drive one objective through the GateMesh loop autonomously",
-		Long: "ouro agent run --objective \"<goal>\" [--auto-accept]\n\n" +
-			"Autonomous loop: conveyor picks reflex actions, the Progress gate\n" +
-			"rejects capitulation, the Budget gate hard-stops on limits, and every\n" +
-			"finding must pass differential evidence promotion before it counts.",
+		Long: "ouro agent run --objective \"<goal>\" --scope-policy <policy.json>\n\n" +
+			"Autonomous loop with real tool execution: the conveyor picks reflex\n" +
+			"actions, nativetools executes them through the scope-guarded transport,\n" +
+			"the Progress gate rejects capitulation, the Budget gate hard-stops on\n" +
+			"limits, and findings count only after differential evidence promotion.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runAgent(cmd.Context(), out, opts)
 		},
@@ -73,7 +76,7 @@ func newAgentRunCommand(out io.Writer) *cobra.Command {
 	cmd.Flags().IntVar(&opts.maxSteps, "max-steps", 500, "budget gate: hard step cap")
 	cmd.Flags().Int64Var(&opts.maxTokens, "max-tokens", 2_000_000, "budget gate: hard token cap")
 	cmd.Flags().DurationVar(&opts.wallClock, "max-wall-clock", 4*time.Hour, "budget gate: hard wall-clock cap")
-	cmd.Flags().StringVar(&opts.flagFormat, "flag-format", "", "regex scanned across tool output for flag capture")
+	cmd.Flags().StringVar(&opts.flagFormat, "flag-format", "", "regex scanned across tool output for flag capture (e.g. 'flag\\{[^}]+\\}')")
 	cmd.Flags().StringVar(&opts.reportPath, "report", "", "report output path (default: <workspace>/report.md)")
 	cmd.Flags().StringVar(&opts.scopePolicy, "scope-policy", "", "scope policy JSON (CIDR/domain whitelist); required")
 	_ = cmd.MarkFlagRequired("objective")
@@ -81,8 +84,40 @@ func newAgentRunCommand(out io.Writer) *cobra.Command {
 	return cmd
 }
 
+// agentStepLog is one dispatched action record for the report.
+type agentStepLog struct {
+	Step    int    `json:"step"`
+	Entity  string `json:"entity"`
+	Action  string `json:"action"`
+	Outcome string `json:"outcome"`
+	Tool    string `json:"tool,omitempty"`
+	Output  string `json:"output,omitempty"` // truncated transcript tail
+}
+
+// agentFinding is one evidence-tracked finding.
+type agentFinding struct {
+	ID     string `json:"id"`
+	Entity string `json:"entity"`
+	Signal string `json:"signal"`
+	Level  string `json:"level"`
+	Note   string `json:"note,omitempty"`
+}
+
 func runAgent(ctx context.Context, out io.Writer, opts *agentRunOptions) error {
 	started := time.Now()
+
+	// S3: scope gate — load policy, build the guarded HTTP client. This is
+	// the transport every tool call below goes through; out-of-scope dials
+	// fail before a packet leaves.
+	policy, err := scopegate.LoadScopePolicyFile(opts.scopePolicy)
+	if err != nil {
+		return fmt.Errorf("load scope policy: %w", err)
+	}
+	guarded := scopegate.NewGuardedDialerStruct(policy, nil)
+	if err := guarded.Validate(); err != nil {
+		return fmt.Errorf("scope policy invalid: %w", err)
+	}
+	httpClient := guarded.GuardHTTPClient()
 
 	// Workspace.
 	ws := opts.workspace
@@ -97,7 +132,7 @@ func runAgent(ctx context.Context, out io.Writer, opts *agentRunOptions) error {
 		return fmt.Errorf("agent workspace mkdir: %w", err)
 	}
 
-	// L0: eventlog + idempotency ledger (crash resume spine).
+	// L0: eventlog + idempotency ledger.
 	store, err := eventlog.OpenSQLite(filepath.Join(ws, "events.db"))
 	if err != nil {
 		return fmt.Errorf("open eventlog: %w", err)
@@ -116,23 +151,29 @@ func runAgent(ctx context.Context, out io.Writer, opts *agentRunOptions) error {
 		MaxWallClock: opts.wallClock,
 	})
 
-	// S5 conveyor.
-	registry := conveyor.DefaultRegistry()
+	// Flag capture regex.
+	var flagRe *regexp.Regexp
+	if opts.flagFormat != "" {
+		flagRe, err = regexp.Compile(opts.flagFormat)
+		if err != nil {
+			return fmt.Errorf("flag-format regex: %w", err)
+		}
+	}
 
-	// Seed entities from the objective text (bare hosts/URLs/domains).
+	// S5 conveyor + seed entities.
+	registry := conveyor.DefaultRegistry()
 	entities := seedEntities(opts.objective)
 
-	fmt.Fprintf(out, "agent: workspace=%s entities=%d budget(steps=%d tokens=%d wall=%s)\n",
+	fmt.Fprintf(out, "agent: workspace=%s entities=%d budget(steps=%d tokens=%d wall=%s) scope=on\n",
 		ws, len(entities), opts.maxSteps, opts.maxTokens, opts.wallClock)
 
 	// The loop.
-	// stepLog is one dispatched action record (see agentStepLog at package
-	// level; this local alias keeps the loop body terse).
-	type stepLog = agentStepLog
+	steps := []agentStepLog{}
+	findings := []agentFinding{}
 	flags := map[string]bool{}
-	steps := []stepLog{}
-	done := map[string]bool{} // (entity,action) already committed or quarantined
+	done := map[string]bool{}
 	stepsTaken := 0
+
 	for {
 		if budget.HardStop() {
 			fmt.Fprintf(out, "agent: budget hard stop (%s) after %d steps\n", budget.StoppedBy(), stepsTaken)
@@ -147,7 +188,7 @@ func runAgent(ctx context.Context, out io.Writer, opts *agentRunOptions) error {
 			break
 		}
 
-		// Best conveyor candidate across all entities.
+		// Best conveyor candidate not already done.
 		var best conveyor.Candidate
 		found := false
 		for _, e := range entities {
@@ -161,14 +202,7 @@ func runAgent(ctx context.Context, out io.Writer, opts *agentRunOptions) error {
 			}
 		}
 		if !found {
-			// Nothing matched. The Progress gate decides whether this is
-			// a legitimate stop or a capitulation to reject.
-			if progress.ShouldRejectCompletion(true, "objective") {
-				// No candidates AND queue empty → pivots exhausted check.
-				// Record stagnation and stop honestly.
-				fmt.Fprintf(out, "agent: no conveyor candidates remain; stopping\n")
-				break
-			}
+			fmt.Fprintf(out, "agent: no conveyor candidates remain; stopping\n")
 			break
 		}
 
@@ -176,36 +210,71 @@ func runAgent(ctx context.Context, out io.Writer, opts *agentRunOptions) error {
 		key := eventlog.IdempotencyKey(best.Entity.ID, best.Spec.Tool, best.Spec.Action)
 		if err := leases.Claim(ctx, eventlog.ExecutionLease{
 			Key: key, EntityID: best.Entity.ID, ToolName: best.Spec.Tool,
-			WorkerID: "agent", TimeoutMS: int64(best.Spec.PhaseOrder)*1000 + 30000,
+			WorkerID: "agent", TimeoutMS: 120000,
 		}); err != nil {
-			// Duplicate or quarantined: mark done so the selector moves on.
 			done[best.Entity.ID+"\x00"+best.Spec.Action] = true
-			steps = append(steps, stepLog{stepsTaken + 1, best.Entity.ID, best.Spec.Action, "duplicate-or-quarantined"})
+			stepsTaken++
+			steps = append(steps, agentStepLog{stepsTaken, best.Entity.ID, best.Spec.Action, "duplicate-or-quarantined", best.Spec.Tool, ""})
 			continue
 		}
 		done[best.Entity.ID+"\x00"+best.Spec.Action] = true
 		_ = leases.Transition(ctx, key, eventlog.LeaseRunning, "")
 
-		// Execute through the (guarded) native path. The real binding to
-		// nativetools/fastsec arrives with the S7 integration test; the
-		// competition entry records the dispatch shape now.
+		// REAL EXECUTION: dispatch the action through nativetools with the
+		// scope-guarded HTTP client. Failures are recorded, never fatal.
+		output, execErr := executeConveyorAction(ctx, best, httpClient)
 		stepsTaken++
-		_ = budget.Step() // account into the gate (latches hard stop)
-		steps = append(steps, stepLog{stepsTaken, best.Entity.ID, best.Spec.Action, "dispatched"})
+		_ = budget.Step()
 
-		// Progress accounting: a dispatched step yields "components" when
-		// the action is new for this entity (proxy for IGR until the
-		// nativetools binding feeds real component deltas).
-		newComponents := 1
-		if best.Spec.Action == "verify_finding" {
-			newComponents = 0 // internal verification adds no new surface
+		outcome := "ok"
+		if execErr != nil {
+			outcome = "error"
+		}
+		steps = append(steps, agentStepLog{
+			Step: stepsTaken, Entity: best.Entity.ID, Action: best.Spec.Action,
+			Outcome: outcome, Tool: best.Spec.Tool, Output: tailFor(output, 400),
+		})
+		_ = leases.Transition(ctx, key, eventlog.LeaseArtifactSaved, artifactPath(ws, stepsTaken))
+
+		// Flag capture across real tool output.
+		if flagRe != nil {
+			for _, m := range flagRe.FindAllString(output, -1) {
+				if !flags[m] {
+					flags[m] = true
+					fmt.Fprintf(out, "agent: FLAG captured: %s\n", m)
+				}
+			}
+		}
+
+		// Evidence promotion: any non-empty signal output is a candidate
+		// E2 finding; verify_finding actions replay and promote via the
+		// differential gate. (Positive-only until a negative command exists
+		// — recorded honestly in the note.)
+		if strings.Contains(best.Spec.Action, "probe") || strings.Contains(best.Spec.Action, "scan") {
+			f := evidencegate.Finding{
+				ID:             fmt.Sprintf("f-%d", stepsTaken),
+				Target:         best.Entity.ID,
+				ReproduceCmd:   "ouro-native:" + best.Spec.Action + " " + best.Entity.ID,
+				ExpectedSignal: "",
+				Level:          evidencegate.E2Tentative,
+			}
+			res := evidencegate.PromoteDifferential(ctx, f, nativeReproducer{client: httpClient}, "")
+			findings = append(findings, agentFinding{
+				ID: f.ID, Entity: best.Entity.ID, Signal: firstLine(output, 120),
+				Level: string(res.To), Note: res.Note,
+			})
+		}
+
+		// Progress accounting: real component delta = did the tool produce
+		// output (new surface) or not.
+		newComponents := 0
+		if execErr == nil && strings.TrimSpace(output) != "" {
+			newComponents = 1
 		}
 		if progress.RecordStep(newComponents) {
-			// Stalled: the gate owner (integration point) would trigger a
-			// pivot here; we record it.
-			steps = append(steps, stepLog{stepsTaken, best.Entity.ID, "progress_gate", "stalled"})
+			steps = append(steps, agentStepLog{stepsTaken, best.Entity.ID, "progress_gate", "stalled", "", ""})
 		}
-		_ = leases.Transition(ctx, key, eventlog.LeaseCommitted, "")
+		_ = leases.Transition(ctx, key, eventlog.LeaseCommitted, artifactPath(ws, stepsTaken))
 	}
 
 	// Report.
@@ -213,16 +282,78 @@ func runAgent(ctx context.Context, out io.Writer, opts *agentRunOptions) error {
 	if report == "" {
 		report = filepath.Join(ws, "report.md")
 	}
-	if err := writeAgentReport(report, opts.objective, toAnySlice(steps), flags, budget, started); err != nil {
+	if err := writeAgentReport(report, opts.objective, steps, findings, flags, budget, started); err != nil {
 		return fmt.Errorf("write report: %w", err)
 	}
-	fmt.Fprintf(out, "agent: report → %s (%d steps, wall %s)\n", report, len(steps), time.Since(started).Round(time.Second))
+	fmt.Fprintf(out, "agent: report → %s (%d steps, %d findings, %d flags, wall %s)\n",
+		report, stepsTaken, len(findings), len(flags), time.Since(started).Round(time.Second))
 	return nil
 }
 
-// seedEntities extracts bare scope items from free text. Deliberately dumb:
-// tokens that look like hosts/URLs/domains become entities with matching
-// capabilities. Real objective parsing (LLM) plugs in at L3 later.
+// executeConveyorAction maps a conveyor action to its REAL nativetools
+// implementation. Every branch calls a real exported function; unknown
+// bindings are an explicit error, never a silent no-op.
+func executeConveyorAction(ctx context.Context, c conveyor.Candidate, client *http.Client) (string, error) {
+	target := nativetools.Target{Kind: targetKindFor(c.Entity), Value: c.Entity.ID}
+	opts := nativetools.Options{Timeout: 60 * time.Second, MaxWorkers: 8, HTTPClient: client}
+
+	switch c.Spec.Action {
+	case "http_probe":
+		return nativetools.HTTPProbe(ctx, target.Value, opts)
+	case "body_fetch":
+		return nativetools.Crawl(ctx, target.Value, opts)
+	case "auth_login":
+		return nativetools.TestAuth(ctx, target.Value, opts)
+	case "port_scan":
+		return nativetools.PortScan(ctx, target.Value, opts)
+	case "fingerprint", "service_fingerprint":
+		return nativetools.FingerprintServices(ctx, target.Value, opts)
+	case "cms_scan":
+		return nativetools.HTTPProbe(ctx, target.Value, opts)
+	case "osint":
+		return nativetools.DiscoverSubdomains(ctx, target.Value, opts)
+	case "shallow_dir":
+		return nativetools.PathFuzz(ctx, target.Value, opts)
+	case "sqli_probe":
+		return nativetools.DetectInjection(ctx, target.Value, opts)
+	case "xss_probe":
+		return nativetools.ScanReflectedXSS(ctx, target.Value, opts)
+	case "nuclei_subset":
+		return nativetools.ScanTemplates(ctx, target.Value, opts)
+	case "verify_finding":
+		// Internal action: replay probe as the verification vehicle.
+		return nativetools.HTTPProbe(ctx, target.Value, opts)
+	default:
+		return "", fmt.Errorf("no real binding for action %q — refusing to fake it", c.Spec.Action)
+	}
+}
+
+func targetKindFor(e conveyor.Entity) string {
+	if e.Has(conveyor.CapDomain) {
+		return "domain"
+	}
+	return "url"
+}
+
+// nativeReproducer adapts conveyor replays to the evidence gate.
+type nativeReproducer struct{ client *http.Client }
+
+func (r nativeReproducer) Reproduce(ctx context.Context, reproduceCmd string) (string, error) {
+	// Format: "ouro-native:<action> <entity>"
+	parts := strings.SplitN(strings.TrimPrefix(reproduceCmd, "ouro-native:"), " ", 2)
+	if len(parts) != 2 {
+		return "", fmt.Errorf("bad reproduce cmd: %q", reproduceCmd)
+	}
+	e := conveyor.Entity{ID: parts[1], Confidence: 1, Capabilities: map[conveyor.Capability]bool{
+		conveyor.CapWebEndpoint: true, conveyor.CapDomain: true,
+	}}
+	c := conveyor.Candidate{Entity: e, Spec: conveyor.ActionSpec{Action: parts[0]}}
+	return executeConveyorAction(ctx, c, r.client)
+}
+
+func hasCredentials(e conveyor.Entity) bool { return e.Has(conveyor.CapAuthSession) }
+
+// seedEntities extracts bare scope items from free text.
 func seedEntities(objective string) []conveyor.Entity {
 	var out []conveyor.Entity
 	seen := map[string]bool{}
@@ -238,7 +369,7 @@ func seedEntities(objective string) []conveyor.Entity {
 				Capabilities: map[conveyor.Capability]bool{conveyor.CapWebEndpoint: true}}
 		case strings.Contains(tok, ".") && !strings.Contains(tok, " "):
 			e = conveyor.Entity{ID: tok, Confidence: 0.7, Source: conveyor.SourceDefault,
-				Capabilities: map[conveyor.Capability]bool{conveyor.CapDomain: true}}
+				Capabilities: map[conveyor.Capability]bool{conveyor.CapDomain: true, conveyor.CapHost: true}}
 		default:
 			continue
 		}
@@ -246,22 +377,52 @@ func seedEntities(objective string) []conveyor.Entity {
 		out = append(out, e)
 	}
 	if len(out) == 0 {
-		// Guarantee at least one seed so the loop has work.
 		out = append(out, conveyor.Entity{ID: "objective:" + objective, Confidence: 0.5,
 			Source: conveyor.SourceInsight, Capabilities: map[conveyor.Capability]bool{conveyor.CapWebEndpoint: true}})
 	}
 	return out
 }
 
-func hasCredentials(e conveyor.Entity) bool { return e.Has(conveyor.CapAuthSession) }
+func artifactPath(ws string, step int) string {
+	return filepath.Join(ws, "attempts", fmt.Sprintf("step-%03d.txt", step))
+}
 
-func writeAgentReport(path, objective string, steps []any, flags map[string]bool, budget *cognition.BudgetGate, started time.Time) error {
+func tailFor(s string, n int) string {
+	s = strings.TrimSpace(s)
+	if len(s) <= n {
+		return s
+	}
+	return "…" + s[len(s)-n:]
+}
+
+func firstLine(s string, n int) string {
+	for _, line := range strings.Split(s, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			if len(line) > n {
+				return line[:n]
+			}
+			return line
+		}
+	}
+	return ""
+}
+
+func writeAgentReport(path, objective string, steps []agentStepLog, findings []agentFinding, flags map[string]bool, budget *cognition.BudgetGate, started time.Time) error {
 	var b strings.Builder
 	b.WriteString("# Ouroboros Agent Report\n\n")
 	b.WriteString("## Objective\n\n" + objective + "\n\n")
 	b.WriteString("## Budget\n\n")
 	fmt.Fprintf(&b, "- steps used: %d\n- wall clock: %s\n- stopped by: %s\n\n",
 		budget.StepsUsed(), time.Since(started).Round(time.Second), budget.StoppedBy())
+	if len(findings) > 0 {
+		b.WriteString("## Findings (evidence-gated)\n\n```json\n")
+		enc := json.NewEncoder(&b)
+		enc.SetIndent("", " ")
+		if err := enc.Encode(findings); err != nil {
+			return err
+		}
+		b.WriteString("```\n\n")
+	}
 	b.WriteString("## Steps\n\n```json\n")
 	enc := json.NewEncoder(&b)
 	enc.SetIndent("", " ")
@@ -276,27 +437,4 @@ func writeAgentReport(path, objective string, steps []any, flags map[string]bool
 		}
 	}
 	return os.WriteFile(path, []byte(b.String()), 0o644)
-}
-
-// agentStepLog is one dispatched action record for the report.
-type agentStepLog struct {
-	Step    int    `json:"step"`
-	Entity  string `json:"entity"`
-	Action  string `json:"action"`
-	Outcome string `json:"outcome"`
-}
-
-// toAnySlice converts the step log for the report encoder.
-func toAnySlice(steps any) []any {
-	switch s := steps.(type) {
-	case []agentStepLog:
-		out := make([]any, len(s))
-		for i, v := range s {
-			out[i] = v
-		}
-		return out
-	case []any:
-		return s
-	}
-	return nil
 }

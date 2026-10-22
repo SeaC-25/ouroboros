@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"sort"
@@ -17,11 +18,13 @@ import (
 const OpPathFuzz = "path_fuzz"
 
 // ffufResult mirrors the ffuf JSON fields the ffuf parser reads
-// (internal/app/ffuf_parser.go: results[].url, status).
+// (internal/app/ffuf_parser.go: results[].url, status), plus a bounded body
+// excerpt so downstream consumers (flag capture, evidence) see content.
 type ffufResult struct {
 	URL        string `json:"url"`
 	StatusCode int    `json:"status"`
 	Length     int64  `json:"length,omitempty"`
+	Excerpt    string `json:"excerpt,omitempty"`
 }
 
 type ffufOutput struct {
@@ -53,7 +56,7 @@ func PathFuzz(ctx context.Context, target string, opts Options) (string, error) 
 	fuzzCtx, cancel := context.WithTimeout(ctx, opts.timeout())
 	defer cancel()
 
-	baseline, err := softNotFoundStatus(fuzzCtx, client, parsed)
+	baseline, baselineLen, err := softNotFoundBaseline(fuzzCtx, client, parsed)
 	if err != nil {
 		return "", err
 	}
@@ -71,7 +74,7 @@ func PathFuzz(ctx context.Context, target string, opts Options) (string, error) 
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			result, ok := probeFuzzCandidate(fuzzCtx, client, parsed, candidate, baseline)
+			result, ok := probeFuzzCandidate(fuzzCtx, client, parsed, candidate, baseline, baselineLen)
 			results[index] = outcome{result: result, ok: ok}
 		}(index, candidate)
 	}
@@ -92,23 +95,25 @@ func PathFuzz(ctx context.Context, target string, opts Options) (string, error) 
 	return string(encoded), nil
 }
 
-// softNotFoundStatus determines the status a missing path returns.
-func softNotFoundStatus(ctx context.Context, client *http.Client, base *url.URL) (int, error) {
+// softNotFoundBaseline determines the status AND body length a missing path
+// returns; the length discriminates catch-all-200 servers.
+func softNotFoundBaseline(ctx context.Context, client *http.Client, base *url.URL) (int, int, error) {
 	candidate := *base
 	candidate.Path = strings.TrimSuffix(base.Path, "/") + "/ouroboros-soft-404-probe-" + fmt.Sprint(time.Now().UnixNano())
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, candidate.String(), nil)
 	if err != nil {
-		return 0, fmt.Errorf("build baseline request: %w", err)
+		return 0, 0, fmt.Errorf("build baseline request: %w", err)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return 0, fmt.Errorf("baseline probe %s: %w", candidate.String(), err)
+		return 0, 0, fmt.Errorf("baseline probe %s: %w", candidate.String(), err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	return resp.StatusCode, nil
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	return resp.StatusCode, len(body), nil
 }
 
-func probeFuzzCandidate(ctx context.Context, client *http.Client, base *url.URL, candidate string, baselineStatus int) (ffufResult, bool) {
+func probeFuzzCandidate(ctx context.Context, client *http.Client, base *url.URL, candidate string, baselineStatus int, baselineLength int) (ffufResult, bool) {
 	probe := *base
 	probe.Path = strings.TrimSuffix(base.Path, "/") + "/" + strings.TrimPrefix(candidate, "/")
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, probe.String(), nil)
@@ -121,12 +126,47 @@ func probeFuzzCandidate(ctx context.Context, client *http.Client, base *url.URL,
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == baselineStatus {
+	if resp.StatusCode == http.StatusNotFound {
+		return ffufResult{}, false
+	}
+	if resp.StatusCode == baselineStatus {
+		if baselineStatus != http.StatusOK {
+			// Same non-200 status as a random missing path → absent.
+			return ffufResult{}, false
+		}
+		// Catch-all server: 200 for everything (common with SPA fallbacks
+		// and custom error pages). Content-length discrimination — a real
+		// page whose body differs from the baseline is genuine (ffuf -fs).
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		if err != nil {
+			return ffufResult{}, false
+		}
+		if len(body) == 0 || len(body) == baselineLength {
+			return ffufResult{}, false
+		}
+		return ffufResult{URL: probe.String(), StatusCode: resp.StatusCode, Length: int64(len(body)), Excerpt: excerptOf(body)}, true
+	}
+	// Non-baseline status: a genuine response. Read a bounded body for the
+	// excerpt (flag capture needs content, not just status codes).
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
 		return ffufResult{}, false
 	}
 	return ffufResult{
 		URL:        probe.String(),
 		StatusCode: resp.StatusCode,
-		Length:     resp.ContentLength,
+		Length:     int64(len(body)),
+		Excerpt:    excerptOf(body),
 	}, true
+}
+
+// excerptOf returns a bounded single-line excerpt of a response body.
+func excerptOf(body []byte) string {
+	const max = 512
+	text := strings.TrimSpace(string(body))
+	if len(text) > max {
+		text = text[:max]
+	}
+	// collapse newlines so the JSON log stays one line per result
+	return strings.ReplaceAll(text, "\n", " ")
 }

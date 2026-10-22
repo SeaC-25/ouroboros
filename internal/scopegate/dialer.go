@@ -19,6 +19,25 @@ type GuardedDialer struct {
 	base   *net.Dialer
 }
 
+// NewGuardedDialerStruct returns a GuardedDialer whose GuardHTTPClient
+// produces scope-guarded HTTP clients (callers that only need the raw
+// DialContext can use NewGuardedDialer instead).
+func NewGuardedDialerStruct(policy *ScopePolicy, base *net.Dialer) *GuardedDialer {
+	if base == nil {
+		base = &net.Dialer{}
+	}
+	return &GuardedDialer{policy: policy, base: base}
+}
+
+// Validate reports whether the wrapped policy is usable (non-nil; the
+// loader LoadScopePolicyFile already validated its shape).
+func (g *GuardedDialer) Validate() error {
+	if g == nil || g.policy == nil {
+		return fmt.Errorf("guarded dialer: nil policy")
+	}
+	return nil
+}
+
 // NewGuardedDialer wraps base (a fresh default dialer when nil) with policy
 // enforcement. The returned function plugs directly into
 // http.Transport.DialContext.

@@ -106,6 +106,19 @@ func PromoteDifferential(ctx context.Context, f Finding, repro Reproducer, negat
 	if err != nil {
 		out = out + "\n" + err.Error()
 	}
+	if strings.TrimSpace(f.ExpectedSignal) == "" {
+		// KaliMCP verifier semantics: no expected signal → a successful
+		// non-empty replay is a weak pass (E2 stays tentative, not FP).
+		if err == nil && strings.TrimSpace(out) != "" {
+			res.PositiveHit = true
+			res.To = E2Tentative
+			res.Note = "weak pass: non-empty successful replay, no signal to match"
+		} else {
+			res.To = EFalsePositive
+			res.Note = "replay failed or empty"
+		}
+		return res
+	}
 	res.PositiveHit = Signal(out, f.ExpectedSignal)
 
 	if !res.PositiveHit {
