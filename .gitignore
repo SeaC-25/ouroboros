@@ -27,3 +27,4 @@ temp/
 # SQLite runtime files
 *.db-shm
 *.db-wal
+fastsec-linux-amd64
