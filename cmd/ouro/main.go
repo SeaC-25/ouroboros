@@ -128,6 +128,7 @@ func newRootCommand(out io.Writer, errOut io.Writer) *cobra.Command {
 	cmd.AddCommand(newToolchainCommand(out))
 	cmd.AddCommand(newRuntimeCommand(out))
 	cmd.AddCommand(newServeCommand(out))
+	cmd.AddCommand(newAgentCommand(out))
 	return cmd
 }
 
