@@ -30,6 +30,12 @@ func parserEventsForToolExecution(runID string, request ToolExecutionRequest, re
 			return []eventlog.Event{parserStatusEvent(runID, request, result, parserID, "parse_failed", err.Error(), 0)}
 		}
 		return events
+	case "semgrep_sarif":
+		events, err := semgrepParserEvents(runID, request, result)
+		if err != nil {
+			return []eventlog.Event{parserStatusEvent(runID, request, result, parserID, "parse_failed", err.Error(), 0)}
+		}
+		return events
 	case "nuclei_jsonl":
 		events, err := nucleiParserEvents(runID, request, result)
 		if err != nil {
@@ -110,6 +116,60 @@ func parserEventsForToolExecution(runID string, request ToolExecutionRequest, re
 		return events
 	case "dnsrecon_json":
 		events, err := dnsreconParserEvents(runID, request, result)
+		if err != nil {
+			return []eventlog.Event{parserStatusEvent(runID, request, result, parserID, "parse_failed", err.Error(), 0)}
+		}
+		return events
+	case "exiftool_json":
+		events, err := exiftoolParserEvents(runID, request, result)
+		if err != nil {
+			return []eventlog.Event{parserStatusEvent(runID, request, result, parserID, "parse_failed", err.Error(), 0)}
+		}
+		return events
+	case "gitleaks_json":
+		events, err := gitleaksParserEvents(runID, request, result)
+		if err != nil {
+			return []eventlog.Event{parserStatusEvent(runID, request, result, parserID, "parse_failed", err.Error(), 0)}
+		}
+		return events
+	case "testssl_json":
+		events, err := testsslParserEvents(runID, request, result)
+		if err != nil {
+			return []eventlog.Event{parserStatusEvent(runID, request, result, parserID, "parse_failed", err.Error(), 0)}
+		}
+		return events
+	case "sslscan_xml":
+		events, err := sslscanParserEvents(runID, request, result)
+		if err != nil {
+			return []eventlog.Event{parserStatusEvent(runID, request, result, parserID, "parse_failed", err.Error(), 0)}
+		}
+		return events
+	case "trufflehog_json":
+		events, err := trufflehogParserEvents(runID, request, result)
+		if err != nil {
+			return []eventlog.Event{parserStatusEvent(runID, request, result, parserID, "parse_failed", err.Error(), 0)}
+		}
+		return events
+	case "apktool_text":
+		events, err := apktoolParserEvents(runID, request, result)
+		if err != nil {
+			return []eventlog.Event{parserStatusEvent(runID, request, result, parserID, "parse_failed", err.Error(), 0)}
+		}
+		return events
+	case "jadx_metadata_json":
+		events, err := jadxParserEvents(runID, request, result)
+		if err != nil {
+			return []eventlog.Event{parserStatusEvent(runID, request, result, parserID, "parse_failed", err.Error(), 0)}
+		}
+		return events
+	case "binwalk_text":
+		events, err := binwalkParserEvents(runID, request, result)
+		if err != nil {
+			return []eventlog.Event{parserStatusEvent(runID, request, result, parserID, "parse_failed", err.Error(), 0)}
+		}
+		return events
+	case "auth_test_jsonl":
+		events, err := authTestParserEvents(runID, request, result)
 		if err != nil {
 			return []eventlog.Event{parserStatusEvent(runID, request, result, parserID, "parse_failed", err.Error(), 0)}
 		}

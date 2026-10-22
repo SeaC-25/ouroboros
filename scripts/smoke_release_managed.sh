@@ -1,9 +1,17 @@
 #!/bin/sh
 set -eu
 
-TRUSTED_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-PATH="$TRUSTED_PATH"
-export PATH
+# Trusted PATH pinning is opt-in. By default this script keeps the inherited
+# PATH so toolchains installed outside the classic system directories (for
+# example Go under "C:\Program Files\Go\bin" on Windows Git Bash) remain
+# reachable. Set OURO_TRUSTED_PATH to a colon-separated directory list to
+# replace PATH with that strict allowlist.
+TRUSTED_PATH_DEFAULT="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+TRUSTED_PATH="${OURO_TRUSTED_PATH:-$TRUSTED_PATH_DEFAULT}"
+if [ -n "${OURO_TRUSTED_PATH:-}" ]; then
+	PATH="$TRUSTED_PATH"
+	export PATH
+fi
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 GOPROXY="${GOPROXY:-https://goproxy.cn,direct}"
@@ -54,6 +62,8 @@ GOOS_VALUE="$(go env GOOS)"
 GOARCH_VALUE="$(go env GOARCH)"
 PACKAGE="ouro_${VERSION}_${GOOS_VALUE}_${GOARCH_VALUE}"
 ARCHIVE="$DIST_DIR/$PACKAGE.tar.gz"
+# Fresh-binary note: scripts/release.sh unconditionally rebuilds from source
+# below, so $PREFIX/bin/ouro can never be a stale prebuilt artifact.
 OURO="$PREFIX/bin/ouro"
 RELEASE_ROOT="$PREFIX/share/ouroboros"
 
@@ -205,7 +215,17 @@ printf 'release-managed-status: import_status=linked link_status=linked\n'
 run_logged "run --tui" "$OURO_RELEASE_MANAGED_SMOKE_LOG_DIR/run-tui.txt" "$OURO" run "$WORKSPACE" --tui
 assert_log_contains "$OURO_RELEASE_MANAGED_SMOKE_LOG_DIR/run-tui.txt" "Workspace" "run --tui did not include Workspace panel"
 assert_log_contains "$OURO_RELEASE_MANAGED_SMOKE_LOG_DIR/run-tui.txt" "Runtime Tabs" "run --tui did not include Runtime Tabs panel"
-assert_log_contains "$OURO_RELEASE_MANAGED_SMOKE_LOG_DIR/run-tui.txt" "model:offline-model" "run --tui did not include model runtime state"
+# 期望模型取自工作区 providers.yaml 中第一个 enabled 的 provider,
+# 而非硬编码 offline-model:init 时生成默认配置(web-ai-media-editor 或 offline),
+# 两者都应能通过本断言。
+EXPECTED_MODEL=$(awk '
+  /^[[:space:]]*- name:/ { if (seen && enabled && model != "") { print model; exit } seen=1; enabled=0; model="" }
+  /^[[:space:]]*model:[[:space:]]*/ { sub(/^[[:space:]]*model:[[:space:]]*/, ""); model=$0 }
+  /^[[:space:]]*enabled:[[:space:]]*true/ { enabled=1 }
+  END { if (seen && enabled && model != "") print model }
+' "$WORKSPACE/providers.yaml")
+[ -n "$EXPECTED_MODEL" ] || fail "could not derive expected model from workspace providers.yaml"
+assert_log_contains "$OURO_RELEASE_MANAGED_SMOKE_LOG_DIR/run-tui.txt" "model:$EXPECTED_MODEL" "run --tui did not report the enabled provider model from providers.yaml"
 printf 'tui: ok\n'
 
 printf 'release-managed-smoke: ok\n'

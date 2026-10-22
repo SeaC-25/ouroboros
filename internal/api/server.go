@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -25,6 +26,8 @@ type Server struct {
 	broadcast  chan []byte
 	execMu     sync.Mutex
 	executions map[string]context.CancelFunc
+	done       chan struct{} // 用于优雅停止 goroutine
+	stopOnce   sync.Once
 }
 
 // NewServer 创建新的API服务器
@@ -43,6 +46,7 @@ func NewServer(workspace string, port int) (*Server, error) {
 		clients:    make(map[*websocket.Conn]bool),
 		broadcast:  make(chan []byte, 256),
 		executions: make(map[string]context.CancelFunc),
+		done:       make(chan struct{}),
 	}
 
 	// 启动广播goroutine
@@ -59,6 +63,8 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/health", s.handleHealth)
 	mux.HandleFunc("/api/gui/bootstrap", s.handleGUIBootstrap)
 	mux.HandleFunc("/api/provider", s.handleProvider)
+	mux.HandleFunc("/api/provider/test", s.handleProviderTest)
+	mux.HandleFunc("/api/provider/", s.handleProvider)
 	mux.HandleFunc("/api/mission/start", s.handleMissionStart)
 	mux.HandleFunc("/api/mission", s.handleMission)
 	mux.HandleFunc("/api/workspace/info", s.handleWorkspaceInfo)
@@ -73,15 +79,34 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/evidence/nodes", s.handleEvidenceNodes)
 	mux.HandleFunc("/api/reports/export", s.handleReportExport)
 	mux.HandleFunc("/api/runs", s.handleRuns)
+	mux.HandleFunc("/api/events", s.handleEvents)
+	mux.HandleFunc("/api/runtime/workers", s.handleRuntimeWorkers)
+	mux.HandleFunc("/api/agents/profiles", s.handleAgentProfiles)
+	mux.HandleFunc("/api/agents/profiles/", s.handleAgentProfiles)
+	mux.HandleFunc("/api/agents/tasks", s.handleAgentTasksHTTP)
+	mux.HandleFunc("/api/agents/tasks/", s.handleAgentTasksHTTP)
+	mux.HandleFunc("/api/harness", s.handleHarnessHTTP)
+	mux.HandleFunc("/api/harness/cases", s.handleHarnessHTTP)
+	mux.HandleFunc("/api/harness/cases/", s.handleHarnessHTTP)
+	mux.HandleFunc("/api/prompts", s.handlePromptAliasHTTP)
 	mux.HandleFunc("/api/toolchain", s.handleToolchain)
 	mux.HandleFunc("/api/toolchain/actions", s.handleToolchainActions)
 	mux.HandleFunc("/api/toolchain/actions/", s.handleToolchainActionByID)
 	mux.HandleFunc("/api/toolchain/packs/", s.handleToolchainPack)
 	mux.HandleFunc("/api/toolchain/health", s.handleToolchainHealth)
+	mux.HandleFunc("/api/frontier/queue", s.handleFrontierQueue)
+	mux.HandleFunc("/api/frontier/monitor", s.handleFrontierMonitor)
+	mux.HandleFunc("/api/frontier/dependencies", s.handleFrontierDependencies)
 	mux.HandleFunc("/api/ai/actions", s.handleAIActions)
 	mux.HandleFunc("/api/ai/actions/run", s.handleAIActionRun)
 	mux.HandleFunc("/api/ai/chat", s.handleAIChat)
+	mux.HandleFunc("/api/ai/conversation/sessions", s.handleAIConversationSessions)
+	mux.HandleFunc("/api/ai/conversation/sessions/new", s.handleAIConversationSessionNew)
+	mux.HandleFunc("/api/ai/conversation/sessions/restore", s.handleAIConversationSessionRestore)
+	mux.HandleFunc("/api/ai/conversation/search", s.handleAIConversationSearch)
+	mux.HandleFunc("/api/ai/conversation/export", s.handleAIConversationExport)
 	mux.HandleFunc("/api/ai/blackboard", s.handleAIBlackboard)
+	mux.HandleFunc("/api/ai/blackboard/", s.handleAIBlackboard)
 	mux.HandleFunc("/api/ai/agents", s.handleAIAgents)
 	mux.HandleFunc("/api/ai/prompts", s.handleAIPrompts)
 	mux.HandleFunc("/api/ai/harness/cases", s.handleAIHarnessCases)
@@ -103,15 +128,29 @@ func (s *Server) Start() error {
 
 // Stop 停止服务器
 func (s *Server) Stop(ctx context.Context) error {
+	// Closing done must be safe when shutdown is requested more than once.
+	if s.done != nil {
+		s.stopOnce.Do(func() { close(s.done) })
+	}
+	// 2. 停止所有活动执行
 	s.stopActiveExecutions()
 
-	// 关闭所有WebSocket连接
+	// 3. 关闭所有WebSocket连接
 	s.clientsMu.Lock()
 	for client := range s.clients {
 		client.Close()
 	}
+	s.clients = make(map[*websocket.Conn]bool) // 清空map
 	s.clientsMu.Unlock()
 
+	// 4. 关闭 SQLite 连接
+	if s.eventStore != nil {
+		if err := s.eventStore.Close(); err != nil {
+			log.Printf("关闭事件存储失败: %v", err)
+		}
+	}
+
+	// 5. 关闭 HTTP 服务器
 	if s.server != nil {
 		return s.server.Shutdown(ctx)
 	}
@@ -286,6 +325,63 @@ func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleEvents exposes the same persisted event projection used by replay and the GUI.
+func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		respondError(w, http.StatusMethodNotAllowed, "不支持的事件查询方法")
+		return
+	}
+
+	events, err := ProjectReplayEvents(r.Context(), s.eventStore)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, fmt.Sprintf("获取事件日志失败: %v", err))
+		return
+	}
+
+	query := r.URL.Query()
+	runID := query.Get("runId")
+	lane := query.Get("lane")
+	eventType := query.Get("type")
+	filtered := make([]ReplayEventDTO, 0, len(events))
+	for _, event := range events {
+		if runID != "" && event.RunID != runID {
+			continue
+		}
+		if lane != "" && event.Lane != lane {
+			continue
+		}
+		if eventType != "" && event.Type != eventType {
+			continue
+		}
+		filtered = append(filtered, event)
+	}
+
+	limit := 0
+	if rawLimit := query.Get("limit"); rawLimit != "" {
+		if parsed, parseErr := strconv.Atoi(rawLimit); parseErr == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+	if limit > 0 && len(filtered) > limit {
+		filtered = filtered[len(filtered)-limit:]
+	}
+
+	runs, err := ProjectRuns(r.Context(), s.eventStore)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, fmt.Sprintf("获取事件运行列表失败: %v", err))
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]any{
+		"runs":   runs,
+		"events": filtered,
+		"count":  len(filtered),
+		"runId":  runID,
+		"lane":   lane,
+		"type":   eventType,
+		"limit":  limit,
+	})
+}
+
 // handleToolchainHealth 工具链健康状态
 func (s *Server) handleToolchainHealth(w http.ResponseWriter, r *http.Request) {
 	toolchainDTO, err := ProjectToolchain(s.workspace)
@@ -330,9 +426,10 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		s.clients = map[*websocket.Conn]bool{}
 	}
 	s.clients[conn] = true
+	clientCount := len(s.clients)
 	s.clientsMu.Unlock()
 
-	log.Printf("✅ WebSocket客户端已连接（当前连接数: %d）", len(s.clients))
+	log.Printf("✅ WebSocket客户端已连接（当前连接数: %d）", clientCount)
 
 	// 发送欢迎消息
 	welcomeMsg := map[string]interface{}{
@@ -351,9 +448,10 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		s.clientsMu.Lock()
 		delete(s.clients, conn)
+		clientCount := len(s.clients)
 		s.clientsMu.Unlock()
 		conn.Close()
-		log.Printf("❌ WebSocket客户端已断开（当前连接数: %d）", len(s.clients))
+		log.Printf("❌ WebSocket客户端已断开（当前连接数: %d）", clientCount)
 	}()
 
 	for {
@@ -369,16 +467,23 @@ func (s *Server) keepAlive(conn *websocket.Conn) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		s.clientsMu.Lock()
-		_, exists := s.clients[conn]
-		s.clientsMu.Unlock()
+	for {
+		select {
+		case <-ticker.C:
+			s.clientsMu.Lock()
+			exists := s.clients[conn]
+			s.clientsMu.Unlock()
 
-		if !exists {
-			return
-		}
+			if !exists {
+				return // 连接已被移除
+			}
 
-		if err := s.writeWebSocketMessage(conn, websocket.PingMessage, nil); err != nil {
+			err := s.writeWebSocketMessage(conn, websocket.PingMessage, nil)
+			if err != nil {
+				return
+			}
+		case <-s.done:
+			// 服务器停止时退出
 			return
 		}
 	}
@@ -389,28 +494,53 @@ func (s *Server) handleBroadcast() {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		event := map[string]interface{}{
-			"type":    "heartbeat",
-			"payload": map[string]interface{}{},
-			"time":    time.Now().Unix(),
-		}
-
-		data, err := json.Marshal(event)
-		if err != nil {
-			continue
-		}
-
-		// 广播给所有客户端
-		s.clientsMu.Lock()
-		for client := range s.clients {
-			err := s.writeWebSocketMessage(client, websocket.TextMessage, data)
-			if err != nil {
-				client.Close()
-				delete(s.clients, client)
+	for {
+		select {
+		case <-ticker.C:
+			event := map[string]interface{}{
+				"type":    "heartbeat",
+				"payload": map[string]interface{}{},
+				"time":    time.Now().Unix(),
 			}
+
+			data, err := json.Marshal(event)
+			if err != nil {
+				continue
+			}
+
+			// 先复制客户端列表，再释放锁
+			s.clientsMu.Lock()
+			clients := make([]*websocket.Conn, 0, len(s.clients))
+			for client := range s.clients {
+				clients = append(clients, client)
+			}
+			s.clientsMu.Unlock()
+
+			// 在锁外发送消息
+			toRemove := []*websocket.Conn{}
+			for _, client := range clients {
+				err := s.writeWebSocketMessage(client, websocket.TextMessage, data)
+				if err != nil {
+					toRemove = append(toRemove, client)
+				}
+			}
+
+			// 批量删除失败的连接
+			if len(toRemove) > 0 {
+				s.clientsMu.Lock()
+				for _, client := range toRemove {
+					if s.clients[client] {
+						client.Close()
+						delete(s.clients, client)
+					}
+				}
+				s.clientsMu.Unlock()
+			}
+
+		case <-s.done:
+			// 优雅停止
+			return
 		}
-		s.clientsMu.Unlock()
 	}
 }
 
@@ -428,15 +558,34 @@ func (s *Server) BroadcastEvent(eventType string, payload interface{}) {
 		return
 	}
 
+	// 先复制客户端列表
 	s.clientsMu.Lock()
+	clients := make([]*websocket.Conn, 0, len(s.clients))
 	for client := range s.clients {
-		err := s.writeWebSocketMessage(client, websocket.TextMessage, data)
-		if err != nil {
-			client.Close()
-			delete(s.clients, client)
-		}
+		clients = append(clients, client)
 	}
 	s.clientsMu.Unlock()
+
+	// 在锁外发送消息
+	toRemove := []*websocket.Conn{}
+	for _, client := range clients {
+		err := s.writeWebSocketMessage(client, websocket.TextMessage, data)
+		if err != nil {
+			toRemove = append(toRemove, client)
+		}
+	}
+
+	// 批量删除失败的连接
+	if len(toRemove) > 0 {
+		s.clientsMu.Lock()
+		for _, client := range toRemove {
+			if s.clients[client] {
+				client.Close()
+				delete(s.clients, client)
+			}
+		}
+		s.clientsMu.Unlock()
+	}
 }
 
 func (s *Server) writeWebSocketMessage(conn *websocket.Conn, messageType int, data []byte) error {

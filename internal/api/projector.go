@@ -57,6 +57,9 @@ func ProjectGUIBootstrap(ctx context.Context, workspace string, store *eventlog.
 	if err != nil {
 		return GUIBootstrapDTO{}, err
 	}
+	blackboard := projectBootstrapBlackboard(workspace)
+	agentState := projectBootstrapAgentState(workspace)
+	harness := projectBootstrapHarness(workspace)
 
 	return GUIBootstrapDTO{
 		Workspace: ProjectWorkspace(workspace),
@@ -75,6 +78,9 @@ func ProjectGUIBootstrap(ctx context.Context, workspace string, store *eventlog.
 		Reports:        reports,
 		ReportFindings: reportFindings,
 		Files:          files,
+		Blackboard:     blackboard,
+		AgentState:     agentState,
+		Harness:        harness,
 		Settings: SettingsDTO{
 			Theme:         "dark",
 			LastWorkspace: workspace,
@@ -84,6 +90,64 @@ func ProjectGUIBootstrap(ctx context.Context, workspace string, store *eventlog.
 			EventsStream: "/api/events/stream",
 		},
 	}, nil
+}
+
+func projectBootstrapBlackboard(workspace string) map[string]any {
+	facts := (&Server{workspace: workspace}).loadBlackboardFacts()
+	items := make([]map[string]any, 0, len(facts))
+	for _, fact := range facts {
+		items = append(items, map[string]any{
+			"id": fact.ID, "kind": fact.Kind, "title": fact.Statement, "content": fact.Statement,
+			"status": "open", "priority": "normal", "source": fact.Source,
+			"createdAt": fact.CreatedAt, "updatedAt": fact.CreatedAt,
+		})
+	}
+	return map[string]any{"path": filepath.ToSlash(filepath.Join(workspace, "runtime", "blackboard.jsonl")), "items": items}
+}
+
+func projectBootstrapAgentState(workspace string) map[string]any {
+	server := &Server{workspace: workspace}
+	tasks := server.loadAgentTasks()
+	profiles := server.loadWorkspaceAgentProfiles()
+	events := server.loadAgentTaskEvents()
+	projected := make([]map[string]any, 0, len(tasks))
+	counts := map[string]int{}
+	for _, task := range tasks {
+		status := task.Status
+		counts[status]++
+		if status == "running" || status == "in_progress" {
+			counts["inProgress"]++
+		}
+		if status == "complete" || status == "completed" {
+			counts["completed"]++
+		}
+		if status == "error" || status == "failed" {
+			counts["failed"]++
+		}
+		projected = append(projected, map[string]any{
+			"id": task.ID, "title": firstNonEmpty(task.Title, task.Goal), "goal": task.Goal, "role": task.Role, "status": task.Status,
+			"source": task.Source, "priority": task.Priority, "createdAt": task.CreatedAt, "updatedAt": task.UpdatedAt,
+			"executionId": task.ExecutionID, "agentId": task.WorkerID,
+		})
+	}
+	return map[string]any{
+		"path":        filepath.ToSlash(filepath.Join(workspace, "runtime", "agent-tasks.jsonl")),
+		"eventPath":   filepath.ToSlash(filepath.Join(workspace, "runtime", "agent-task-events.jsonl")),
+		"profilePath": filepath.ToSlash(filepath.Join(workspace, "runtime", "agent-profiles.jsonl")),
+		"profiles":    profiles, "tasks": projected, "events": events, "counts": counts,
+	}
+}
+
+func projectBootstrapHarness(workspace string) map[string]any {
+	server := &Server{workspace: workspace}
+	cases := server.loadHarnessCases()
+	results := server.loadWorkspaceHarnessResults()
+	return map[string]any{
+		"path":       filepath.ToSlash(filepath.Join(workspace, "runtime", "harness-cases.jsonl")),
+		"resultPath": filepath.ToSlash(filepath.Join(workspace, "runtime", "harness-results.jsonl")),
+		"cases":      cases, "results": results,
+		"counts": map[string]int{"totalCases": len(cases), "totalResults": len(results)},
+	}
 }
 
 func ProjectWorkspaceFiles(workspace string) ([]WorkspaceFileDTO, error) {

@@ -61,9 +61,10 @@ type RunOptions struct {
 }
 
 type RunPauseController struct {
-	mu     sync.Mutex
-	paused bool
-	notify chan struct{}
+	mu         sync.Mutex
+	paused     bool
+	notify     chan struct{}
+	notifyOnce sync.Once
 }
 
 func NewRunPauseController() *RunPauseController {
@@ -86,13 +87,19 @@ func (c *RunPauseController) Resume() {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	notify := c.ensureNotifyLocked()
+
 	if !c.paused {
 		return
 	}
+
+	// 使用 sync.Once 确保 channel 只关闭一次
+	c.notifyOnce.Do(func() {
+		close(c.notify)
+	})
+
 	c.paused = false
-	close(notify)
 	c.notify = make(chan struct{})
+	c.notifyOnce = sync.Once{} // 重置 Once
 }
 
 func (c *RunPauseController) IsPaused() bool {
@@ -280,9 +287,7 @@ func RunWorkspaceWithOptions(ctx context.Context, root string, options RunOption
 	if err != nil {
 		return RunResult{}, fmt.Errorf("load provider config: %w", err)
 	}
-	providerRuntime, err := PrepareProviderRuntimeWithOptions(ctx, providerConfig, ProviderRuntimeOptions{
-		RequiredCapabilities: providerRuntimeRequiredCapabilities(options),
-	})
+	providerRuntime, err := prepareWorkspaceProviderRuntime(ctx, providerConfig, options)
 	if err != nil {
 		return RunResult{}, err
 	}
@@ -411,6 +416,88 @@ func RunWorkspaceWithOptions(ctx context.Context, root string, options RunOption
 		TUIView:    tuiModel.View(),
 		TUIModel:   tuiModel,
 	}, nil
+}
+
+// ProviderPreflightEnvVar selects how remote provider health is checked before
+// a run executes. The default (unset) is "on": a run dials the provider's
+// /models endpoint and fails fast when it is unreachable, which is what
+// operators need. Setting it to "off" keeps provider selection and capability
+// checks intact but skips the network probe, so runs stay deterministic when a
+// provider is unreachable — the unit test suite uses this so a DNS outage on a
+// third-party endpoint cannot fail unrelated tests.
+const ProviderPreflightEnvVar = "OURO_PROVIDER_PREFLIGHT"
+
+func providerPreflightDisabled() bool {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv(ProviderPreflightEnvVar)), "off")
+}
+
+// A run that is already paused should reach the worker gate promptly. Defer
+// remote provider health checks until the run is actually allowed to execute;
+// provider generation still performs the full preflight before any work starts.
+func prepareWorkspaceProviderRuntime(ctx context.Context, config ProviderConfig, options RunOptions) (ProviderRuntime, error) {
+	capabilities := providerRuntimeRequiredCapabilities(options)
+	// Provider generation always performs the full remote preflight: it is
+	// about to spend money on a completion, so an unreachable provider must
+	// fail fast regardless of the preflight switch.
+	if !options.EnableProviderGeneration {
+		if providerPreflightDisabled() {
+			return prepareProviderRuntimeMetadataOnly(ctx, config, capabilities)
+		}
+		if options.PauseController != nil && options.PauseController.IsPaused() {
+			return prepareProviderRuntimeMetadataOnly(ctx, config, capabilities)
+		}
+	}
+	return PrepareProviderRuntimeWithOptions(ctx, config, ProviderRuntimeOptions{
+		RequiredCapabilities: capabilities,
+	})
+}
+
+func prepareProviderRuntimeMetadataOnly(ctx context.Context, config ProviderConfig, requiredCapabilities []string) (ProviderRuntime, error) {
+	strategy, err := providerRoutingStrategy(config)
+	if err != nil {
+		return ProviderRuntime{}, err
+	}
+	providers := EnabledProviders(config)
+	if len(providers) == 0 {
+		return ProviderRuntime{}, fmt.Errorf("provider config has no enabled provider")
+	}
+	provider, skipped, ok := firstProviderMatchingRequiredCapabilities(providers, requiredCapabilities)
+	if !ok {
+		return ProviderRuntime{}, noProviderMatchesRequiredCapabilitiesError("provider metadata", strategy, requiredCapabilities, skipped)
+	}
+	if err := validateProviderMetadataOnly(ctx, provider); err != nil {
+		return ProviderRuntime{}, err
+	}
+	return providerRuntimeWithRouting(ProviderRuntime{
+		ProviderName: provider.Name,
+		Model:        provider.Model,
+		Capabilities: NormalizeProviderCapabilities(provider.Capabilities),
+	}, strategy, 1, nil, requiredCapabilities, skipped), nil
+}
+
+func validateProviderMetadataOnly(ctx context.Context, provider Provider) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	switch provider.Type {
+	case "offline":
+		return nil
+	case providerTypeOpenAICompatible:
+		baseURL, err := parseOpenAICompatibleProviderBaseURL(provider.BaseURL)
+		if err != nil {
+			return fmt.Errorf("provider %s base_url is invalid: %w", provider.Name, err)
+		}
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, openAICompatibleModelEndpoint(baseURL, provider.Model), nil)
+		if err != nil {
+			return fmt.Errorf("provider %s preflight request: %w", provider.Name, err)
+		}
+		if err := applyOpenAICompatibleBearer(request, provider); err != nil {
+			return err
+		}
+		return nil
+	default:
+		return fmt.Errorf("provider %s uses unsupported provider adapter: %s", provider.Name, provider.Type)
+	}
 }
 
 func providerRuntimeRequiredCapabilities(options RunOptions) []string {
@@ -800,6 +887,7 @@ type toolAdmissionLimiter struct {
 	workerLimits map[string]int
 	activeWorker map[string]int
 	notify       chan struct{}
+	notifyOnce   sync.Once
 }
 
 func newToolAdmissionLimiter(requests []ToolExecutionRequest, globalLimit int) *toolAdmissionLimiter {
@@ -937,8 +1025,14 @@ func (l *toolAdmissionLimiter) release(packKey string, workerKey string, cpu int
 	if workerKey != "" && l.workerLimits[workerKey] > 0 {
 		l.activeWorker[workerKey]--
 	}
-	close(l.notify)
+
+	// 使用 sync.Once 确保 channel 只关闭一次
+	l.notifyOnce.Do(func() {
+		close(l.notify)
+	})
+
 	l.notify = make(chan struct{})
+	l.notifyOnce = sync.Once{} // 重置 Once
 }
 
 func packConcurrencyKey(request ToolExecutionRequest) string {
@@ -1707,6 +1801,9 @@ func (defaultToolExecutionRunner) Execute(ctx context.Context, request ToolExecu
 		return commandToolExecutionRunner{}.Execute(ctx, request)
 	}
 	if strings.TrimSpace(request.Node.Runner) == "native" {
+		if result, runnable, err := executeNativeGoTool(ctx, request); runnable {
+			return result, err
+		}
 		nativeCommand, nativeTarget, ok, err := nativeManagedRunCommandWithTarget(request)
 		if err != nil {
 			result := nativeManagedToolExecutionResult(request)
@@ -1947,6 +2044,10 @@ func managedBinaryTargetKinds(binary string, operation string, node compiler.Pla
 		}
 	case "injection_test":
 		if binary == "sqlmap" {
+			return []string{string(domain.TargetURL)}
+		}
+	case "auth_test":
+		if binary == "hydra" {
 			return []string{string(domain.TargetURL)}
 		}
 	case "parameter_discovery":
@@ -2270,6 +2371,16 @@ func managedBinaryCommandFor(request ToolExecutionRequest, binary string, operat
 				return nil, true, err
 			}
 			return []string{binary, "scan", "--sarif", "--output", outputPath, target.Value}, true, nil
+		}
+	case "auth_test":
+		if target.Kind != string(domain.TargetURL) {
+			return nil, false, nil
+		}
+		if binary == "hydra" {
+			// Credential testing against an authorized login URL; the
+			// native handler (OURO_NATIVE_TOOLS=hydra) covers the same
+			// surface in-process, this argv serves the managed fallback.
+			return []string{binary, target.Value, "http-get"}, true, nil
 		}
 	case "secret_scan":
 		if !managedBinaryArtifactTargetKind(target.Kind) {

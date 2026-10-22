@@ -26,11 +26,11 @@ fail() {
   exit 1
 }
 
+. "$ROOT/scripts/lib_smoke_common.sh"
+
 cleanup() {
   if [ -n "${APP_PID:-}" ]; then
-    kill "$APP_PID" 2>/dev/null || true
-    sleep 0.5
-    kill -KILL "$APP_PID" 2>/dev/null || true
+    cleanup_tree "$APP_PID"
   fi
 }
 trap cleanup EXIT INT TERM
@@ -48,22 +48,6 @@ assert_executable() {
   [ -x "$path" ] || fail "$label 不可执行：$path"
 }
 
-wait_http() {
-  url="$1"
-  label="$2"
-  i=0
-  while [ "$i" -lt 120 ]; do
-    if curl -fsS "$url" >/dev/null 2>&1; then
-      return 0
-    fi
-    if [ -n "${APP_PID:-}" ] && ! kill -0 "$APP_PID" 2>/dev/null; then
-      fail "$label 等待期间 Electron 已退出"
-    fi
-    i=$((i + 1))
-    sleep 0.25
-  done
-  fail "$label 没有就绪"
-}
 
 case "$(uname -s)" in
   Linux*)
@@ -86,6 +70,7 @@ if [ "$(node -p 'process.platform')" = "win32" ]; then
 fi
 
 assert_executable "打包后的 Electron app binary" "$APP_BINARY"
+assert_port_free "$CDP_PORT" "Electron DevTools"
 assert_executable "打包后的 backend sidecar" "$BACKEND_BINARY"
 assert_file "打包后的 preload" "$PACKAGE_DIR/resources/app/dist/main/preload.js"
 assert_file "打包后的 renderer" "$PACKAGE_DIR/resources/app/dist/renderer/index.html"
@@ -175,6 +160,9 @@ if [ "$(uname -s)" = "Linux" ] && [ -z "${DISPLAY:-}" ]; then
       "$APP_BINARY" \
       --no-sandbox \
       --disable-gpu \
+      --ouro-desktop-memory-profile=low \
+      "--js-flags=--max-old-space-size=256 --max-semi-space-size=8" \
+      --renderer-process-limit=1 \
       --user-data-dir="$USER_DATA" \
       --remote-debugging-port="$CDP_PORT" \
       > "$APP_LOG" 2>&1 &
@@ -193,17 +181,28 @@ else
     "$APP_BINARY" \
     --no-sandbox \
     --disable-gpu \
+    --ouro-desktop-memory-profile=low \
+    "--js-flags=--max-old-space-size=256 --max-semi-space-size=8" \
+    --renderer-process-limit=1 \
     --user-data-dir="$USER_DATA" \
     --remote-debugging-port="$CDP_PORT" \
     > "$APP_LOG" 2>&1 &
   APP_PID=$!
 fi
 
+WATCH_PID="$APP_PID"
 wait_http "http://127.0.0.1:$CDP_PORT/json/version" "Electron DevTools"
 
-node - "$CDP_PORT" "$RUNTIME_OUT" "$DOM_OUT" "$WORKSPACE" <<'NODE' || fail "renderer/preload/backend runtime 检查失败"
-const [cdpPort, runtimeOut, domOut, workspacePath] = process.argv.slice(2);
+node - "$CDP_PORT" "$RUNTIME_OUT" "$DOM_OUT" "$WORKSPACE" "${OURO_DESKTOP_PACKAGE_RUNTIME_WS_MODULE:-}" <<'NODE' || fail "renderer/preload/backend runtime 检查失败"
+const [cdpPort, runtimeOut, domOut, workspacePath, webSocketModule] = process.argv.slice(2);
 const fs = await import('node:fs/promises');
+const WebSocket = globalThis.WebSocket || (webSocketModule
+  ? (await import(new URL(`file:///${webSocketModule.replace(/\\/g, '/')}`))).default
+  : null);
+
+if (!WebSocket) {
+  throw new Error('Node WebSocket implementation is unavailable');
+}
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));

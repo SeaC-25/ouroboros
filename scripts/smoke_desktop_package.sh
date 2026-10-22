@@ -12,6 +12,10 @@ API_LOG="$SMOKE_ROOT/api.log"
 # This smoke checks the packaged sidecar/layout only. It proves the package
 # contains the expected files and that the packaged backend sidecar can serve a
 # real workspace. It does not prove that the packaged Electron runtime starts.
+#
+# 端口（环境变量可覆盖）: OURO_DESKTOP_PACKAGE_SMOKE_API_PORT 默认 18082
+# 等待上限： OURO_SMOKE_WAIT_HTTP_TIMEOUT 默认 120 秒
+# 进程清理： 经 lib_smoke_common.sh 的 cleanup_tree 终止整个进程树
 
 fail() {
   printf 'desktop-package-sidecar/layout-smoke: 失败：%s\n' "$1" >&2
@@ -21,10 +25,12 @@ fail() {
 
 cleanup() {
   if [ -n "${API_PID:-}" ]; then
-    kill "$API_PID" 2>/dev/null || true
+    cleanup_tree "$API_PID"
   fi
 }
 trap cleanup EXIT INT TERM
+
+. "$ROOT/scripts/lib_smoke_common.sh"
 
 assert_file() {
   label="$1"
@@ -51,20 +57,6 @@ assert_executable() {
   path="$2"
   assert_file "$label" "$path"
   [ -x "$path" ] || fail "$label is not executable: $path"
-}
-
-wait_http() {
-  url="$1"
-  label="$2"
-  i=0
-  while [ "$i" -lt 80 ]; do
-    if curl -fsS "$url" >/dev/null 2>&1; then
-      return 0
-    fi
-    i=$((i + 1))
-    sleep 0.25
-  done
-  fail "$label did not become ready"
 }
 
 case "$(uname -s)" in
@@ -128,8 +120,10 @@ dependencies:
     optional: true
 YAML
 
+assert_port_free "$API_PORT" "packaged backend"
 "$BACKEND_BINARY" serve "$WORKSPACE" --port "$API_PORT" > "$API_LOG" 2>&1 &
 API_PID=$!
+WATCH_PID="$API_PID"
 wait_http "http://127.0.0.1:$API_PORT/api/health" "packaged backend"
 curl -fsS "http://127.0.0.1:$API_PORT/api/gui/bootstrap" > "$SMOKE_ROOT/bootstrap.json"
 grep -F -q 'packaged-smoke-model' "$SMOKE_ROOT/bootstrap.json" || fail "bootstrap did not use packaged smoke workspace"

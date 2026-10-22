@@ -1,9 +1,17 @@
 #!/bin/sh
 set -eu
 
-TRUSTED_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-PATH="$TRUSTED_PATH"
-export PATH
+# Trusted PATH pinning is opt-in. By default this script keeps the inherited
+# PATH so toolchains installed outside the classic system directories (for
+# example Go under "C:\Program Files\Go\bin" on Windows Git Bash) remain
+# reachable. Set OURO_TRUSTED_PATH to a colon-separated directory list to
+# replace PATH with that strict allowlist.
+TRUSTED_PATH_DEFAULT="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+TRUSTED_PATH="${OURO_TRUSTED_PATH:-$TRUSTED_PATH_DEFAULT}"
+if [ -n "${OURO_TRUSTED_PATH:-}" ]; then
+	PATH="$TRUSTED_PATH"
+	export PATH
+fi
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 TMPDIR_BASE="${TMPDIR:-/tmp}"

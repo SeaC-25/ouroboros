@@ -902,11 +902,15 @@ func parseReportGenerateSpec(spec string) (string, string) {
 }
 
 type BlackboardFact struct {
-	ID        string `json:"id"`
-	Kind      string `json:"kind"`
-	Statement string `json:"statement"`
-	Source    string `json:"source"`
-	CreatedAt int64  `json:"createdAt"`
+	ID            string   `json:"id"`
+	Kind          string   `json:"kind"`
+	Statement     string   `json:"statement"`
+	Source        string   `json:"source"`
+	Status        string   `json:"status,omitempty"`
+	Priority      string   `json:"priority,omitempty"`
+	DependencyIDs []string `json:"dependencyIds,omitempty"`
+	CreatedAt     int64    `json:"createdAt"`
+	UpdatedAt     int64    `json:"updatedAt,omitempty"`
 }
 
 func (s *Server) blackboardPath() string {
@@ -1035,14 +1039,71 @@ func (s *Server) runWorkspaceHarness(promptName string, inputText string) (Harne
 
 type AgentTaskRecord struct {
 	ID          string `json:"id"`
+	Title       string `json:"title,omitempty"`
 	Role        string `json:"role"`
 	Goal        string `json:"goal"`
 	Status      string `json:"status"`
+	AgentID     string `json:"agentId,omitempty"`
+	Priority    string `json:"priority,omitempty"`
+	Source      string `json:"source,omitempty"`
 	Command     string `json:"command,omitempty"`
 	ExecutionID string `json:"executionId,omitempty"`
 	WorkerID    string `json:"workerId,omitempty"`
 	CreatedAt   int64  `json:"createdAt"`
 	UpdatedAt   int64  `json:"updatedAt"`
+}
+
+type AgentProfileRecord struct {
+	ID              string   `json:"id"`
+	Name            string   `json:"name"`
+	Role            string   `json:"role"`
+	Description     string   `json:"description,omitempty"`
+	Instructions    string   `json:"instructions,omitempty"`
+	Capabilities    []string `json:"capabilities"`
+	ProviderName    string   `json:"providerName,omitempty"`
+	Model           string   `json:"model,omitempty"`
+	PromptID        string   `json:"promptId,omitempty"`
+	PromptVersionID string   `json:"promptVersionId,omitempty"`
+	CreatedAt       int64    `json:"createdAt"`
+	UpdatedAt       int64    `json:"updatedAt"`
+}
+
+func (s *Server) loadAgentTaskEvents() []agentTaskEventRecord {
+	file, err := os.Open(s.agentTaskEventsPath())
+	if err != nil {
+		return []agentTaskEventRecord{}
+	}
+	defer file.Close()
+	events := []agentTaskEventRecord{}
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		var event agentTaskEventRecord
+		if json.Unmarshal(scanner.Bytes(), &event) == nil && event.ID != "" && event.TaskID != "" && event.Kind != "" {
+			events = append(events, event)
+		}
+	}
+	return events
+}
+
+func (s *Server) agentProfilesPath() string {
+	return filepath.Join(s.workspace, "runtime", "agent-profiles.jsonl")
+}
+
+func (s *Server) loadWorkspaceAgentProfiles() []AgentProfileRecord {
+	file, err := os.Open(s.agentProfilesPath())
+	if err != nil {
+		return []AgentProfileRecord{}
+	}
+	defer file.Close()
+	profiles := []AgentProfileRecord{}
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		var profile AgentProfileRecord
+		if json.Unmarshal(scanner.Bytes(), &profile) == nil && profile.ID != "" && profile.Name != "" && profile.Role != "" {
+			profiles = append(profiles, profile)
+		}
+	}
+	return profiles
 }
 
 func (s *Server) agentTasksPath() string {

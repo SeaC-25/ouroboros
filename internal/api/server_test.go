@@ -1,4 +1,4 @@
-﻿package api
+package api
 
 import (
 	"bytes"
@@ -57,6 +57,7 @@ func TestServerGUIHandlersReturnProjectedWorkspaceData(t *testing.T) {
 		recordHandler(t, server.handleEvidenceGraph),
 		recordHandler(t, server.handleToolchainHealth),
 		recordHandler(t, server.handleRuns),
+		recordHandler(t, server.handleEvents),
 	}
 
 	joined := strings.Join(responses, "\n")
@@ -69,6 +70,128 @@ func TestServerGUIHandlersReturnProjectedWorkspaceData(t *testing.T) {
 		if strings.Contains(joined, forbidden) {
 			t.Fatalf("handler responses contain mock literal %q:\n%s", forbidden, joined)
 		}
+	}
+
+	filteredRequest := httptest.NewRequest(http.MethodGet, "/api/events?runId=run-handler&limit=1", nil)
+	filteredRecorder := httptest.NewRecorder()
+	server.handleEvents(filteredRecorder, filteredRequest)
+	if filteredRecorder.Code != http.StatusOK || !strings.Contains(filteredRecorder.Body.String(), `"count":1`) || !strings.Contains(filteredRecorder.Body.String(), `"runId":"run-handler"`) {
+		t.Fatalf("event handler did not apply runId/limit filters, status=%d body=%s", filteredRecorder.Code, filteredRecorder.Body.String())
+	}
+}
+
+func TestServerRuntimeWorkersProjectsPersistedRegistry(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workspace, "runtime/workers"), 0o755); err != nil {
+		t.Fatalf("create runtime worker directory: %v", err)
+	}
+	mustWrite(t, filepath.Join(workspace, "runtime/workers/local.json"), `{
+  "version": 1,
+  "worker_id": "local",
+  "mode": "local",
+  "status": "available",
+  "capabilities": ["shell"],
+  "labels": {"region": "test"},
+  "registered_at": "2026-08-29T00:00:00Z",
+  "heartbeat_at": "2026-08-29T00:00:00Z"
+}`)
+	server := &Server{workspace: workspace}
+	recorder := httptest.NewRecorder()
+	server.handleRuntimeWorkers(recorder, httptest.NewRequest(http.MethodGet, "/api/runtime/workers", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("runtime worker handler returned status %d: %s", recorder.Code, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	for _, want := range []string{`"workerId":"local"`, `"mode":"local"`, `"capabilities":["shell"]`, `"staleAfterSeconds":900`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("runtime worker response missing %q: %s", want, body)
+		}
+	}
+}
+
+func TestServerAgentProfileAndTaskEndpointsPersistWorkspaceState(t *testing.T) {
+	workspace := t.TempDir()
+	server := &Server{workspace: workspace}
+
+	profileBody := bytes.NewBufferString(`{"name":"证据分析员","role":"analyst","capabilities":["evidence"]}`)
+	profileRecorder := httptest.NewRecorder()
+	server.handleAgentProfiles(profileRecorder, httptest.NewRequest(http.MethodPost, "/api/agents/profiles", profileBody))
+	if profileRecorder.Code != http.StatusOK || !strings.Contains(profileRecorder.Body.String(), "证据分析员") {
+		t.Fatalf("profile create failed: %d %s", profileRecorder.Code, profileRecorder.Body.String())
+	}
+
+	taskBody := bytes.NewBufferString(`{"title":"检查证据","goal":"读取真实事件","role":"analyst","priority":"high"}`)
+	taskRecorder := httptest.NewRecorder()
+	server.handleAgentTasksHTTP(taskRecorder, httptest.NewRequest(http.MethodPost, "/api/agents/tasks", taskBody))
+	if taskRecorder.Code != http.StatusOK {
+		t.Fatalf("task create failed: %d %s", taskRecorder.Code, taskRecorder.Body.String())
+	}
+	var task map[string]any
+	if err := json.Unmarshal(taskRecorder.Body.Bytes(), &task); err != nil || task["id"] == nil {
+		t.Fatalf("task response missing id: %s", taskRecorder.Body.String())
+	}
+	taskID := task["id"].(string)
+
+	updateBody := bytes.NewBufferString(`{"status":"running","title":"检查事件日志"}`)
+	updateRecorder := httptest.NewRecorder()
+	server.handleAgentTasksHTTP(updateRecorder, httptest.NewRequest(http.MethodPatch, "/api/agents/tasks/"+taskID, updateBody))
+	if updateRecorder.Code != http.StatusOK || !strings.Contains(updateRecorder.Body.String(), "running") {
+		t.Fatalf("task update failed: %d %s", updateRecorder.Code, updateRecorder.Body.String())
+	}
+
+	eventBody := bytes.NewBufferString(`{"kind":"progress","summary":"已读取事件日志"}`)
+	eventRecorder := httptest.NewRecorder()
+	server.handleAgentTasksHTTP(eventRecorder, httptest.NewRequest(http.MethodPost, "/api/agents/tasks/"+taskID+"/events", eventBody))
+	if eventRecorder.Code != http.StatusOK || !strings.Contains(eventRecorder.Body.String(), "已读取事件日志") {
+		t.Fatalf("task event failed: %d %s", eventRecorder.Code, eventRecorder.Body.String())
+	}
+
+	bootstrapRecorder := httptest.NewRecorder()
+	server.handleGUIBootstrap(bootstrapRecorder, httptest.NewRequest(http.MethodGet, "/api/gui/bootstrap", nil))
+	if bootstrapRecorder.Code != http.StatusOK || !strings.Contains(bootstrapRecorder.Body.String(), "检查事件日志") || !strings.Contains(bootstrapRecorder.Body.String(), "证据分析员") {
+		t.Fatalf("bootstrap did not include persisted agent state: %d %s", bootstrapRecorder.Code, bootstrapRecorder.Body.String())
+	}
+}
+
+func TestServerAIConversationSessionEndpoints(t *testing.T) {
+	workspace := t.TempDir()
+	server := &Server{workspace: workspace}
+	if err := server.writeAIConversation([]ChatMessage{{ID: "msg-1", Role: "user", Content: "搜索真实记录", Timestamp: 1}}); err != nil {
+		t.Fatalf("write conversation: %v", err)
+	}
+
+	listRecorder := httptest.NewRecorder()
+	server.handleAIConversationSessions(listRecorder, httptest.NewRequest(http.MethodGet, "/api/ai/conversation/sessions", nil))
+	if listRecorder.Code != http.StatusOK || !strings.Contains(listRecorder.Body.String(), `"id":"workspace-current"`) || !strings.Contains(listRecorder.Body.String(), `"userCount":1`) {
+		t.Fatalf("session list failed: %d %s", listRecorder.Code, listRecorder.Body.String())
+	}
+	searchRecorder := httptest.NewRecorder()
+	server.handleAIConversationSearch(searchRecorder, httptest.NewRequest(http.MethodGet, "/api/ai/conversation/search?q=%E7%9C%9F%E5%AE%9E", nil))
+	if searchRecorder.Code != http.StatusOK || !strings.Contains(searchRecorder.Body.String(), "msg-1") {
+		t.Fatalf("session search failed: %d %s", searchRecorder.Code, searchRecorder.Body.String())
+	}
+	exportRecorder := httptest.NewRecorder()
+	server.handleAIConversationExport(exportRecorder, httptest.NewRequest(http.MethodPost, "/api/ai/conversation/export", bytes.NewBufferString(`{"format":"json"}`)))
+	if exportRecorder.Code != http.StatusOK || !strings.Contains(exportRecorder.Body.String(), `"messageCount":1`) {
+		t.Fatalf("session export failed: %d %s", exportRecorder.Code, exportRecorder.Body.String())
+	}
+}
+
+func TestServerAgentProviderRunPersistsFailureWithoutProvider(t *testing.T) {
+	workspace := t.TempDir()
+	server := &Server{workspace: workspace}
+	task, err := server.createAgentTask("analyst", "执行 provider 测试")
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	recorder := httptest.NewRecorder()
+	server.handleAgentTasksHTTP(recorder, httptest.NewRequest(http.MethodPost, "/api/agents/tasks/"+task.ID+"/run", bytes.NewBufferString(`{"maxTokens":16}`)))
+	if recorder.Code != http.StatusBadGateway || !strings.Contains(recorder.Body.String(), "provider") {
+		t.Fatalf("expected provider failure, got %d %s", recorder.Code, recorder.Body.String())
+	}
+	updated := server.loadAgentTasks()
+	if len(updated) != 1 || updated[0].Status != "failed" {
+		t.Fatalf("provider failure did not persist task status: %#v", updated)
 	}
 }
 
@@ -802,6 +925,24 @@ func TestServerStopCancelsActiveExecutions(t *testing.T) {
 		t.Fatalf("stop server: %v", err)
 	}
 	waitExecutionStatus(t, server, executionID, "stopped")
+}
+
+func TestServerStopIsIdempotent(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workspace, "replay"), 0o755); err != nil {
+		t.Fatalf("mkdir replay: %v", err)
+	}
+	store, err := eventlog.OpenSQLite(filepath.Join(workspace, "replay", "events.db"))
+	if err != nil {
+		t.Fatalf("open event store: %v", err)
+	}
+	server := &Server{workspace: workspace, eventStore: store, done: make(chan struct{}), executions: map[string]context.CancelFunc{}}
+	if err := server.Stop(context.Background()); err != nil {
+		t.Fatalf("first stop: %v", err)
+	}
+	if err := server.Stop(context.Background()); err != nil {
+		t.Fatalf("second stop: %v", err)
+	}
 }
 
 func TestServerExecutionBroadcastsWebSocketEvents(t *testing.T) {

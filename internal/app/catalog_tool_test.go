@@ -1,4 +1,4 @@
-﻿package app
+package app
 
 import (
 	"encoding/json"
@@ -61,8 +61,8 @@ func TestResolveCatalogToolInvocationSupportsEveryBinaryCatalogEntry(t *testing.
 			}
 		})
 	}
-	if binaryCount != 25 {
-		t.Fatalf("expected 25 executable catalog entries, got %d", binaryCount)
+	if binaryCount != 26 {
+		t.Fatalf("expected 26 executable catalog entries, got %d", binaryCount)
 	}
 }
 

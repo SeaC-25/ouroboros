@@ -1,9 +1,17 @@
 #!/bin/sh
 set -eu
 
-TRUSTED_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-PATH="$TRUSTED_PATH"
-export PATH
+# Trusted PATH pinning is opt-in. By default this script keeps the inherited
+# PATH so toolchains installed outside the classic system directories (for
+# example Go under "C:\Program Files\Go\bin" on Windows Git Bash) remain
+# reachable. Set OURO_TRUSTED_PATH to a colon-separated directory list to
+# replace PATH with that strict allowlist.
+TRUSTED_PATH_DEFAULT="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+TRUSTED_PATH="${OURO_TRUSTED_PATH:-$TRUSTED_PATH_DEFAULT}"
+if [ -n "${OURO_TRUSTED_PATH:-}" ]; then
+	PATH="$TRUSTED_PATH"
+	export PATH
+fi
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 TMPDIR_BASE="${TMPDIR:-/tmp}"
@@ -197,6 +205,11 @@ run_ouro_logged() {
 		fail "$label failed; see $log_path"
 	fi
 }
+
+# README-(fresh binary) — 防陈旧验收:bin 缺失或源码更新则先 go build;
+# OURO_SMOKE_SKIP_BUILD=1 可跳过(默认必须构建)。
+. "$ROOT/scripts/smoke_fresh_bin.sh"
+ensure_fresh_ouro_bin "$OURO_AI_PROVIDER_SMOKE_BIN" || fail "unable to build fresh ouro binary"
 
 assert_absolute_path "AI provider smoke binary" "$OURO_AI_PROVIDER_SMOKE_BIN"
 assert_no_symlink_path_components "AI provider smoke binary" "$OURO_AI_PROVIDER_SMOKE_BIN"

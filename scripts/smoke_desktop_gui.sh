@@ -1,6 +1,20 @@
 #!/bin/sh
 set -eu
 
+# smoke_desktop_gui.sh
+#   桌面 GUI 冒烟：真实后端 + 真实前端构建 + chromium 驱动整页交互。
+#
+# 端口（均可用环境变量覆盖，默认值如下）:
+#   OURO_DESKTOP_GUI_SMOKE_API_PORT      API 服务端口     默认 18081
+#   OURO_DESKTOP_GUI_SMOKE_PREVIEW_PORT  前端预览端口     默认 4175
+#   OURO_DESKTOP_GUI_SMOKE_CDP_PORT      chromium CDP 端口 默认 19223
+# 其他可调项:
+#   OURO_SMOKE_WAIT_HTTP_TIMEOUT         wait_http 就绪等待秒数，默认 120
+#   GOPROXY                              go 模块代理，默认 https://goproxy.cn,direct
+#
+# 进程清理：后端直接运行 go build 产出的二进制（不经 go run)，退出时经
+#   lib_smoke_common.sh 的 cleanup_tree 终止整个进程树，避免旧实例残留占端口。
+
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 TMPDIR_BASE="${TMPDIR:-/tmp}"
 SMOKE_ROOT="$(mktemp -d "$TMPDIR_BASE/ouro-desktop-gui-smoke-XXXXXX")"
@@ -19,31 +33,19 @@ fail() {
 }
 
 cleanup() {
-  if [ -n "${API_PID:-}" ]; then
-    kill "$API_PID" 2>/dev/null || true
+  if [ -n "${CHROMIUM_PID:-}" ]; then
+    cleanup_tree "$CHROMIUM_PID"
   fi
   if [ -n "${PREVIEW_PID:-}" ]; then
-    kill "$PREVIEW_PID" 2>/dev/null || true
+    cleanup_tree "$PREVIEW_PID"
   fi
-  if [ -n "${CHROMIUM_PID:-}" ]; then
-    kill "$CHROMIUM_PID" 2>/dev/null || true
+  if [ -n "${API_PID:-}" ]; then
+    cleanup_tree "$API_PID"
   fi
 }
 trap cleanup EXIT INT TERM
 
-wait_http() {
-  url="$1"
-  label="$2"
-  i=0
-  while [ "$i" -lt 80 ]; do
-    if curl -fsS "$url" >/dev/null 2>&1; then
-      return 0
-    fi
-    i=$((i + 1))
-    sleep 0.25
-  done
-  fail "$label did not become ready"
-}
+. "$ROOT/scripts/lib_smoke_common.sh"
 
 assert_contains() {
   file="$1"
@@ -81,8 +83,17 @@ cat > "$WORKSPACE/findings/high.json" <<'JSON'
 {"title":"真实高危发现","severity":"high","endpoint":"https://desktop-smoke.local/admin"}
 JSON
 
-GOPROXY="${GOPROXY:-https://goproxy.cn,direct}" go run ./cmd/ouro serve "$WORKSPACE" --port "$API_PORT" > "$API_LOG" 2>&1 &
+# 端口占用检测：避免撞上残留旧实例误判通过
+assert_port_free "$API_PORT" "api server"
+assert_port_free "$PREVIEW_PORT" "frontend preview"
+assert_port_free "$CDP_PORT" "chromium devtools"
+
+# 先构建后端二进制再直接启动，避免 `go run` 包装进程被杀后真实服务残留占端口
+API_BIN="$SMOKE_ROOT/ouro$(smoke_exe_suffix)"
+GOPROXY="${GOPROXY:-https://goproxy.cn,direct}" go build -o "$API_BIN" ./cmd/ouro
+"$API_BIN" serve "$WORKSPACE" --port "$API_PORT" > "$API_LOG" 2>&1 &
 API_PID=$!
+WATCH_PID="$API_PID"
 wait_http "http://127.0.0.1:$API_PORT/api/health" "api"
 
 cat > "$SMOKE_ROOT/workspace-update.json" <<'JSON'
@@ -323,6 +334,7 @@ npm --prefix gui run test:contract >/dev/null
 VITE_OURO_API_BASE_URL="http://127.0.0.1:$API_PORT" npm --prefix gui run build >/dev/null
 npm --prefix gui run preview -- --port "$PREVIEW_PORT" > "$PREVIEW_LOG" 2>&1 &
 PREVIEW_PID=$!
+WATCH_PID="$PREVIEW_PID"
 wait_http "http://127.0.0.1:$PREVIEW_PORT/" "frontend preview"
 
 if command -v chromium >/dev/null 2>&1; then
@@ -335,6 +347,7 @@ fi
 
 "$CHROMIUM" --headless --disable-gpu --no-sandbox --window-size=1440,1000 --remote-debugging-port="$CDP_PORT" --user-data-dir="$SMOKE_ROOT/chromium-profile" "http://127.0.0.1:$PREVIEW_PORT/" > "$SMOKE_ROOT/chromium.log" 2>&1 &
 CHROMIUM_PID=$!
+WATCH_PID="$CHROMIUM_PID"
 wait_http "http://127.0.0.1:$CDP_PORT/json/version" "chromium devtools"
 
 node - "$CDP_PORT" "http://127.0.0.1:$PREVIEW_PORT/" "$DOM_OUT" "http://127.0.0.1:$API_PORT" "$WORKSPACE" <<'NODE' || fail "chromium interaction smoke failed"

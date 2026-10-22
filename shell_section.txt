@@ -1,0 +1,1517 @@
+@228: const shellPath = join(root, 'src/app/OuroborosIDE.tsx');
+@229: if (existsSync(shellPath)) {
+@230:   const shell = readFileSync(shellPath, 'utf8');
+@231:   const shellSourceFile = ts.createSourceFile('OuroborosIDE.tsx', shell, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+@232:   for (const snippet of [
+@233:     "import ouroborosEmptyMark from '../assets/ouroboros-empty-mark.webp'",
+@234:     "import ouroborosMark from '../assets/ouroboros-mark.webp'",
+@235:     '<img className="brand-mark" src={ouroborosMark}',
+@236:     '<img className="welcome-brand-mark" src={ouroborosEmptyMark}',
+@237:     '<img className="ai-empty-brand" src={ouroborosEmptyMark}',
+@238:     '<img className="report-logo" src={ouroborosMark}',
+@239:   ]) {
+@240:     if (!shell.includes(snippet)) {
+@241:       console.error(`Ouroboros GUI must render the real snake image in every brand surface: ${snippet}`);
+@242:       failed = true;
+@243:     }
+@244:   }
+@245:   const requiredImports = ['loadIDEData', 'loadDesktopStatus', 'restartDesktopBackend', 'zhCN'];
+@246:   for (const imported of requiredImports) {
+@247:     if (!shell.includes(imported)) {
+@248:       console.error(`OuroborosIDE.tsx must use ${imported}`);
+@249:       failed = true;
+@250:     }
+@251:   }
+@252:   const forbiddenUiText = [
+@253:     'Demo',
+@254:     'Mock',
+@255:     'Preview',
+@256:     'Web UI',
+@257:     'Mission',
+@258:     'Attack Graph',
+@259:     'Replay',
+@260:     'Report',
+@261:     'Settings',
+@262:     'Command Palette',
+@263:     'Workspace',
+@264:     'Start Pentest',
+@265:     'AI Conversation',
+@266:     'Tool Execution',
+@267:     'Inspector',
+@268:     'CONNECTED',
+@269:     'Safety',
+@270:     'Authorization',
+@271:     'Scope',
+@272:   ];
+@273:   const escapeRegExp = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+@274:   for (const text of forbiddenUiText) {
+@275:     const literal = new RegExp(`["'\`]${escapeRegExp(text)}["'\`]`);
+@276:     const jsxText = new RegExp(`>${escapeRegExp(text)}<`);
+@277:     if (literal.test(shell) || jsxText.test(shell)) {
+@278:       console.error(`frontend UI text must be Chinese/centralized, found: ${text}`);
+@279:       failed = true;
+@280:     }
+@281:   }
+@282:   for (const [functionName, onClickSnippet, labelSnippet] of [
+@283:     ['TitleBar', 'onOpenPalette', 'zhCN.shell.commandPalette'],
+@284:     ['TitleBar', 'onOpenWorkspace', 'zhCN.shell.openWorkspace'],
+@285:     ['TitleBar', 'onOpenSettings', 'zhCN.modes.settings'],
+@286:     ['TitleBar', 'onMinimizeWindow', 'zhCN.windowControls.minimize'],
+@287:     ['TitleBar', 'onToggleMaximizeWindow', 'zhCN.windowControls.maximize'],
+@288:     ['TitleBar', 'onCloseWindow', 'zhCN.windowControls.close'],
+@289:     ['ActivityBar', 'onModeChange(item.id)', 'zhCN.modes[item.id]'],
+@290:     ['WorkspaceExplorer', 'onRefresh', 'zhCN.ai.refresh'],
+@291:     ['WorkspaceExplorer', 'onRunSearch', 'zhCN.shell.search'],
+@292:     ['AIWorkbench', 'onRefreshConversation', 'zhCN.ai.refresh'],
+@293:     ['AIWorkbench', 'setCapabilitiesOpen(false)', 'zhCN.ai.closeCapabilityDrawer'],
+@294:     ['RailPanelHeader', 'onOpen', 'zhCN.navigation.open'],
+@295:   ]) {
+@296:     const declaration = findNamedDeclaration(shellSourceFile, functionName);
+@297:     const buttons = declaration
+@298:       ? collectNodes(
+@299:         declaration,
+@300:         node => ts.isJsxOpeningElement(node)
+@301:           && node.tagName.getText(shellSourceFile) === 'button'
+@302:           && jsxAttributeText(node, 'onClick', shellSourceFile).includes(onClickSnippet),
+@303:       )
+@304:       : [];
+@305:     const button = buttons.find(node => jsxAttributeText(node, 'title', shellSourceFile).includes(labelSnippet));
+@306:     if (!button) {
+@307:       console.error(`${functionName} icon control ${onClickSnippet} must expose a Chinese title tooltip using ${labelSnippet}`);
+@308:       failed = true;
+@309:       continue;
+@310:     }
+@311:     if (!jsxAttributeText(button, 'aria-label', shellSourceFile).includes(labelSnippet)) {
+@312:       console.error(`${functionName} icon control ${onClickSnippet} must pair its title tooltip with aria-label using ${labelSnippet}`);
+@313:       failed = true;
+@314:     }
+@315:   }
+@316:   const workspaceExplorerDeclaration = findNamedDeclaration(shellSourceFile, 'WorkspaceExplorer');
+@317:   const workspaceFileButton = workspaceExplorerDeclaration
+@318:     ? collectNodes(
+@319:       workspaceExplorerDeclaration,
+@320:       node => ts.isJsxOpeningElement(node)
+@321:         && node.tagName.getText(shellSourceFile) === 'button'
+@322:         && jsxAttributeText(node, 'onClick', shellSourceFile).includes('onOpenFile(item)'),
+@323:     )[0]
+@324:     : undefined;
+@325:   for (const [attributeName, values] of [
+@326:     ['title', ['item.label', 'metadataLabel']],
+@327:     ['aria-label', ['item.label', 'metadataLabel']],
+@328:   ]) {
+@329:     const attribute = workspaceFileButton ? jsxAttributeText(workspaceFileButton, attributeName, shellSourceFile) : '';
+@330:     if (values.some(value => !attribute.includes(value))) {
+@331:       console.error(`WorkspaceExplorer file rows must expose real path and metadata through ${attributeName}`);
+@332:       failed = true;
+@333:     }
+@334:   }
+@335:   const graphCanvasDeclaration = findNamedDeclaration(shellSourceFile, 'GraphCanvas');
+@336:   const rightRailDeclaration = findNamedDeclaration(shellSourceFile, 'RightRail');
+@337:   const nodeSummaryDeclaration = findNamedDeclaration(shellSourceFile, 'NodeSummary');
+@338:   const graphNoDataStates = graphCanvasDeclaration
+@339:     ? emptyStateUsesMissionCopy(graphCanvasDeclaration, 'noGraph', shellSourceFile)
+@340:     : [];
+@341:   const graphNoDataState = graphNoDataStates.find(node => (
+@342:     ts.isBinaryExpression(node.parent)
+@343:     && node.parent.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken
+@344:     && node.parent.right === node
+@345:     && isNodesLengthZero(node.parent.left)
+@346:   ));
+@347:   if (!graphNoDataState) {
+@348:     console.error('GraphCanvas must use mission.noGraph only for an empty real attack-graph node list');
+@349:     failed = true;
+@350:   }
+@351:   const inspectorPanel = rightRailDeclaration
+@352:     ? collectNodes(
+@353:       rightRailDeclaration,
+@354:       node => ts.isJsxSelfClosingElement(node)
+@355:         && node.tagName.getText(shellSourceFile) === 'PanelTitle'
+@356:         && isPropertyAccessPath(jsxAttributeExpression(node, 'title', shellSourceFile), ['zhCN', 'mission', 'inspector']),
+@357:     )[0]
+@358:     : undefined;
+@359:   const inspectorMeta = inspectorPanel ? jsxAttributeExpression(inspectorPanel, 'meta', shellSourceFile) : undefined;
+@360:   if (
+@361:     !inspectorMeta
+@362:     || !ts.isConditionalExpression(inspectorMeta)
+@363:     || !ts.isIdentifier(inspectorMeta.condition)
+@364:     || inspectorMeta.condition.text !== 'inspectedNode'
+@365:     || !isPropertyAccessPath(inspectorMeta.whenFalse, ['zhCN', 'mission', 'noSelectedGraphNode'])
+@366:   ) {
+@367:     console.error('RightRail inspector must use mission.noSelectedGraphNode when no graph node is inspected');
+@368:     failed = true;
+@369:   }
+@370:   const rightRailNoGraphReferences = rightRailDeclaration
+@371:     ? collectNodes(rightRailDeclaration, node => isPropertyAccessPath(node, ['zhCN', 'mission', 'noGraph']))
+@372:     : [];
+@373:   if (rightRailNoGraphReferences.length > 0) {
+@374:     console.error('RightRail inspector must not describe an absent selection as missing attack-graph data');
+@375:     failed = true;
+@376:   }
+@377:   const noNodeBranch = nodeSummaryDeclaration
+@378:     ? collectNodes(
+@379:       nodeSummaryDeclaration,
+@380:       node => ts.isIfStatement(node) && isNegatedIdentifier(node.expression, 'node'),
+@381:     )[0]
+@382:     : undefined;
+@383:   if (!noNodeBranch || emptyStateUsesMissionCopy(noNodeBranch.thenStatement, 'noSelectedGraphNode', shellSourceFile).length === 0) {
+@384:     console.error('NodeSummary must use mission.noSelectedGraphNode for its no-selection state');
+@385:     failed = true;
+@386:   }
+@387:   if (shell.includes('ideFixture')) {
+@388:     console.error('OuroborosIDE.tsx must not use fixture data');
+@389:     failed = true;
+@390:   }
+@391:   for (const snippet of ['startExecution', 'stopExecution', 'retryExecution', 'loadExecutionLogs', 'loadExecutionArtifacts', 'runToolchainAction']) {
+@392:     if (!shell.includes(snippet)) {
+@393:       console.error(`OuroborosIDE.tsx must wire real execution action: ${snippet}`);
+@394:       failed = true;
+@395:     }
+@396:   }
+@397:   for (const snippet of ["{ id: 'agents', icon:", "mode === 'agents'", 'AgentWorkbench', 'agentState={ideData.agentState}', "event.type.startsWith('ai:')", 'zhCN.modes.agents', 'zhCN.agents.title', 'agent.tasks.read', 'agent.tasks.create', 'buildAIAgentTaskInput', 'isAgentAIAction(action)', 'AIActionAgentTask', 'AIActionAgentTaskList']) {
+@398:     if (!shell.includes(snippet)) {
+@399:       console.error(`OuroborosIDE.tsx must expose Agent Orchestrator v1 workspace and AI action UI: ${snippet}`);
+@400:       failed = true;
+@401:     }
+@402:   }
+@403:   for (const snippet of ['ToolLaunchPanel', 'toolActions', 'toolActionDrafts', 'draft.arguments', 'zhCN.toolLaunch.title', 'zhCN.toolLaunch.run']) {
+@404:     if (!shell.includes(snippet)) {
+@405:       console.error(`OuroborosIDE.tsx must expose manifest-backed tool launch UI: ${snippet}`);
+@406:       failed = true;
+@407:     }
+@408:   }
+@409:   for (const snippet of ['isToolResultAIAction(action)', "action.id === 'tool.parse_execution_result'", 'function buildAIToolResultInput', 'zhCN.aiActions.toolResultParseRequired', 'zhCN.aiActions.toolResultExecutionInput', 'zhCN.aiActions.toolResultTitleInput', 'zhCN.aiActions.toolResultSourceInput', 'zhCN.aiActions.toolResultGraphInput', 'zhCN.aiActions.toolResultReplayInput', 'AIActionToolResultParse', "result.result.kind === 'tool_result_parse'"]) {
+@410:     if (!shell.includes(snippet)) {
+@411:       console.error(`OuroborosIDE.tsx must expose parse execution result AI action input and result UI: ${snippet}`);
+@412:       failed = true;
+@413:     }
+@414:   }
+@415:   for (const snippet of ['CommandPalette', 'paletteActions', 'onRunCommand', 'onSaveMission', 'onStartMission', 'onRefresh', 'onOpenWorkspace', 'onCreateWorkspace', 'onRestartBackend', 'zhCN.commandPalette.refresh', 'zhCN.commandPalette.restartBackend', 'keydown', 'ctrlKey', 'metaKey']) {
+@416:     if (!shell.includes(snippet)) {
+@417:       console.error(`OuroborosIDE.tsx must expose real command palette action: ${snippet}`);
+@418:       failed = true;
+@419:     }
+@420:   }
+@421:   for (const snippet of ['openRecentDesktopWorkspace', 'onOpenRecentWorkspace', 'recentWorkspaces', 'zhCN.commandPalette.openRecentWorkspace', 'recentWorkspaces.map']) {
+@422:     if (!shell.includes(snippet)) {
+@423:       console.error(`OuroborosIDE.tsx must expose recent workspace command palette actions: ${snippet}`);
+@424:       failed = true;
+@425:     }
+@426:   }
+@427:   if (shell.includes('placeholder={zhCN.shell.commandPalette} readOnly')) {
+@428:     console.error('CommandPalette input must be editable search, not a read-only placeholder');
+@429:     failed = true;
+@430:   }
+@431:   if (!shell.includes('connectIDEEventStream')) {
+@432:     console.error('OuroborosIDE.tsx must subscribe to the backend event stream');
+@433:     failed = true;
+@434:   }
+@435:   for (const snippet of ['WorkspaceWelcome', 'onCreateWorkspace', 'createWorkspace']) {
+@436:     if (!shell.includes(snippet)) {
+@437:       console.error(`OuroborosIDE.tsx must expose real workspace onboarding action: ${snippet}`);
+@438:       failed = true;
+@439:     }
+@440:   }
+@441:   for (const snippet of ['MissionLaunch', 'onSaveMission', 'onStartMission']) {
+@442:     if (!shell.includes(snippet)) {
+@443:       console.error(`OuroborosIDE.tsx must expose direct mission workflow: ${snippet}`);
+@444:       failed = true;
+@445:     }
+@446:   }
+@447:   for (const snippet of ['<FileEditor', 'file={openFile}', 'saveOpenFile', 'saveWorkspaceFile(openFile.path, fileDraft)', 'setFileStatus(zhCN.editor.saving)', 'setFileStatus(zhCN.editor.saveFailed)', 'onSaveFile={() => void saveOpenFile()}']) {
+@448:     if (!shell.includes(snippet)) {
+@449:       console.error(`OuroborosIDE.tsx must expose real workspace file save workflow: ${snippet}`);
+@450:       failed = true;
+@451:     }
+@452:   }
+@453:   for (const snippet of ['renameFilePath', 'renameOpenFile', 'renameWorkspaceFile(openFile.path, targetPath)', 'setRenameFilePath(file.path)', 'setFileStatus(zhCN.editor.renaming)', 'setFileStatus(zhCN.editor.renameFailed)', 'onRenameFile={() => void renameOpenFile()}', 'zhCN.editor.renameFile', 'zhCN.editor.renamePath']) {
+@454:     if (!shell.includes(snippet)) {
+@455:       console.error(`OuroborosIDE.tsx must expose real workspace file rename workflow: ${snippet}`);
+@456:       failed = true;
+@457:     }
+@458:   }
+@459:   for (const snippet of ['deleteOpenFile', 'deleteWorkspaceFile(openFile.path)', 'setOpenFile(null)', 'setFileDraft(\'\')', 'setRenameFilePath(\'\')', 'setFileStatus(zhCN.editor.deleting)', 'setFileStatus(zhCN.editor.deleteFailed)', 'onDeleteFile={() => void deleteOpenFile()}', 'zhCN.editor.deleteFile']) {
+@460:     if (!shell.includes(snippet)) {
+@461:       console.error(`OuroborosIDE.tsx must expose real workspace file delete workflow: ${snippet}`);
+@462:       failed = true;
+@463:     }
+@464:   }
+@465:   for (const snippet of ['newFilePath', 'newFileContent', 'createWorkspaceFile', 'setNewFilePath', 'setNewFileContent', 'saveWorkspaceFile(newFilePath', 'setOpenFile(file)', 'setFileDraft(file.content)', 'await refresh()', 'onCreateFile={() => void createWorkspaceFile()}', 'zhCN.editor.createFile', 'zhCN.editor.createPath', 'zhCN.editor.createContent']) {
+@466:     if (!shell.includes(snippet)) {
+@467:       console.error(`OuroborosIDE.tsx must expose real workspace file creation workflow: ${snippet}`);
+@468:       failed = true;
+@469:     }
+@470:   }
+@471:   for (const snippet of ['searchWorkspace(searchQuery)', 'setSearchResults(results)', 'openSearchResult(result: WorkspaceSearchResult)', 'onRunSearch={() => void runSearch()}', 'onOpenSearchResult={result => void openSearchResult(result)}', 'zhCN.search.results']) {
+@472:     if (!shell.includes(snippet)) {
+@473:       console.error(`OuroborosIDE.tsx must expose real workspace search workflow: ${snippet}`);
+@474:       failed = true;
+@475:     }
+@476:   }
+@477:   for (const snippet of ['onSaveProvider', 'onDeleteProvider', 'onTestProvider', 'saveProviderConfig', 'deleteProviderConfig', 'testProviderConfig', 'zhCN.settings.actions.saveProvider', 'data-provider-delete-action="true"', 'data-provider-test-action="true"', 'data-provider-test-result="true"']) {
+@478:     if (!shell.includes(snippet)) {
+@479:       console.error(`OuroborosIDE.tsx must expose editable provider settings: ${snippet}`);
+@480:       failed = true;
+@481:     }
+@482:   }
+@483:   for (const snippet of ['onSaveToolchain', 'saveToolchainPack', 'createToolchainDraft', 'zhCN.settings.actions.createToolchain', 'zhCN.settings.rows.toolchainPackId', 'zhCN.settings.placeholders.toolchainPackId']) {
+@484:     if (!shell.includes(snippet)) {
+@485:       console.error(`OuroborosIDE.tsx must expose editable and creatable toolchain settings: ${snippet}`);
+@486:       failed = true;
+@487:     }
+@488:   }
+@489:   for (const snippet of ['loadToolchainPacks', 'toolchainPacks', 'setToolchainPacks', 'toolchainManifestYaml', 'syncToolchainManifestYaml', 'applyToolchainManifestYaml', 'zhCN.settings.rows.toolchainManifestYaml', 'zhCN.settings.actions.reloadToolchain']) {
+@490:     if (!shell.includes(snippet)) {
+@491:       console.error(`OuroborosIDE.tsx must expose real /api/toolchain manifest management loop: ${snippet}`);
+@492:       failed = true;
+@493:     }
+@494:   }
+@495:   for (const snippet of ['loadToolchainActions', 'settingsToolActions', 'ToolchainActionCatalog', 'data-settings-toolchain-actions="true"', 'data-settings-toolchain-action-id', 'data-settings-toolchain-execution-id', 'zhCN.settings.toolchainActions', 'zhCN.settings.toolchainOpenExecution']) {
+@496:     if (!shell.includes(snippet)) {
+@497:       console.error(`OuroborosIDE.tsx must expose Settings toolchain manifest action run loop: ${snippet}`);
+@498:       failed = true;
+@499:     }
+@500:   }
+@501:   for (const snippet of ['onSaveWorkspaceSettings', 'saveWorkspaceSettings', 'zhCN.settings.actions.saveWorkspace']) {
+@502:     if (!shell.includes(snippet)) {
+@503:       console.error(`OuroborosIDE.tsx must expose editable workspace settings: ${snippet}`);
+@504:       failed = true;
+@505:     }
+@506:   }
+@507:   for (const snippet of ['fetchPromptRegistry', 'savePromptRegistry', 'promptRegistry', 'settingsActiveSection === \'prompts\'', 'updatePromptContent', 'saveCurrentPrompts', 'zhCN.settings.sections.prompts', 'zhCN.settings.actions.savePrompts']) {
+@508:     if (!shell.includes(snippet)) {
+@509:       console.error(`OuroborosIDE.tsx must expose real Prompt Registry editing: ${snippet}`);
+@510:       failed = true;
+@511:     }
+@512:   }
+@513:   const settingsWorkbenchBlock = shell.match(/function SettingsWorkbench\([\s\S]*?function SettingsSectionContent/)?.[0] || '';
+@514:   if (!settingsWorkbenchBlock) {
+@515:     console.error('OuroborosIDE.tsx must define SettingsWorkbench before SettingsSectionContent');
+@516:     failed = true;
+@517:   }
+@518:   for (const snippet of [
+@519:     'selectedPromptVersions',
+@520:     'promptEngineeringDiffResult',
+@521:     'promptEngineeringHarnessResult',
+@522:     'copyPromptVersionContent',
+@523:     'runPromptEngineeringDiff',
+@524:     'runPromptEngineeringHarness',
+@525:     'prompt.registry.diff',
+@526:     'prompt.harness.run',
+@527:     'zhCN.settings.actions.copyPrompt',
+@528:     'zhCN.settings.actions.comparePromptVersions',
+@529:     'zhCN.settings.actions.runPromptHarness',
+@530:     'data-prompt-engineering-action="copy"',
+@531:     'data-prompt-engineering-action="compare"',
+@532:     'data-prompt-engineering-action="run-harness"',
+@533:     'AIActionPromptDiffResult',
+@534:     'AIActionPromptHarnessRunResult',
+@535:     'PromptVariablesEditor',
+@536:     'data-prompt-template-variables="true"',
+@537:     'updatePromptVariable',
+@538:     'addPromptVariable',
+@539: 	    'removePromptVariable',
+@540: 	    'updatePromptVersionBinding',
+@541: 	    'data-prompt-provider-binding',
+@542: 	    'zhCN.settings.rows.promptProviderName',
+@543: 	    'zhCN.settings.rows.promptProviderModel',
+@544: 	    'templateVariables: promptHarnessTemplateVariables',
+@545:     'renamePromptHarnessTemplateVariable',
+@546:     'deletePromptHarnessTemplateVariable',
+@547:     'promptVariableNameAt',
+@548:     'templateVariables: promptHarnessTemplateVariables(version, harnessDraft)',
+@549:   ]) {
+@550:     if (!settingsWorkbenchBlock.includes(snippet)) {
+@551:       console.error(`SettingsWorkbench must expose real Prompt Engineering version selection, copy, diff, and harness UI: ${snippet}`);
+@552:       failed = true;
+@553:     }
+@554:   }
+@555:   for (const snippet of ['promptKindLabel(prompt.kind)', 'function promptKindLabel(kind: string)', 'zhCN.settings.promptKinds.system', 'zhCN.settings.promptKinds.unknown']) {
+@556:     if (!shell.includes(snippet)) {
+@557:       console.error(`OuroborosIDE.tsx must render prompt kind as Chinese UI copy: ${snippet}`);
+@558:       failed = true;
+@559:     }
+@560:   }
+@561:   for (const snippet of [
+@562:     'promptKindGroups(promptRegistry?.prompts ?? [])',
+@563:     'data-prompt-kind={prompt.kind}',
+@564:     'data-prompt-kind-category={promptKindCategory(prompt.kind)}',
+@565:     'promptKindCategory(prompt.kind)',
+@566:     'function promptKindGroups(prompts: PromptRegistry[\'prompts\'])',
+@567:     'function isRolePromptKind(kind: string): boolean',
+@568:     'zhCN.settings.promptKindGroups.role',
+@569:     'zhCN.settings.promptKinds.prompt_engineer',
+@570:     'zhCN.settings.promptKinds.harness',
+@571:     'zhCN.settings.promptKinds.tool',
+@572:   ]) {
+@573:     if (!settingsWorkbenchBlock.includes(snippet) && !shell.includes(snippet)) {
+@574:       console.error(`SettingsWorkbench must expose role prompt grouping and real prompt.kind categories, not system-only prompt rendering: ${snippet}`);
+@575:       failed = true;
+@576:     }
+@577:   }
+@578:   for (const snippet of ['onOpenFindingFile', 'onFocusGraphNode', 'onFocusReplayEvent', 'zhCN.navigation.focusGraph', 'zhCN.navigation.openEvidenceFile']) {
+@579:     if (!shell.includes(snippet)) {
+@580:       console.error(`OuroborosIDE.tsx must expose graph/replay/report cross navigation: ${snippet}`);
+@581:       failed = true;
+@582:     }
+@583:   }
+@584:   for (const snippet of ['GraphDetailPanel', 'ReplayDetailPanel', 'ReportFindingDetail', 'EvidenceFileDetail', 'ExecutionDetailPanel']) {
+@585:     if (!shell.includes(snippet)) {
+@586:       console.error(`OuroborosIDE.tsx must render real detail view component: ${snippet}`);
+@587:       failed = true;
+@588:     }
+@589:   }
+@590:   for (const snippet of ['data-eventlog-inspector="true"', 'data-eventlog-payload="true"', 'zhCN.replay.eventlogInspector', 'formatEventPayload(event.payloadJson)', 'zhCN.details.rawEventId']) {
+@591:     if (!shell.includes(snippet)) {
+@592:       console.error(`OuroborosIDE.tsx must render raw eventlog inspector from backend replay DTOs: ${snippet}`);
+@593:       failed = true;
+@594:     }
+@595:   }
+@596:   for (const snippet of ['loadEventlogEvents', 'EventlogBrowser', 'eventlogEvents={eventlogEvents.events}', 'eventlogRuns={eventlogEvents.runs}', 'eventlogFilter', 'refreshEventlogEvents', 'data-eventlog-browser="true"', 'data-eventlog-run-filter="true"', 'data-eventlog-lane-filter="true"', 'data-eventlog-raw-record="true"', 'event.rawEventId', 'event.runId', 'event.type', 'event.lane', 'formatEventPayload(event.payloadJson)', 'onInspectExecution(event.executionId as string)', 'onOpenExecutionFile(event.filePath as string)']) {
+@597:     if (!shell.includes(snippet)) {
+@598:       console.error(`OuroborosIDE.tsx must browse raw SQLite eventlog records from /api/events with filters and navigation: ${snippet}`);
+@599:       failed = true;
+@600:     }
+@601:   }
+@602:   for (const snippet of ['onOpenExecutionFile', 'zhCN.execution.openLogFile', 'zhCN.execution.openArtifactFile', 'artifact.filePath']) {
+@603:     if (!shell.includes(snippet)) {
+@604:       console.error(`OuroborosIDE.tsx must open execution logs/artifacts as real workspace files: ${snippet}`);
+@605:       failed = true;
+@606:     }
+@607:   }
+@608:   for (const snippet of ['ExecutionReferenceTargets', 'selectedReportFindingId', 'onFocusReportFinding', 'zhCN.navigation.focusReport', 'finding.executionId === activeStep.id', 'event.executionId === activeStep.id', 'node.executionId === activeStep.id']) {
+@609:     if (!shell.includes(snippet)) {
+@610:       console.error(`OuroborosIDE.tsx must expose execution detail cross references from backend DTOs: ${snippet}`);
+@611:       failed = true;
+@612:     }
+@613:   }
+@614:   for (const snippet of [
+@615:     "const [selectedExecutionId, setSelectedExecutionId] = useState('')",
+@616:     'setSelectedExecutionId(executionId)',
+@617:     'setSelectedExecutionId(id)',
+@618:     'selectedExecutionId={selectedExecutionId}',
+@619:     'selectedExecutionId: string',
+@620:   ]) {
+@621:     if (!shell.includes(snippet)) {
+@622:       console.error(`OuroborosIDE.tsx must track and pass the explicitly selected execution id for execution detail references: ${snippet}`);
+@623:       failed = true;
+@624:     }
+@625:   }
+@626:   const toolExecutionBlock = shell.match(/function ToolExecution\([\s\S]*?const referenceTargets:/)?.[0] || '';
+@627:   const activeStepBlock = toolExecutionBlock.match(/const activeStep =[\s\S]*?;/)?.[0] || '';
+@628:   if (!activeStepBlock.includes('selectedExecutionId')) {
+@629:     console.error('ToolExecution activeStep must derive from selectedExecutionId so cross references follow the inspected execution');
+@630:     failed = true;
+@631:   }
+@632:   if (activeStepBlock.includes('log?.id') && activeStepBlock.indexOf('log?.id') < activeStepBlock.indexOf('selectedExecutionId')) {
+@633:     console.error('ToolExecution activeStep must not prioritize log?.id over selectedExecutionId');
+@634:     failed = true;
+@635:   }
+@636:   for (const snippet of ['executionArtifactsExecutionId', 'findingExecution', 'findingArtifacts', 'execution={findingExecution}', 'artifacts={findingArtifacts}', 'onLoadExecutionArtifacts={onLoadExecutionArtifacts}', 'artifact.filePath as string']) {
+@637:     if (!shell.includes(snippet)) {
+@638:       console.error(`OuroborosIDE.tsx must expose report finding detail execution file jumps from backend DTOs: ${snippet}`);
+@639:       failed = true;
+@640:     }
+@641:   }
+@642:   for (const snippet of ['replayExecution', 'replayFinding', 'replayArtifacts', 'finding.replayEventId === selectedEvent?.id', 'execution={replayExecution}', 'finding={replayFinding}', 'onFocusReportFinding={onFocusReportFinding}', 'onOpenExecutionFile={onOpenExecutionFile}']) {
+@643:     if (!shell.includes(snippet)) {
+@644:       console.error(`OuroborosIDE.tsx must expose replay detail report/execution file jumps from backend DTOs: ${snippet}`);
+@645:       failed = true;
+@646:     }
+@647:   }
+@648:   for (const snippet of ['graphExecution', 'graphFinding', 'graphArtifacts', 'finding.nodeId === selectedNode?.id', 'finding.executionId === selectedNode?.executionId', 'execution.id === graphFinding?.executionId', 'execution={graphExecution}', 'finding={graphFinding}', 'onFocusReportFinding={onFocusReportFinding}', 'executions={ideData.executionSteps}']) {
+@649:     if (!shell.includes(snippet)) {
+@650:       console.error(`OuroborosIDE.tsx must expose graph detail report/execution file jumps from backend DTOs: ${snippet}`);
+@651:       failed = true;
+@652:     }
+@653:   }
+@654:   for (const snippet of ['exportEvidenceGraph', 'onExportGraph', 'graphExportStatus', 'zhCN.graph.exported', 'onClick={onExportGraph}']) {
+@655:     if (!shell.includes(snippet)) {
+@656:       console.error(`OuroborosIDE.tsx must wire graph export button to a real backend export action: ${snippet}`);
+@657:       failed = true;
+@658:     }
+@659:   }
+@660:   for (const snippet of ['exportReport', 'onExportReport', 'reportExportStatus', 'zhCN.report.exported', 'onClick={onExportReport}']) {
+@661:     if (!shell.includes(snippet)) {
+@662:       console.error(`OuroborosIDE.tsx must wire report export button to a real backend export action: ${snippet}`);
+@663:       failed = true;
+@664:     }
+@665:   }
+@666:   for (const snippet of [
+@667:     'finding.filePath || finding.path || finding.source || finding.id',
+@668:     'finding.executionId || finding.replayEventId || finding.nodeId || zhCN.details.empty',
+@669:   ]) {
+@670:     if (shell.includes(snippet)) {
+@671:       console.error(`OuroborosIDE.tsx must not synthesize report appendix evidence text from technical fallbacks: ${snippet}`);
+@672:       failed = true;
+@673:     }
+@674:   }
+@675:   for (const snippet of ['reportActiveSection', 'reportSections', 'onSelectReportSection', 'ReportSectionContent', 'section.id === reportActiveSection', 'data-report-section={section}', 'workspace={ideData.workspace}']) {
+@676:     if (!shell.includes(snippet)) {
+@677:       console.error(`OuroborosIDE.tsx must make report TOC buttons switch real report sections: ${snippet}`);
+@678:       failed = true;
+@679:     }
+@680:   }
+@681:   for (const snippet of [
+@682:     'const [selectedReportPath, setSelectedReportPath]',
+@683:     'const [reportMarkdownDraft, setReportMarkdownDraft]',
+@684:     'data-report-markdown-editor="true"',
+@685:     'value={reportMarkdownDraft}',
+@686:     'onChange={event => setReportMarkdownDraft(event.target.value)}',
+@687:     'zhCN.report.loadReportMarkdown',
+@688:     'zhCN.report.saveReportMarkdown',
+@689:     'zhCN.report.markdownSource',
+@690:     'onSaveReportMarkdown={() => void saveReportMarkdown()}',
+@691:   ]) {
+@692:     if (!shell.includes(snippet)) {
+@693:       console.error(`ReportWorkbench must directly load, edit, and save real report Markdown files: ${snippet}`);
+@694:       failed = true;
+@695:     }
+@696:   }
+@697:   const reportWorkbenchBlock = shell.match(/function ReportWorkbench\([\s\S]*?function ReportMarkdownSaveButton/)?.[0] || '';
+@698:   if (!reportWorkbenchBlock) {
+@699:     console.error('OuroborosIDE.tsx must define ReportWorkbench before ReportMarkdownSaveButton');
+@700:     failed = true;
+@701:   }
+@702:   for (const snippet of [
+@703:     'loadReportFile(selectedReportPath)',
+@704:     'saveReportFile(selectedReportPath, reportMarkdownDraft)',
+@705:   ]) {
+@706:     if (!reportWorkbenchBlock.includes(snippet)) {
+@707:       console.error(`ReportWorkbench must use first-class report file APIs: ${snippet}`);
+@708:       failed = true;
+@709:     }
+@710:   }
+@711:   for (const snippet of [
+@712:     'data-report-preview-panel',
+@713:     'data-report-preview-content',
+@714:     'data-report-preview-empty',
+@715:     'data-report-preview-heading',
+@716:     'data-report-preview-list',
+@717:     'data-report-preview-code',
+@718:     'data-report-preview-link',
+@719:     'zhCN.report.preview',
+@720:     'zhCN.report.previewEmpty',
+@721:     'zhCN.report.editSource',
+@722:   ]) {
+@723:     if (!reportWorkbenchBlock.includes(snippet)) {
+@724:       console.error(`ReportWorkbench must render a real report Markdown preview with stable selectors and Chinese copy: ${snippet}`);
+@725:       failed = true;
+@726:     }
+@727:   }
+@728:   if (!reportWorkbenchBlock.includes('data-report-preview-toggle') && !reportWorkbenchBlock.includes('data-report-source-editor')) {
+@729:     console.error('ReportWorkbench must expose a stable selector for toggling preview/source editing');
+@730:     failed = true;
+@731:   }
+@732:   if (![
+@733:     'markdown={reportMarkdownDraft}',
+@734:     'content={reportMarkdownDraft}',
+@735:     'source={reportMarkdownDraft}',
+@736:     'renderReportMarkdown(reportMarkdownDraft',
+@737:     'parseReportMarkdown(reportMarkdownDraft',
+@738:   ].some(snippet => reportWorkbenchBlock.includes(snippet))) {
+@739:     console.error('ReportWorkbench preview must render from the real loaded/saved reportMarkdownDraft, not mock/demo content');
+@740:     failed = true;
+@741:   }
+@742:   const reportWorkbenchInvocationBlock = shell.match(/<ReportWorkbench\b[\s\S]*?\/>/)?.[0] || '';
+@743:   if (!reportWorkbenchInvocationBlock.includes('onRefresh={refresh}')) {
+@744:     console.error('ReportWorkbench must receive the real IDE refresh callback after report Markdown saves');
+@745:     failed = true;
+@746:   }
+@747:   for (const snippet of [
+@748:     'loadWorkspaceFile(selectedReportPath)',
+@749:     'saveWorkspaceFile(selectedReportPath, reportMarkdownDraft)',
+@750:   ]) {
+@751:     if (reportWorkbenchBlock.includes(snippet)) {
+@752:       console.error(`ReportWorkbench must not use generic workspace file APIs for report Markdown editing: ${snippet}`);
+@753:       failed = true;
+@754:     }
+@755:   }
+@756:   for (const snippet of [
+@757:     'Report Preview',
+@758:     'Preview empty',
+@759:     'Empty preview',
+@760:     'Edit source',
+@761:     'Source editor',
+@762:     'Mock report preview',
+@763:     'Demo report preview',
+@764:     'Sample report preview',
+@765:     'mockReportPreview',
+@766:     'demoReportPreview',
+@767:     'sampleReportPreview',
+@768:     'reportPreviewMock',
+@769:     'reportPreviewDemo',
+@770:     'reportPreviewSample',
+@771:     '示例报告预览',
+@772:     '样例报告预览',
+@773:     '模拟报告预览',
+@774:     '报告预览示例',
+@775:     '报告预览样例',
+@776:   ]) {
+@777:     if (reportWorkbenchBlock.includes(snippet)) {
+@778:       console.error(`ReportWorkbench must not use mock/demo report preview copy or data: ${snippet}`);
+@779:       failed = true;
+@780:     }
+@781:   }
+@782:   for (const snippet of [
+@783:     "kind === 'frontierDependency'",
+@784:     "frontierDependencyReference('frontierDependency'",
+@785:     "source: 'frontier.dependencies'",
+@786:     'setMode(frontierDependencyReferenceMode(reference))',
+@787:     'function frontierDependencyReferenceMode(reference: AIContextReference): IDEMode',
+@788:   ]) {
+@789:     if (!shell.includes(snippet)) {
+@790:       console.error(`OuroborosIDE.tsx must recognize and navigate AI context references with kind=frontierDependency: ${snippet}`);
+@791:       failed = true;
+@792:     }
+@793:   }
+@794:   for (const snippet of [
+@795:     '<AICollaborationTopologyPanel',
+@796:     'function AICollaborationTopologyPanel',
+@797:     'function buildAICollaborationTopology',
+@798:     'data-ai-collaboration-topology="true"',
+@799:     'data-ai-topology-node="true"',
+@800:     'data-ai-topology-node-kind',
+@801:     'data-ai-topology-node-id',
+@802:     'data-ai-topology-edge="true"',
+@803:     'data-ai-topology-edge-kind',
+@804:     'data-ai-topology-edge-source',
+@805:     'data-ai-topology-edge-target',
+@806:     'data-ai-topology-action="refresh"',
+@807:     'data-ai-topology-action="select-strategy"',
+@808:     'data-ai-topology-action="execute-next"',
+@809:     'data-ai-topology-action="execute-node"',
+@810:     'data-ai-topology-action="settle-harness"',
+@811:     "onRunFrontierQueueAction('frontier.execute_next', node.frontierItem)",
+@812:     "onRunFollowupAction('harness.cases.from_ai_conversation', harnessInput)",
+@813:     "source: 'desktop.ai.collaboration_topology'",
+@814:     'zhCN.ai.collaborationTopology',
+@815:     'zhCN.ai.collaborationTopologyNodes',
+@816:     'zhCN.ai.collaborationTopologyEdges',
+@817:     'zhCN.ai.collaborationTopologyBlackboardNode',
+@818:     'zhCN.ai.collaborationTopologyAgentNode',
+@819:     'zhCN.ai.collaborationTopologyFrontierNode',
+@820:     'zhCN.ai.collaborationTopologyBlackboardNodes',
+@821:     'zhCN.ai.collaborationTopologyAgentNodes',
+@822:     'zhCN.ai.collaborationTopologyFrontierNodes',
+@823:     'zhCN.ai.collaborationTopologyDependencyEdge',
+@824:     'zhCN.ai.collaborationTopologyDependentEdge',
+@825:     'zhCN.ai.collaborationTopologyAgentBlackboardEdge',
+@826:     'zhCN.ai.collaborationTopologyFrontierBlackboardEdge',
+@827:     'zhCN.ai.collaborationTopologyFrontierAgentEdge',
+@828:     'zhCN.ai.collaborationTopologyBlockedByEdge',
+@829:     'zhCN.ai.collaborationTopologyEmpty',
+@830:     'zhCN.ai.collaborationTopologyEdgesEmpty',
+@831:     'zhCN.ai.collaborationTopologyNodeList',
+@832:     'zhCN.ai.collaborationTopologyEdgeList',
+@833:     'zhCN.ai.collaborationTopologySourceNode',
+@834:     'zhCN.ai.collaborationTopologyTargetNode',
+@835:     'zhCN.ai.collaborationTopologyEdgeArrow',
+@836:     'zhCN.ai.collaborationTopologyHarnessSource',
+@837:     'zhCN.ai.collaborationTopologyHarnessReady',
+@838:     'zhCN.ai.collaborationTopologyHarnessMissing',
+@839:     'zhCN.ai.collaborationTopologySelectStrategy',
+@840:     'zhCN.ai.collaborationTopologyExecuteNext',
+@841:     'zhCN.ai.collaborationTopologySettleHarness',
+@842:     'zhCN.ai.collaborationTopologySettlingHarness',
+@843:   ]) {
+@844:     if (!shell.includes(snippet)) {
+@845:       console.error(`OuroborosIDE.tsx must expose the real AI Workbench collaboration topology panel contract: ${snippet}`);
+@846:       failed = true;
+@847:     }
+@848:   }
+@849:   const collaborationTopologyPanel = findNamedDeclaration(shellSourceFile, 'AICollaborationTopologyPanel');
+@850:   if (!collaborationTopologyPanel || !ts.isFunctionDeclaration(collaborationTopologyPanel)) {
+@851:     console.error('OuroborosIDE.tsx must declare AICollaborationTopologyPanel');
+@852:     failed = true;
+@853:   } else {
+@854:     const variableDeclarations = collectNodes(collaborationTopologyPanel, ts.isVariableDeclaration);
+@855:     const topologyGoalDeclarations = variableDeclarations.filter(node => ts.isIdentifier(node.name) && node.name.text === 'topologyGoal');
+@856:     const harnessInputDeclarations = variableDeclarations.filter(node => ts.isIdentifier(node.name) && node.name.text === 'harnessInput');
+@857:     const flattenLogicalOr = expression => (
+@858:       ts.isBinaryExpression(expression) && expression.operatorToken.kind === ts.SyntaxKind.BarBarToken
+@859:         ? [...flattenLogicalOr(expression.left), ...flattenLogicalOr(expression.right)]
+@860:         : [expression]
+@861:     );
+@862:     const expectedGoalSources = [
+@863:       'frontierQueueQuery.goal',
+@864:       'frontierQueue?.summary?.goal',
+@865:       'topology.readyFrontierNode?.frontierItem?.hypothesis',
+@866:       'topology.readyFrontierNode?.frontierItem?.title',
+@867:       'undefined',
+@868:     ];
+@869:     const actualGoalSources = topologyGoalDeclarations.length === 1 && topologyGoalDeclarations[0].initializer
+@870:       ? flattenLogicalOr(topologyGoalDeclarations[0].initializer).map(node => node.getText(shellSourceFile))
+@871:       : [];
+@872:     if (JSON.stringify(actualGoalSources) !== JSON.stringify(expectedGoalSources)) {
+@873:       console.error(`AICollaborationTopologyPanel topologyGoal must use real DTO fields without readyFrontierNode?.label fallback: ${actualGoalSources.join(' | ') || '(missing)'}`);
+@874:       failed = true;
+@875:     }
+@876: 
+@877:     const harnessInputInitializer = harnessInputDeclarations.length === 1 ? harnessInputDeclarations[0].initializer : undefined;
+@878:     const harnessProperties = harnessInputInitializer && ts.isObjectLiteralExpression(harnessInputInitializer)
+@879:       ? harnessInputInitializer.properties.filter(ts.isPropertyAssignment)
+@880:       : [];
+@881:     const harnessGoal = harnessProperties.find(property => property.name.getText(shellSourceFile) === 'goal');
+@882:     const harnessSource = harnessProperties.find(property => property.name.getText(shellSourceFile) === 'source');
+@883:     if (harnessGoal?.initializer.getText(shellSourceFile) !== 'topologyGoal') {
+@884:       console.error('AICollaborationTopologyPanel must bind topologyGoal directly to harnessInput.goal');
+@885:       failed = true;
+@886:     }
+@887:     if (!harnessSource || !ts.isStringLiteral(harnessSource.initializer) || harnessSource.initializer.text !== 'desktop.ai.collaboration_topology') {
+@888:       console.error('AICollaborationTopologyPanel must keep the real topology source on harnessInput');
+@889:       failed = true;
+@890:     }
+@891:     const followupCalls = collectNodes(
+@892:       collaborationTopologyPanel,
+@893:       node => ts.isCallExpression(node)
+@894:         && ts.isIdentifier(node.expression)
+@895:         && node.expression.text === 'onRunFollowupAction',
+@896:     );
+@897:     if (!followupCalls.some(call => (
+@898:       call.arguments.length === 2
+@899:       && ts.isStringLiteral(call.arguments[0])
+@900:       && call.arguments[0].text === 'harness.cases.from_ai_conversation'
+@901:       && ts.isIdentifier(call.arguments[1])
+@902:       && call.arguments[1].text === 'harnessInput'
+@903:     ))) {
+@904:       console.error('AICollaborationTopologyPanel must pass the same harnessInput object to onRunFollowupAction');
+@905:       failed = true;
+@906:     }
+@907:   }
+@908:   for (const snippet of [
+@909:     "kind === 'provider' || kind === 'settings' || kind === 'prompt' || kind === 'promptVersion'",
+@910:     'settingsFocusForAIReference(reference',
+@911:     'setSettingsFocus(current =>',
+@912:     'focus={settingsFocus}',
+@913:     'resolvePromptFocusTarget(promptRegistry, focus)',
+@914:     'data-prompt-id={prompt.id}',
+@915:     "data-prompt-version-selected={selectedVersion?.id || ''}",
+@916:   ]) {
+@917:     if (!shell.includes(snippet)) {
+@918:       console.error(`OuroborosIDE.tsx must navigate promptVersion AI context references to the real prompt/settings workbench: ${snippet}`);
+@919:       failed = true;
+@920:     }
+@921:   }
+@922:   for (const snippet of ['settingsActiveSection', 'settingsSections', 'onSelectSettingsSection', 'SettingsSectionContent', 'section.id === settingsActiveSection', 'data-settings-section={section}']) {
+@923:     if (!shell.includes(snippet)) {
+@924:       console.error(`OuroborosIDE.tsx must make settings navigation switch real settings sections: ${snippet}`);
+@925:       failed = true;
+@926:     }
+@927:   }
+@928:   if (shell.includes("className={index === 0 ? 'active' : ''}>{item}</button>")) {
+@929:     console.error('Settings navigation must not keep a fixed first active button');
+@930:     failed = true;
+@931:   }
+@932:   for (const snippet of ['zhCN.mission.preview', 'composerPlaceholder} readOnly']) {
+@933:     if (shell.includes(snippet)) {
+@934:       console.error(`OuroborosIDE.tsx still contains placeholder execution UI: ${snippet}`);
+@935:       failed = true;
+@936:     }
+@937:   }
+@938:   for (const snippet of ['defaultValue="toolchains/managed-bundles"', 'defaultValue="127.0.0.1"', 'defaultValue="8080"', 'defaultValue="70"']) {
+@939:     if (shell.includes(snippet)) {
+@940:       console.error(`OuroborosIDE.tsx contains hardcoded settings default: ${snippet}`);
+@941:       failed = true;
+@942:     }
+@943:   }
+@944:   const createToolchainDraftSource = namedDeclarationSource(shellSourceFile, 'createToolchainDraft');
+@945:   for (const snippet of [
+@946:     'toolchainPacks.length',
+@947:     "'local'",
+@948:     "'0.1.0'",
+@949:     "runner: 'command'",
+@950:     "parser: 'jsonl_parser'",
+@951:     "healthcheck: 'built_in'",
+@952:     'runTimeoutMs: 10000',
+@953:   ]) {
+@954:     if (createToolchainDraftSource.includes(snippet)) {
+@955:       console.error(`OuroborosIDE.tsx must not fabricate new toolchain business fields in the frontend: ${snippet}`);
+@956:       failed = true;
+@957:     }
+@958:   }
+@959:   if (!createToolchainDraftSource.includes('emptyToolchainPack()')) {
+@960:     console.error('OuroborosIDE.tsx must start new toolchain editing from an empty user-authored draft');
+@961:     failed = true;
+@962:   }
+@963:   for (const snippet of [
+@964:     'const [creatingToolchain, setCreatingToolchain] = useState(false)',
+@965:     'if (creatingToolchain) {',
+@966:     'setCreatingToolchain(true)',
+@967:     'creatingToolchain && !selectedToolchainID',
+@968:   ]) {
+@969:     if (!shell.includes(snippet)) {
+@970:       console.error(`OuroborosIDE.tsx must keep an empty toolchain draft editable without inventing a persisted pack ID: ${snippet}`);
+@971:       failed = true;
+@972:     }
+@973:   }
+@974:   const emptyToolchainPackSource = namedDeclarationSource(shellSourceFile, 'emptyToolchainPack');
+@975:   if (!emptyToolchainPackSource.includes('status: zhCN.settings.notConfigured')) {
+@976:     console.error('OuroborosIDE.tsx must render the empty toolchain status with Chinese unconfigured copy');
+@977:     failed = true;
+@978:   }
+@979:   const emptyIDEDataSource = namedDeclarationSource(shellSourceFile, 'emptyData');
+@980:   const emptyProviderDraftSource = namedDeclarationSource(shellSourceFile, 'emptyProviderDraft');
+@981:   for (const [label, source] of [
+@982:     ['empty IDE data', emptyIDEDataSource],
+@983:     ['empty provider draft', emptyProviderDraftSource],
+@984:   ]) {
+@985:     if (source.includes("status: 'unknown'")) {
+@986:       console.error(`OuroborosIDE.tsx must not expose raw English status in ${label}`);
+@987:       failed = true;
+@988:     }
+@989:   }
+@990:   for (const pattern of [
+@991:     { label: 'emptyData provider type', regex: /provider:\s*\{[\s\S]*?type:\s*'openai_compatible'/ },
+@992:     { label: 'emptyData provider enabled', regex: /provider:\s*\{[\s\S]*?enabled:\s*true/ },
+@993:     { label: 'emptyData provider routing', regex: /provider:\s*\{[\s\S]*?routingStrategy:\s*'first_enabled'/ },
+@994:     { label: 'emptyToolchainPack runner', regex: /function emptyToolchainPack\(\)[\s\S]*?runner:\s*'native'/ },
+@995:     { label: 'emptyToolchainPack healthcheck', regex: /function emptyToolchainPack\(\)[\s\S]*?healthcheck:\s*'built_in'/ },
+@996:   ]) {
+@997:     if (pattern.regex.test(shell)) {
+@998:       console.error(`OuroborosIDE.tsx must not fabricate settings in empty IDE data: ${pattern.label}`);
+@999:       failed = true;
+@1000:     }
+@1001:   }
+@1002:   for (const pattern of [
+@1003:     { label: 'toolchain runner not configured option', regex: /value=\{toolchainDraft\.runner\}[\s\S]*?<option value="">\{zhCN\.settings\.notConfigured\}<\/option>/ },
+@1004:     { label: 'toolchain healthcheck not configured option', regex: /value=\{toolchainDraft\.healthcheck\}[\s\S]*?<option value="">\{zhCN\.settings\.notConfigured\}<\/option>/ },
+@1005:   ]) {
+@1006:     if (!pattern.regex.test(shell)) {
+@1007:       console.error(`OuroborosIDE.tsx must expose Chinese unconfigured option for ${pattern.label}`);
+@1008:       failed = true;
+@1009:     }
+@1010:   }
+@1011:   for (const snippet of [
+@1012:     '<option value="openai_compatible">openai_compatible</option>',
+@1013:     '<option value="native">native</option>',
+@1014:     '<option value="command">command</option>',
+@1015:     '<option value="built_in">built_in</option>',
+@1016:     '<option value="exec">exec</option>',
+@1017:     '{pack.name || pack.id}',
+@1018:     'toolchainDraft.manifestPath || \'--\'',
+@1019:   ]) {
+@1020:     if (shell.includes(snippet)) {
+@1021:       console.error(`OuroborosIDE.tsx must not expose internal option value as visible settings copy: ${snippet}`);
+@1022:       failed = true;
+@1023:     }
+@1024:   }
+@1025:   if (!shell.includes('zhCN.mission.noMessages')) {
+@1026:     console.error('OuroborosIDE.tsx must render a real Chinese empty state when backend provides no mission messages');
+@1027:     failed = true;
+@1028:   }
+@1029:   for (const snippet of ['data.messages', 'MessageBubble', 'message.author', 'message.label', 'message.body']) {
+@1030:     if (shell.includes(snippet)) {
+@1031:       console.error(`OuroborosIDE.tsx must not keep dormant mission message rows without backend DTO support: ${snippet}`);
+@1032:       failed = true;
+@1033:     }
+@1034:   }
+@1035:   for (const snippet of ['zhCN.mission.agentGraph', '<AgentGraphCanvas data={data}', 'data.agentState.tasks.slice', 'data.orchestratorState.runs.length']) {
+@1036:     if (!shell.includes(snippet)) {
+@1037:       console.error(`OuroborosIDE.tsx must render the right-rail agent graph from real agent/orchestrator DTOs: ${snippet}`);
+@1038:       failed = true;
+@1039:     }
+@1040:   }
+@1041:   for (const snippet of ['workspace-summary-flow', '<span>{data.workspaceItems.length} {zhCN.shell.workspace}</span>']) {
+@1042:     if (shell.includes(snippet)) {
+@1043:       console.error(`OuroborosIDE.tsx must not present synthesized workspace counts as an agent graph: ${snippet}`);
+@1044:       failed = true;
+@1045:     }
+@1046:   }
+@1047:   for (const snippet of ["Bot,", 'icon={Bot}', 'typeof Bot']) {
+@1048:     if (shell.includes(snippet)) {
+@1049:       console.error(`OuroborosIDE.tsx must not keep AI/bot visual semantics in the mission operation surface: ${snippet}`);
+@1050:       failed = true;
+@1051:     }
+@1052:   }
+@1053:   if (!/<SettingsWorkbench\b[\s\S]*?\bdata=\{ideData\}/.test(shell)) {
+@1054:     console.error('SettingsWorkbench must render real IDE data, not fixed defaults');
+@1055:     failed = true;
+@1056:   }
+@1057:   for (const snippet of ['DesktopStatusBanner', 'desktopStatus', 'zhCN.desktop.backendCrashed', 'zhCN.desktop.restartBackend', 'desktopStatus={desktopStatus}', 'desktopStatus?.runtime', 'data-desktop-runtime-info', 'data-desktop-backend-sidecar']) {
+@1058:     if (!shell.includes(snippet)) {
+@1059:       console.error(`OuroborosIDE.tsx must expose real desktop status surface: ${snippet}`);
+@1060:       failed = true;
+@1061:     }
+@1062:   }
+@1063:   for (const snippet of ['desktopStatusLabel(desktopStatus)', 'buildDesktopDiagnosticItems(desktopStatus)', 'zhCN.desktop.backendHealthFailed', 'zhCN.desktop.backendUnknown', 'desktopRuntime?.lastStdout', 'desktopRuntime?.lastStderr']) {
+@1064:     if (!shell.includes(snippet)) {
+@1065:       console.error(`OuroborosIDE.tsx must render precise desktop backend failure diagnostics instead of generic crash/-1 copy: ${snippet}`);
+@1066:       failed = true;
+@1067:     }
+@1068:   }
+@1069:   for (const snippet of ["{ id: 'runtime', icon:", "mode === 'runtime'", '<RuntimeWorkbench', 'function RuntimeWorkbench', 'desktopStatus={desktopStatus}', 'onRefresh={() => void refresh()}', 'onRestart={() => void restartBackend()}']) {
+@1070:     if (!shell.includes(snippet)) {
+@1071:       console.error(`OuroborosIDE.tsx must expose a first-class desktop runtime workbench mode backed by real status actions: ${snippet}`);
+@1072:       failed = true;
+@1073:     }
+@1074:   }
+@1075:   for (const snippet of [
+@1076:     'data-runtime-workbench="true"',
+@1077:     'data-runtime-summary="true"',
+@1078:     'data-runtime-refresh="true"',
+@1079:     'data-runtime-restart="true"',
+@1080:     "'data-runtime-backend-status'",
+@1081:     "'data-runtime-package-status'",
+@1082:     "'data-runtime-diagnostics'",
+@1083:     "'data-runtime-paths'",
+@1084:     "'data-runtime-events'",
+@1085:   ]) {
+@1086:     if (!shell.includes(snippet)) {
+@1087:       console.error(`RuntimeWorkbench must expose stable desktop runtime selectors: ${snippet}`);
+@1088:       failed = true;
+@1089:     }
+@1090:   }
+@1091:   for (const snippet of ['zhCN.modes[item.id]', 'zhCN.runtime.title', 'zhCN.runtime.refreshStatus', 'zhCN.runtime.restartBackend', 'zhCN.runtime.backendStatus', 'zhCN.runtime.packageStatus', 'zhCN.runtime.diagnostics', 'zhCN.runtime.backendProcess']) {
+@1092:     if (!shell.includes(snippet)) {
+@1093:       console.error(`RuntimeWorkbench must use centralized Chinese zhCN runtime copy: ${snippet}`);
+@1094:       failed = true;
+@1095:     }
+@1096:   }
+@1097:   const desktopDiagnostics = readFileSync(join(root, 'src/app/desktop-diagnostics.ts'), 'utf8');
+@1098:   for (const snippet of ['zhCN.desktop.detailDiagnosticSummary', 'zhCN.desktop.detailAction', 'zhCN.desktop.detailDiagnosticLog', 'zhCN.desktop.detailHealthError', 'zhCN.desktop.detailRuntimeIssue', 'zhCN.desktop.diagnosisRendererOom', 'zhCN.desktop.diagnosisPreviousUncleanExit', 'zhCN.desktop.diagnosisCleanExit', 'zhCN.desktop.actionCleanExit', 'isCleanDesktopBackendExit(runtime?.lastExitCode, runtime?.lastExitSignal)', 'formatDesktopExit(runtime.lastExitCode, runtime.lastExitSignal)', 'desktopRuntimeIssueLooksProcessKilled(issue)', 'compactDiagnosticOutput(runtime.lastStderr)']) {
+@1099:     if (!desktopDiagnostics.includes(snippet)) {
+@1100:       console.error(`desktop-diagnostics.ts must render precise desktop backend and Electron process diagnostics: ${snippet}`);
+@1101:       failed = true;
+@1102:     }
+@1103:   }
+@1104:   for (const snippet of ['fetchAIConversation', 'sendAIChatMessage', "id: 'ai'", 'AIWorkbench', 'aiConversation', 'aiStatus', 'aiDraft', 'onSendAIMessage={() => void sendAIMessage()}']) {
+@1105:     if (!shell.includes(snippet)) {
+@1106:       console.error(`OuroborosIDE.tsx must expose a backend-backed AI workbench: ${snippet}`);
+@1107:       failed = true;
+@1108:     }
+@1109:   }
+@1110:   for (const snippet of ['AIToolMessageContent', 'parseLineOrientedAIMessage', 'data-ai-tool-summary="true"', 'zhCN.ai.toolResultDetails']) {
+@1111:     if (!shell.includes(snippet)) {
+@1112:       console.error(`OuroborosIDE.tsx must present real line-oriented tool output as a structured summary: ${snippet}`);
+@1113:       failed = true;
+@1114:     }
+@1115:   }
+@1116:   for (const snippet of ['ai-workbench-state', 'ai-composer-surface', 'ai-composer-footer', 'ai-message-references', 'ai-empty-subtitle', 'ai-empty-message', 'zhCN.brand.subtitle', 'structured.fields.slice(0, 4)']) {
+@1117:     if (!shell.includes(snippet)) {
+@1118:       console.error(`OuroborosIDE.tsx must preserve the design-aligned compact AI conversation hierarchy: ${snippet}`);
+@1119:       failed = true;
+@1120:     }
+@1121:   }
+@1122:   for (const snippet of [
+@1123:     'selectedAIFileChangeKey',
+@1124:     'setSelectedAIFileChangeKey',
+@1125:     'selectedDiffChange',
+@1126:     'AIDiffInspector',
+@1127:     'onSelectDiff',
+@1128:     'data-ai-diff-inspector="true"',
+@1129:     'data-ai-diff-selected="true"',
+@1130:     'data-ai-file-change-diff-action="select"',
+@1131:     'zhCN.ai.diffInspector',
+@1132:     'zhCN.ai.diffInspectorMeta',
+@1133:     'zhCN.ai.diffInspectorEmpty',
+@1134:     'zhCN.ai.fileChangeViewDiff',
+@1135:   ]) {
+@1136:     if (!shell.includes(snippet)) {
+@1137:       console.error(`OuroborosIDE.tsx must expose selectable AI file diff inspector from real action traces: ${snippet}`);
+@1138:       failed = true;
+@1139:     }
+@1140:   }
+@1141:   for (const snippet of ["id: 'blackboard'", 'BlackboardWorkbench', 'ideData.blackboard', "event.type.startsWith('blackboard:')", 'zhCN.blackboard.title', 'zhCN.blackboard.items', 'zhCN.blackboard.summary', 'blackboard.items.map', 'BlackboardItemCard']) {
+@1142:     if (!shell.includes(snippet)) {
+@1143:       console.error(`OuroborosIDE.tsx must expose backend-projected Blackboard v1 UI: ${snippet}`);
+@1144:       failed = true;
+@1145:     }
+@1146:   }
+@1147:   for (const snippet of ['blackboardStatusLabel(item.status)', 'blackboardKindLabel(item.kind)', 'blackboardPriorityLabel(item.priority)', 'zhCN.blackboard.openFile', 'zhCN.blackboard.inspectExecution', 'zhCN.blackboard.focusGraph', 'zhCN.blackboard.focusReplay', 'zhCN.blackboard.focusReport']) {
+@1148:     if (!shell.includes(snippet)) {
+@1149:       console.error(`OuroborosIDE.tsx must render Blackboard item status and cross-navigation in Chinese: ${snippet}`);
+@1150:       failed = true;
+@1151:     }
+@1152:   }
+@1153:   for (const snippet of ['fetchAIActions', 'runAIAction', 'AIActionPanel', 'aiActions', 'aiActionInputs', 'aiActionResult', 'refreshAIActions', 'runSelectedAIAction', 'zhCN.aiActions.title', 'zhCN.aiActions.run', 'onRunAction={action => void runSelectedAIAction(action)}']) {
+@1154:     if (!shell.includes(snippet)) {
+@1155:       console.error(`OuroborosIDE.tsx must expose backend-backed AI Actions UI: ${snippet}`);
+@1156:       failed = true;
+@1157:     }
+@1158:   }
+@1159:   for (const snippet of ['ai-action-search', 'visibleActions', 'data-ai-action-id={action.id}', 'zhCN.aiActions.searchPlaceholder', 'action.status ? localizedStatusLabel(action.status) : undefined']) {
+@1160:     if (!shell.includes(snippet)) {
+@1161:       console.error(`AIActionPanel must expose every real action through compact searchable disclosure without inventing status: ${snippet}`);
+@1162:       failed = true;
+@1163:     }
+@1164:   }
+@1165:   for (const snippet of ["{ id: 'harness', icon:", "mode === 'harness'", 'HarnessWorkbench', 'harness={ideData.harness}', 'zhCN.modes[item.id]', 'zhCN.harness.title', 'onRefreshHarness={() => void refreshHarness()}', 'onCreateHarnessCase={(draft) => void createHarnessCaseDraft(draft)}', 'onRunHarnessCase={id => void runHarnessCaseById(id)}']) {
+@1166:     if (!shell.includes(snippet)) {
+@1167:       console.error(`OuroborosIDE.tsx must expose Harness Engineering v1 workspace UI: ${snippet}`);
+@1168:       failed = true;
+@1169:     }
+@1170:   }
+@1171:   for (const snippet of ['runHarnessCase', 'createHarnessCase', 'fetchHarnessState', 'HarnessCaseCard', 'HarnessResultCard', 'harnessStatusLabel(result.status)', 'harnessKindLabel(testCase.kind)', 'zhCN.harness.openResultFile', 'zhCN.harness.openLogFile', 'zhCN.harness.openArtifactDir', 'zhCN.harness.inspectExecution']) {
+@1172:     if (!shell.includes(snippet)) {
+@1173:       console.error(`OuroborosIDE.tsx must render Harness cases/results/counts and navigation from backend DTOs: ${snippet}`);
+@1174:       failed = true;
+@1175:     }
+@1176:   }
+@1177:   for (const snippet of ['HarnessInputSnapshotSummary', 'data-harness-input-snapshot="true"', 'data-harness-provider-snapshot="true"', 'data-harness-toolchain-snapshot="true"', 'zhCN.harness.inputSnapshots', 'zhCN.harness.providerSnapshot', 'zhCN.harness.toolchainSnapshot', 'testCase.providerSnapshot', 'testCase.toolchainSnapshot']) {
+@1178:     if (!shell.includes(snippet)) {
+@1179:       console.error(`OuroborosIDE.tsx must render Harness provider/toolchain input snapshots from backend DTOs: ${snippet}`);
+@1180:       failed = true;
+@1181:     }
+@1182:   }
+@1183:   for (const snippet of ['data-harness-result-id={result.id}', 'result.references.length > 0', '<AIReferenceActions references={result.references} onOpenReference={onOpenReference} compact />', "kind === 'replayEvent' || kind === 'replayRun'", "case 'promptVersion':", "case 'workspaceSnapshot':", "case 'executionLog':"]) {
+@1184:     if (!shell.includes(snippet)) {
+@1185:       console.error(`OuroborosIDE.tsx must render and navigate real Harness result references from backend DTOs: ${snippet}`);
+@1186:       failed = true;
+@1187:     }
+@1188:   }
+@1189:   for (const snippet of ['result.aiMessageIds.length > 0', 'result.toolCallIds.length > 0', 'result.fileDiffs.length > 0', 'result.eventlogReferences.length > 0', 'zhCN.harness.aiMessages', 'zhCN.harness.toolCalls', 'zhCN.harness.fileDiffs', 'zhCN.harness.eventlogReferences', 'data-harness-ai-message-id', 'data-harness-tool-call-id', 'data-harness-file-diff="true"', 'data-harness-file-diff-content="true"', 'data-harness-eventlog-reference="true"', 'diff.diff &&', 'reference.replayEventId || reference.rawEventId']) {
+@1190:     if (!shell.includes(snippet)) {
+@1191:       console.error(`OuroborosIDE.tsx must render Harness result trace fields from backend DTOs with Chinese labels: ${snippet}`);
+@1192:       failed = true;
+@1193:     }
+@1194:   }
+@1195:   for (const snippet of ['[zhCN.harness.exitCode, result.exitCode]', '[zhCN.harness.durationMs, result.durationMs]', '[zhCN.harness.logBytes, result.logBytes]', '[zhCN.harness.artifactCount, result.artifactCount]', '[zhCN.harness.artifactBytes, result.artifactBytes]']) {
+@1196:     const occurrenceCount = shell.split(snippet).length - 1;
+@1197:     if (occurrenceCount < 2) {
+@1198:       console.error(`OuroborosIDE.tsx must render real Harness execution metrics in HarnessResultCard and AIActionHarnessResult: ${snippet}`);
+@1199:       failed = true;
+@1200:     }
+@1201:   }
+@1202:   for (const snippet of ["action.kind === 'harness'", 'isHarnessAIAction', 'zhCN.aiActions.harnessKind', 'buildAIHarnessInput', 'harness.cases.read', 'harness.cases.create', 'harness.cases.from_failure', 'harness.cases.from_eventlog', 'harness.cases.from_workspace_snapshot', 'harness.cases.from_ai_conversation', 'harness.run', 'harnessTitleInput', 'harnessGoalInput', 'harnessCommandInput', 'harnessExpectedResultInput', 'harnessPromptVersionInput', 'harnessFailureExecutionInput', 'harnessFailureTranscriptInput', 'harnessEventlogRunInput', 'harnessEventlogRunPlaceholder', 'harnessSnapshotIdInput', 'harnessSnapshotPathInput', 'harnessSnapshotFilesInput', 'harnessAIMessageIdsInput',
+@1202:    'harnessToolCallIdsInput', 'harnessAIMessageIdsPlaceholder', 'harnessToolCallIdsPlaceholder', 'harnessFromAIConversationRequired', 'snapshotId', 'snapshotPath', 'paths', 'runId', 'replayRunId', 'aiMessageIds', 'toolCallIds', 'promptVersionId', 'harnessCaseId', 'input: harnessInput']) {
+@1203:     if (!shell.includes(snippet)) {
+@1204:       console.error(`OuroborosIDE.tsx must expose structured Harness AI action input fields: ${snippet}`);
+@1205:       failed = true;
+@1206:     }
+@1207:   }
+@1208:   for (const snippet of ["action.kind === 'eventlog'", 'isEventlogAIAction', 'zhCN.aiActions.eventlogKind', 'buildAIEventlogInput', 'eventlog.query', 'eventlogRunInput', 'eventlogLaneInput', 'eventlogTypeInput', 'eventlogLimitInput', 'eventlogRunPlaceholder', 'eventlogLanePlaceholder', 'eventlogTypePlaceholder', 'eventlogLimitPlaceholder', 'input: eventlogInput']) {
+@1209:     if (!shell.includes(snippet)) {
+@1210:       console.error(`OuroborosIDE.tsx must expose structured eventlog.query AI action input fields: ${snippet}`);
+@1211:       failed = true;
+@1212:     }
+@1213:   }
+@1214:   for (const snippet of ['DEFAULT_HARNESS_ENVIRONMENT_SNAPSHOT_SOURCE', '桌面环境快照', 'harness.cases.from_environment_snapshot', 'harnessEnvironmentSnapshotSourcePlaceholder', 'harnessFromEnvironmentSnapshotRequired', 'harnessFromEnvironmentSnapshotResult']) {
+@1215:     if (!shell.includes(snippet)) {
+@1216:       console.error(`OuroborosIDE.tsx must expose environment snapshot Harness AI action support: ${snippet}`);
+@1217:       failed = true;
+@1218:     }
+@1219:   }
+@1220:   const harnessInputBuilderBlock = namedDeclarationSource(shellSourceFile, 'buildAIHarnessInput');
+@1221:   const workspaceSnapshotBuilderBlock = findAIActionBranch(shellSourceFile, 'buildAIHarnessInput', 'harness.cases.from_workspace_snapshot');
+@1222:   for (const snippet of ["const command = aiActionInputValue(aiActionInputs, action.id, 'command').trim();", 'command,']) {
+@1223:     if (!workspaceSnapshotBuilderBlock.includes(snippet)) {
+@1224:       console.error(`buildAIHarnessInput must require and send the real harness.cases.from_workspace_snapshot command: ${snippet}`);
+@1225:       failed = true;
+@1226:     }
+@1227:   }
+@1228:   if (!/if \(!command\)\s*\{\s*return null;\s*\}/.test(workspaceSnapshotBuilderBlock)) {
+@1229:     console.error('buildAIHarnessInput must reject an empty harness.cases.from_workspace_snapshot command before sending the request');
+@1230:     failed = true;
+@1231:   }
+@1232:   for (const snippet of ["action.id === 'harness.cases.from_environment_snapshot'", "aiActionInputValue(aiActionInputs, action.id, 'snapshotId')", "source: aiActionInputValue(aiActionInputs, action.id, 'source').trim() || DEFAULT_HARNESS_ENVIRONMENT_SNAPSHOT_SOURCE", 'agentTaskId', 'blackboardItemId', 'promptVersionId']) {
+@1233:     if (!harnessInputBuilderBlock.includes(snippet)) {
+@1234:       console.error(`buildAIHarnessInput must send structured harness.cases.from_environment_snapshot fields: ${snippet}`);
+@1235:       failed = true;
+@1236:     }
+@1237:   }
+@1238:   for (const snippet of ["action.id === 'harness.cases.from_ai_conversation'", "aiActionInputValue(aiActionInputs, action.id, 'aiMessageIds')", "aiActionInputValue(aiActionInputs, action.id, 'toolCallIds')", 'aiMessageIds', 'toolCallIds']) {
+@1239:     if (!harnessInputBuilderBlock.includes(snippet)) {
+@1240:       console.error(`buildAIHarnessInput must send structured harness.cases.from_ai_conversation fields: ${snippet}`);
+@1241:       failed = true;
+@1242:     }
+@1243:   }
+@1244:   const harnessActionInputBlock = namedDeclarationSource(shellSourceFile, 'renderAIActionInput');
+@1245:   const workspaceSnapshotInputBlock = findAIActionBranch(shellSourceFile, 'renderAIActionInput', 'harness.cases.from_workspace_snapshot');
+@1246:   for (const snippet of ['zhCN.aiActions.harnessCommandInput', 'zhCN.aiActions.harnessSnapshotCommandPlaceholder', "aiActionInputValue(inputs, action.id, 'command')", "updateStructuredInput('command'"]) {
+@1247:     if (!workspaceSnapshotInputBlock.includes(snippet)) {
+@1248:       console.error(`renderAIActionInput must expose the real workspace-snapshot Harness command in Chinese: ${snippet}`);
+@1249:       failed = true;
+@1250:     }
+@1251:   }
+@1252:   const environmentSnapshotInputBlock = findAIActionBranch(shellSourceFile, 'renderAIActionInput', 'harness.cases.from_environment_snapshot');
+@1253:   for (const snippet of ["action.id === 'harness.cases.from_environment_snapshot'", 'zhCN.aiActions.harnessEnvironmentSnapshotIdInput', 'zhCN.aiActions.harnessTitleInput', 'zhCN.aiActions.harnessGoalInput', 'zhCN.aiActions.harnessExpectedResultInput', 'zhCN.aiActions.harnessPromptVersionInput', 'zhCN.aiActions.harnessSourceInput', 'zhCN.aiActions.harnessAgentTaskInput',
+@1253:    'zhCN.aiActions.harnessBlackboardInput', "aiActionInputValue(inputs, action.id, 'snapshotId')", "aiActionInputValue(inputs, action.id, 'title')", "aiActionInputValue(inputs, action.id, 'goal')", "aiActionInputValue(inputs, action.id, 'expectedResult')", "aiActionInputValue(inputs, action.id, 'source')", "aiActionInputValue(inputs, action.id, 'agentTaskId')", "aiActionInputValue(inputs, action.id, 'blackboardItemId')", "aiActionInputValue(inputs, action.id, 'promptVersionId')"]) {
+@1254:     if (!environmentSnapshotInputBlock.includes(snippet)) {
+@1255:       console.error(`renderAIActionInput must expose Chinese harness.cases.from_environment_snapshot controls without content: ${snippet}`);
+@1256:       failed = true;
+@1257:     }
+@1258:   }
+@1259:   if (environmentSnapshotInputBlock.includes("'content'") || environmentSnapshotInputBlock.includes('harnessContent')) {
+@1260:     console.error('renderAIActionInput must not require content for harness.cases.from_environment_snapshot');
+@1261:     failed = true;
+@1262:   }
+@1263:   for (const snippet of ["action.id === 'harness.cases.from_ai_conversation'", 'zhCN.aiActions.harnessAIMessageIdsInput', 'zhCN.aiActions.harnessToolCallIdsInput', "aiActionInputValue(inputs, action.id, 'aiMessageIds')", "aiActionInputValue(inputs, action.id, 'toolCallIds')", "updateStructuredInput('aiMessageIds'", "updateStructuredInput('toolCallIds'"]) {
+@1264:     if (!harnessActionInputBlock.includes(snippet)) {
+@1265:       console.error(`renderAIActionInput must expose Chinese harness.cases.from_ai_conversation controls: ${snippet}`);
+@1266:       failed = true;
+@1267:     }
+@1268:   }
+@1269:   for (const snippet of ['result.result.harnessState', 'result.result.harnessCases', 'result.result.harnessCase', 'result.result.harnessResults', 'result.result.harnessResult', 'AIActionHarnessCase', 'AIActionHarnessResult', 'zhCN.aiActions.harnessReadResult', 'zhCN.aiActions.harnessCreateResult', 'zhCN.aiActions.harnessFromFailureResult', 'zhCN.aiActions.harnessFromEventlogResult', 'zhCN.aiActions.harnessFromWorkspaceSnapshotResult', 'zhCN.aiActions.harnessFromAIConversationResult',
+@1269:    'zhCN.aiActions.harnessRunResult', "case 'harness_case_from_failure'", "case 'harness_case_from_eventlog'", "case 'harness_case_from_workspace_snapshot'", "case 'harness_case_from_ai_conversation'", 'return zhCN.aiActions.harnessFromAIConversationResult', '[zhCN.harness.executionId, testCase.executionId]', '[zhCN.harness.replayRunId, testCase.replayRunId]', '[zhCN.harness.snapshotId, testCase.snapshotId]', '[zhCN.harness.snapshotPath, testCase.snapshotPath]']) {
+@1270:     if (!shell.includes(snippet)) {
+@1271:       console.error(`OuroborosIDE.tsx must render backend-authored Harness AI action results: ${snippet}`);
+@1272:       failed = true;
+@1273:     }
+@1274:   }
+@1275:   for (const snippet of ['result.result.eventlogEvents', 'AIActionEventlogEvents', 'zhCN.aiActions.eventlogQueryResult', "case 'eventlog_events'", 'return zhCN.aiActions.eventlogQueryResult', 'data-ai-action-eventlog-result="true"', '[zhCN.aiActions.eventlogRunInput, event.runId]', '[zhCN.aiActions.eventlogLaneInput, eventlogLaneLabel(event.lane)]', '[zhCN.aiActions.eventlogTypeInput, eventlogTypeLabel(event.type)]', '[zhCN.replay.rawEventId, event.rawEventId]', 'contentPreview(event.payloadJson || event.detail)']) {
+@1276:     if (!shell.includes(snippet)) {
+@1277:       console.error(`OuroborosIDE.tsx must render real eventlog.query ProjectEventlogEvents results: ${snippet}`);
+@1278:       failed = true;
+@1279:     }
+@1280:   }
+@1281:   for (const snippet of ['zhCN.aiActions.harnessFromEnvironmentSnapshotResult', "case 'harness_case_from_environment_snapshot'", 'return zhCN.aiActions.harnessFromEnvironmentSnapshotResult', "case 'environment_snapshot'", 'return zhCN.harness.kinds.environment_snapshot', 'HarnessInputSnapshotSummary', 'data-harness-provider-snapshot="true"', 'data-harness-toolchain-snapshot="true"', '[zhCN.harness.snapshotPath, testCase.snapshotPath]']) {
+@1282:     if (!shell.includes(snippet)) {
+@1283:       console.error(`OuroborosIDE.tsx must render environment snapshot Harness case/result metadata: ${snippet}`);
+@1284:       failed = true;
+@1285:     }
+@1286:   }
+@1287:   for (const snippet of ["action.kind === 'sisyphus'", 'isSisyphusAIAction', 'zhCN.aiActions.sisyphusKind', 'buildAISisyphusInput', 'sisyphus.conclude_failure', 'sisyphusExecutionInput', 'sisyphusFailureKindInput', 'sisyphusFailureMessageInput', 'sisyphusTranscriptInput', 'zhCN.aiActions.sisyphusRequired', 'input: sisyphusInput']) {
+@1288:     if (!shell.includes(snippet)) {
+@1289:       console.error(`OuroborosIDE.tsx must expose structured Sisyphus AI action input fields: ${snippet}`);
+@1290:       failed = true;
+@1291:     }
+@1292:   }
+@1293:   for (const snippet of ["result.result.kind === 'sisyphus_conclusion'", 'data-ai-action-sisyphus-result', 'zhCN.aiActions.sisyphusResult', 'zhCN.aiActions.sisyphusSummary', 'zhCN.aiActions.sisyphusBlackboard', 'zhCN.aiActions.sisyphusAgentTask']) {
+@1294:     if (!shell.includes(snippet)) {
+@1295:       console.error(`OuroborosIDE.tsx must render backend-authored Sisyphus AI action results: ${snippet}`);
+@1296:       failed = true;
+@1297:     }
+@1298:   }
+@1299:   for (const snippet of ["action.kind === 'strategy'", 'isStrategyAIAction', 'zhCN.aiActions.strategyKind', 'buildAIStrategyInput', 'strategy.selector.select', 'strategyGoalInput', 'strategyBudgetInput', 'strategyReadyFilterInput', 'input: strategyInput']) {
+@1300:     if (!shell.includes(snippet)) {
+@1301:       console.error(`OuroborosIDE.tsx must expose structured strategy.selector.select AI action input fields: ${snippet}`);
+@1302:       failed = true;
+@1303:     }
+@1304:   }
+@1305:   for (const snippet of ["result.result.kind === 'strategy_selection'", 'data-ai-action-strategy-result', 'AIActionStrategySelection', 'zhCN.aiActions.strategySelectionResult', 'zhCN.aiActions.strategyCandidateQueue', 'zhCN.aiActions.strategySelectedBlackboard', 'zhCN.aiActions.strategySelectedTask']) {
+@1306:     if (!shell.includes(snippet)) {
+@1307:       console.error(`OuroborosIDE.tsx must render backend-authored strategy selector action results: ${snippet}`);
+@1308:       failed = true;
+@1309:     }
+@1310:   }
+@1311:   for (const snippet of ['shouldRefreshFrontierStateForAIAction', 'return isFrontierAIAction(action) || isStrategyAIAction(action)', 'result.frontierQueue', 'refreshFrontierDependencies(frontierQueueQuery)', 'refreshFrontierQueue(frontierQueueQuery)', 'refreshFrontierMonitor(frontierQueueQuery)']) {
+@1312:     if (!shell.includes(snippet)) {
+@1313:       console.error(`OuroborosIDE.tsx must synchronize real Frontier state after strategy.selector.select results: ${snippet}`);
+@1314:       failed = true;
+@1315:     }
+@1316:   }
+@1317:   for (const snippet of ['AgentStrategySummary', 'data-agent-strategy-summary="true"', 'isStrategyAgentTask', 'isStrategySelectorAgentTask', 'isStrategyMutatorAgentTask', 'data-agent-strategy-task-id', 'zhCN.agents.strategySummary', 'zhCN.agents.strategySelectorCount', 'zhCN.agents.strategyMutatorCount']) {
+@1318:     if (!shell.includes(snippet)) {
+@1319:       console.error(`OuroborosIDE.tsx must expose first-class strategy selector/mutator state in the Agent workbench: ${snippet}`);
+@1320:       failed = true;
+@1321:     }
+@1322:   }
+@1323:   for (const snippet of ["case 'strategy_selection':", 'zhCN.blackboard.kinds.strategySelection']) {
+@1324:     if (!shell.includes(snippet)) {
+@1325:       console.error(`OuroborosIDE.tsx must render strategy_selection blackboard items with Chinese product copy: ${snippet}`);
+@1326:       failed = true;
+@1327:     }
+@1328:   }
+@1329:   for (const snippet of ['AIActionPromptDiffResult', 'result.result.promptDiff', 'zhCN.aiActions.promptDiffResult', 'promptDiff.baseVersionId', 'promptDiff.targetVersionId', 'contentPreview(promptDiff.baseContent)', 'contentPreview(promptDiff.targetContent)', 'promptDiff.addedLines', 'promptDiff.removedLines', 'promptDiff.diff']) {
+@1330:     if (!shell.includes(snippet)) {
+@1331:       console.error(`OuroborosIDE.tsx must render backend-authored PromptDiff details with Chinese labels: ${snippet}`);
+@1332:       failed = true;
+@1333:     }
+@1334:   }
+@1335:   for (const snippet of ["action.kind === 'orchestrator'", 'isOrchestratorAIAction', 'zhCN.aiActions.orchestratorKind', 'buildAIOrchestratorInput', 'orchestrator.run', 'orchestrator.observe', 'orchestrator.advance', 'orchestrator.auto_advance', 'orchestrator.step', 'orchestrator.loop', 'zhCN.aiActions.orchestratorAutoAdvanceRequired', 'zhCN.aiActions.orchestratorStepRequired', 'zhCN.aiActions.orchestratorLoopRequired', 'orchestratorTitleInput', 'orchestratorGoalInput', 'orchestratorCommandInput', 'orchestratorExpectedResultInput', 'orchestratorPriorityInput', 'orchestratorSourceInput', 'orchestratorFilePathInput', 'orchestratorRunIdInput', 'orchestratorObservationIdInput',
+@1335:    'orchestratorFollowupCommandInput', 'orchestratorMaxStepsInput', 'maxSteps', 'input: orchestratorInput']) {
+@1336:     if (!shell.includes(snippet)) {
+@1337:       console.error(`OuroborosIDE.tsx must expose structured Orchestrator AI action input fields: ${snippet}`);
+@1338:       failed = true;
+@1339:     }
+@1340:   }
+@1341:   for (const snippet of ['result.result.orchestratorState', 'result.result.orchestratorRuns', 'result.result.orchestratorRun', 'result.result.orchestratorObservation', 'result.result.orchestratorObservations', 'result.result.orchestratorAdvance', 'result.result.orchestratorAdvances', 'AIActionOrchestratorRun', 'AIActionOrchestratorObservation', 'AIActionOrchestratorAdvance', 'zhCN.aiActions.orchestratorRunResult', 'zhCN.aiActions.orchestratorObserveResult', 'zhCN.aiActions.orchestratorAdvanceResult', 'zhCN.aiActions.noOrchestratorRuns', 'zhCN.aiActions.noOrchestratorObservations', 'zhCN.aiActions.noOrchestratorAdvances']) {
+@1342:     if (!shell.includes(snippet)) {
+@1343:       console.error(`OuroborosIDE.tsx must render backend-authored Orchestrator AI action results: ${snippet}`);
+@1344:       failed = true;
+@1345:     }
+@1346:   }
+@1347:   for (const snippet of ['AIActionAutoParsedEvidence', 'autoParsedEvidenceItems={observation.autoParsedEvidenceItems}', 'autoParsedReportFindings={observation.autoParsedReportFindings}', 'autoParsedEvidenceItemIds={observation.autoParsedEvidenceItemIds}', 'autoParsedReportFindingIds={observation.autoParsedReportFindingIds}', 'autoParsedEvidenceCount={observation.autoParsedEvidenceCount}', 'autoParsedFindingCount={observation.autoParsedFindingCount}', 'autoParsedEvidenceItems={advance.autoParsedEvidenceItems}', 'autoParsedReportFindings={advance.autoParsedReportFindings}', 'autoParsedEvidenceCount={advance.autoParsedEvidenceCount}', 'zhCN.aiActions.autoParsedEvidence',
+@1347:    'zhCN.aiActions.autoParsedFindings']) {
+@1348:     if (!shell.includes(snippet)) {
+@1349:       console.error(`OuroborosIDE.tsx must render backend-authored Orchestrator auto-parse evidence/finding fields: ${snippet}`);
+@1350:       failed = true;
+@1351:     }
+@1352:   }
+@1353:   for (const snippet of ["action.kind === 'planner'", "action.id === 'planner.dispatch'", "action.id === 'planner.execute'", "action.id === 'planner.observe'", "action.id === 'planner.advance'", "action.id === 'planner.step'", 'isPlannerAIAction', 'buildAIPlannerInput', 'planner.dispatch', 'planner.execute', 'planner.observe', 'planner.advance', 'planner.step', 'zhCN.aiActions.plannerKind', 'zhCN.aiActions.plannerDispatchRequired', 'zhCN.aiActions.plannerExecuteRequired', 'zhCN.aiActions.plannerObserveRequired', 'zhCN.aiActions.plannerAdvanceRequired', 'zhCN.aiActions.plannerStepRequired', 'input: plannerInput']) {
+@1354:     if (!shell.includes(snippet)) {
+@1355:       console.error(`OuroborosIDE.tsx must expose structured Planner Dispatch/Execute/Observe AI action input: ${snippet}`);
+@1356:       failed = true;
+@1357:     }
+@1358:   }
+@1359:   const plannerInputBlock = shell.match(/function buildAIPlannerInput[\s\S]*?function buildAIEvidenceInput/)?.[0] || '';
+@1360:   for (const snippet of ["action.id === 'planner.execute' || action.id === 'planner.observe' || action.id === 'planner.advance' || action.id === 'planner.step'", "action.id !== 'planner.dispatch'", "aiActionInputValue(aiActionInputs, action.id, 'plannerPlanId')", "aiActionInputValue(aiActionInputs, action.id, 'executionId')", "aiActionInputValue(aiActionInputs, action.id, 'title')", "aiActionInputValue(aiActionInputs, action.id, 'goal')", "aiActionInputValue(aiActionInputs, action.id, 'summary')", "aiActionInputValue(aiActionInputs, action.id, 'command')", "aiActionInputValue(aiActionInputs, action.id, 'expectedResult')", "aiActionInputValue(aiActionInputs, action.id, 'priority')", 
+@1360:   "aiActionInputValue(aiActionInputs, action.id, 'source')", "aiActionInputValue(aiActionInputs, action.id, 'filePath')"]) {
+@1361:     if (!plannerInputBlock.includes(snippet)) {
+@1362:       console.error(`OuroborosIDE.tsx must send Planner Dispatch/Execute/Observe backend input fields: ${snippet}`);
+@1363:       failed = true;
+@1364:     }
+@1365:   }
+@1366:   for (const snippet of ['ai-action-planner-fields', 'zhCN.aiActions.plannerDispatchHint', 'zhCN.aiActions.plannerExecuteHint', 'zhCN.aiActions.plannerObserveHint', 'zhCN.aiActions.plannerAdvanceHint', 'zhCN.aiActions.plannerStepHint', 'zhCN.aiActions.plannerPlanIdInput', 'zhCN.aiActions.plannerExecutionInput', 'zhCN.aiActions.plannerTitleInput', 'zhCN.aiActions.plannerGoalInput', 'zhCN.aiActions.plannerSummaryInput', 'zhCN.aiActions.plannerCommandInput', 'zhCN.aiActions.plannerExpectedResultInput', 'zhCN.aiActions.plannerPriorityInput', 'zhCN.aiActions.plannerSourceInput', 'zhCN.aiActions.plannerFilePathInput']) {
+@1367:     if (!shell.includes(snippet)) {
+@1368:       console.error(`OuroborosIDE.tsx must render Chinese Planner Dispatch/Execute/Observe input controls: ${snippet}`);
+@1369:       failed = true;
+@1370:     }
+@1371:   }
+@1372:   for (const snippet of ['result.result.plannerState', 'result.result.plannerPlans', 'result.result.plannerPlan', 'AIPlannerStateSummary', 'AIPlannerPlanCard', 'zhCN.aiActions.plannerDispatchResult', 'zhCN.aiActions.plannerExecuteResult', 'zhCN.aiActions.plannerObserveResult', 'zhCN.aiActions.plannerAdvanceResult', 'zhCN.aiActions.plannerStepResult', 'zhCN.aiActions.noPlannerPlans', 'zhCN.aiActions.plannerStatePath', 'zhCN.aiActions.plannerPlanCount', 'zhCN.aiActions.plannerContextSummary', 'zhCN.aiActions.plannerNextActionTitle', 'zhCN.aiActions.plannerNextActionGoal', 'zhCN.aiActions.plannerNextActionCommand', 'zhCN.aiActions.plannerExecutionInput', 'zhCN.aiActions.plannerExecutionStatus',
+@1372:    'zhCN.aiActions.plannerExecutedAt', 'zhCN.aiActions.plannerObservedAt', 'zhCN.aiActions.plannerObservationSummary', 'zhCN.aiActions.plannerLogPath', 'zhCN.aiActions.plannerArtifactDir', 'zhCN.aiActions.plannerArtifactCount', 'zhCN.aiActions.plannerExitCode', 'zhCN.aiActions.plannerHarnessResultInput', 'plan.nextActionTitle', 'plan.nextActionGoal', 'plan.nextActionCommand', 'plan.executionId', 'plan.executionStatus', 'plan.executedAt', 'plan.observedAt', 'plan.observationSummary', 'plan.logPath', 'plan.artifactDir', 'plan.artifactCount', 'plan.exitCode', 'plan.harnessResultId']) {
+@1373:     if (!shell.includes(snippet)) {
+@1374:       console.error(`OuroborosIDE.tsx must render backend-authored Planner Dispatch/Execute/Observe result fields: ${snippet}`);
+@1375:       failed = true;
+@1376:     }
+@1377:   }
+@1378:   for (const snippet of ["action.kind === 'frontier'", "action.id === 'frontier.prioritize'", "action.id === 'frontier.execute_next'", "action.id === 'frontier.dependencies'", "action.id === 'frontier.step'", "action.id === 'frontier.loop'", "action.id === 'frontier.autopilot'", 'isFrontierAIAction', 'buildAIFrontierInput', 'zhCN.aiActions.frontierKind', 'zhCN.aiActions.frontierPrioritizeRequired', 'zhCN.aiActions.frontierExecuteNextRequired', 'zhCN.aiActions.frontierStepRequired', 'zhCN.aiActions.frontierLoopRequired', 'zhCN.aiActions.frontierAutopilotRequired', 'frontierGoalInput', 'frontierBudgetInput', 'frontierLimitInput', 'frontierMaxStepsInput', 'frontierSourceInput',
+@1378:    'frontierStatusFilterInput', 'frontierPriorityFilterInput', 'frontierAgentTaskPlaceholder', 'frontierPlannerPlanPlaceholder', 'frontierExecutionPlaceholder', 'frontierCommandPlaceholder', 'input: frontierInput']) {
+@1379:     if (!shell.includes(snippet)) {
+@1380:       console.error(`OuroborosIDE.tsx must expose structured frontier.prioritize AI action input fields: ${snippet}`);
+@1381:       failed = true;
+@1382:     }
+@1383:   }
+@1384:   for (const snippet of ["action.kind === 'goal'", "action.id === 'goal.decompose'", 'isGoalAIAction', 'buildAIGoalInput', 'goalTitleInput', 'goalSourceInput', 'goalPriorityInput', 'goalMaxItemsInput', 'zhCN.aiActions.goalKind', 'zhCN.aiActions.goalDecomposeRequired', 'input: goalInput']) {
+@1385:     if (!shell.includes(snippet)) {
+@1386:       console.error(`OuroborosIDE.tsx must expose structured goal.decompose AI action input fields: ${snippet}`);
+@1387:       failed = true;
+@1388:     }
+@1389:   }
+@1390:   for (const snippet of ['result.result.frontierItems', 'result.result.frontierSummary', 'result.refreshedFrontierItems', 'result.refreshedFrontierSummary', 'AIActionFrontierPriorities', 'AIActionFrontierPriorityItem', 'AIActionFrontierExecuteNext', "result.result.kind === 'frontier_priorities'", "result.result.kind === 'frontier_execute_next'", "result.result.kind === 'frontier_step'", "result.result.kind === 'frontier_loop'", "result.result.kind === 'frontier_autopilot'", 'zhCN.aiActions.frontierPrioritiesResult', 'zhCN.aiActions.frontierExecuteNextResult', 'zhCN.aiActions.frontierStepResult', 'zhCN.aiActions.frontierLoopResult', 'zhCN.aiActions.frontierAutopilotResult',
+@1390:    'zhCN.aiActions.frontierQueueTitle', 'zhCN.aiActions.frontierSelectedItem', 'zhCN.aiActions.frontierRefreshedQueue', 'zhCN.aiActions.frontierRefreshedSummary', 'zhCN.aiActions.frontierQueueSource', 'zhCN.aiActions.frontierQueueStatus', 'zhCN.aiActions.frontierTransitionCount', 'zhCN.aiActions.frontierTaskEvent', 'zhCN.aiActions.frontierPlannerPlan', 'zhCN.aiActions.frontierLoopPlans', 'zhCN.aiActions.frontierLoopEvents', 'zhCN.aiActions.frontierLoopLogs', 'zhCN.aiActions.frontierLoopArtifacts', 'zhCN.aiActions.frontierRank', 'zhCN.aiActions.frontierScore', 'zhCN.aiActions.frontierReason', 'zhCN.aiActions.frontierSuggestedAction', 'zhCN.aiActions.frontierReady',
+@1390:    'zhCN.aiActions.frontierDependencyIds', 'zhCN.aiActions.frontierBlockedByIds', 'zhCN.aiActions.frontierBlockedReason', 'zhCN.aiActions.noFrontierItems']) {
+@1391:     if (!shell.includes(snippet)) {
+@1392:       console.error(`OuroborosIDE.tsx must render backend-authored frontier priority result fields: ${snippet}`);
+@1393:       failed = true;
+@1394:     }
+@1395:   }
+@1396:   for (const snippet of ["result.result.kind === 'goal_decomposition'", 'AIActionGoalDecomposition', 'zhCN.aiActions.goalDecomposeResult', 'zhCN.aiActions.goalTotalGoal', 'zhCN.aiActions.goalBlackboardItems', 'zhCN.aiActions.goalAgentTasks', 'zhCN.aiActions.goalFrontierQueue', 'result.frontierQueue', "type AIActionFollowupID = 'frontier.execute_next' | 'frontier.autopilot' | 'harness.cases.from_ai_conversation';", 'type AIActionFollowupRunner = (actionId: AIActionFollowupID, input: AIActionRunInput) => void;', 'async function runAIActionFollowup(actionId: AIActionFollowupID, input: AIActionRunInput)', 'await runAIAction({ actionId, input });', 'setAIActionResult(result);',
+@1396:    'data-ai-goal-followup-actions="true"', 'data-ai-goal-followup-action="frontier.execute_next"', 'data-ai-goal-followup-action="frontier.autopilot"', "onRunFollowupAction('frontier.execute_next', executeNextInput)", "onRunFollowupAction('frontier.autopilot', autopilotInput)", 'zhCN.aiActions.goalFollowupExecuteNext', 'zhCN.aiActions.goalFollowupAutopilot']) {
+@1397:     if (!shell.includes(snippet)) {
+@1398:       console.error(`OuroborosIDE.tsx must render backend-authored goal.decompose action results: ${snippet}`);
+@1399:       failed = true;
+@1400:     }
+@1401:   }
+@1402:   for (const snippet of [
+@1403:     '<AIStreamEventsPanel',
+@1404:     'events={streamEvents}',
+@1405:     'sending={sending}',
+@1406:     'onOpenReportActionFile={onOpenReportActionFile}',
+@1407:     'onOpenContextReference={onOpenContextReference}',
+@1408:     'onRunFollowupAction={onRunFollowupAction}',
+@1409:     'function AIStreamEventsPanel({ events, sending, onOpenReportActionFile, onOpenContextReference, onRunFollowupAction, actionRunningId }',
+@1410:     'onOpenReportActionFile: (filePath: string) => void;',
+@1411:     'onOpenContextReference: (reference: AIContextReference) => void;',
+@1412:     'onRunFollowupAction: AIActionFollowupRunner;',
+@1413:     'event.actionResult &&',
+@1414:     'data-ai-stream-event-action-result="true"',
+@1415:     'renderAIActionResult(event.actionResult, onOpenReportActionFile, onOpenContextReference, onRunFollowupAction, actionRunningId',
+@1416:     '<AIActionGoalDecomposition result={result} onOpenFile={onOpenReportActionFile} onOpenReference={onOpenReference} onRunFollowupAction={onRunFollowupAction} />',
+@1417:   ]) {
+@1418:     if (!shell.includes(snippet)) {
+@1419:       console.error(`OuroborosIDE.tsx must render AI stream event actionResult through the full action result cards, including goal.decompose decomposition cards: ${snippet}`);
+@1420:       failed = true;
+@1421:     }
+@1422:   }
+@1423:   for (const snippet of ['loadFrontierQueue', 'FrontierQueue', 'FrontierQueueQuery', 'AIFrontierQueuePanel', 'frontierQueueStatus', 'frontierQueueBusy', 'onRunFrontierQueueAction', 'normalizeFrontierQueueQuery', 'shouldRefreshFrontierQueueForEvent', "event.type.startsWith('frontier:')", "onRunAction('frontier.execute_next', item)", "onRunAction('frontier.autopilot')", 'data-ai-frontier-queue="true"', 'data-frontier-queue-item="true"', 'data-frontier-queue-query="goal"', 'data-frontier-queue-ready-filter', 'data-frontier-queue-mode={value}', 'frontierQueueModeReady', 'frontierQueueModeBlocked', 'data-frontier-queue-action="refresh"', 'data-frontier-queue-action="execute-next"',
+@1423:    'data-frontier-queue-action="autopilot"', 'data-frontier-queue-status="true"', 'data-frontier-queue-dependency-id', 'data-frontier-queue-blocked-by-id', 'result.frontierQueue', 'zhCN.ai.frontierQueue']) {
+@1424:     if (!shell.includes(snippet)) {
+@1425:       console.error(`OuroborosIDE.tsx must expose persistent real Frontier queue controls: ${snippet}`);
+@1426:       failed = true;
+@1427:     }
+@1428:   }
+@1429:   for (const snippet of ['AIStrategyStatePanel', '<AIStrategyStatePanel', 'blackboard={ideData.blackboard}', 'agentState={ideData.agentState}', 'frontierQueue={frontierQueue}', 'frontierQueueQuery={frontierQueueQuery}', 'onRunStrategySelection', "actionId: 'strategy.selector.select'", 'data-ai-strategy-panel="true"', 'data-ai-strategy-blackboard-id', 'data-ai-strategy-task-id', 'data-ai-strategy-action="select"', 'zhCN.ai.strategyPanel']) {
+@1430:     if (!shell.includes(snippet)) {
+@1431:       console.error(`OuroborosIDE.tsx must expose first-class AI Workbench strategy selector panel backed by real state: ${snippet}`);
+@1432:       failed = true;
+@1433:     }
+@1434:   }
+@1435:   for (const snippet of [
+@1436:     'AIFailureStrategyPanel',
+@1437:     '<AIFailureStrategyPanel',
+@1438:     'executions={ideData.executionSteps}',
+@1439:     'onRunFailureStrategySisyphus',
+@1440:     'onRunFailureStrategyFollowup',
+@1441:     "actionId: 'sisyphus.conclude_failure'",
+@1442:     "actionId: 'frontier.autopilot'",
+@1443:     "actionId: 'harness.cases.from_failure'",
+@1444:     'data-ai-failure-strategy-panel="true"',
+@1445:     'data-ai-failure-execution-select',
+@1446:     'data-ai-failure-action="conclude"',
+@1447:     'data-ai-failure-action="frontier-autopilot"',
+@1448:     'data-ai-failure-action="harness-from-failure"',
+@1449:     'data-ai-failure-blackboard-id',
+@1450:     'data-ai-failure-agent-task-id',
+@1451:     'data-ai-failure-prompt-version',
+@1452:     'data-ai-failure-mutation-hint',
+@1453:     'zhCN.ai.failureStrategyPanel',
+@1454:   ]) {
+@1455:     if (!shell.includes(snippet)) {
+@1456:       console.error(`OuroborosIDE.tsx must expose first-class AI Workbench failure strategy loop backed by real execution DTOs and backend AI actions: ${snippet}`);
+@1457:       failed = true;
+@1458:     }
+@1459:   }
+@1460:   const aiWorkbenchBlock = shell.match(/function AIWorkbench\([\s\S]*?function AIFileChangeSetPanel/)?.[0] || '';
+@1461:   if (!aiWorkbenchBlock.includes('<AIFrontierQueuePanel') || !aiWorkbenchBlock.includes('<AIStrategyStatePanel')) {
+@1462:     console.error('AIWorkbench must render AIStrategyStatePanel in the AI Workbench after the Frontier queue panel');
+@1463:     failed = true;
+@1464:   } else if (aiWorkbenchBlock.indexOf('<AIStrategyStatePanel') < aiWorkbenchBlock.indexOf('<AIFrontierQueuePanel')) {
+@1465:     console.error('AIWorkbench must render AIStrategyStatePanel after AIFrontierQueuePanel');
+@1466:     failed = true;
+@1467:   }
+@1468:   for (const snippet of ['executions,', 'executions: ExecutionStep[];', '<AIFailureStrategyPanel']) {
+@1469:     if (!aiWorkbenchBlock.includes(snippet)) {
+@1470:       console.error(`AIWorkbench must accept real execution DTOs and render the failure strategy panel: ${snippet}`);
+@1471:       failed = true;
+@1472:     }
+@1473:   }
+@1474:   if (!aiWorkbenchBlock.includes('<AIFrontierQueuePanel') || !aiWorkbenchBlock.includes('<AIFailureStrategyPanel')) {
+@1475:     console.error('AIWorkbench must render AIFailureStrategyPanel in the AI Workbench after the Frontier queue panel');
+@1476:     failed = true;
+@1477:   } else if (aiWorkbenchBlock.indexOf('<AIFailureStrategyPanel') < aiWorkbenchBlock.indexOf('<AIFrontierQueuePanel')) {
+@1478:     console.error('AIWorkbench must render AIFailureStrategyPanel after AIFrontierQueuePanel');
+@1479:     failed = true;
+@1480:   }
+@1481:   const aiWorkbenchInvocationBlock = shell.match(/<AIWorkbench\b[\s\S]*?\/>/)?.[0] || '';
+@1482:   if (!aiWorkbenchInvocationBlock.includes('executions={ideData.executionSteps}')) {
+@1483:     console.error('OuroborosIDE.tsx must pass backend execution DTOs into AIWorkbench with executions={ideData.executionSteps}');
+@1484:     failed = true;
+@1485:   }
+@1486:   const strategyPanelBlock = shell.match(/function AIStrategyStatePanel[\s\S]*?function AIFrontierDependenciesPanel/)?.[0] || '';
+@1487:   if (!strategyPanelBlock) {
+@1488:     console.error('OuroborosIDE.tsx must define AIStrategyStatePanel before the Frontier dependency panel');
+@1489:     failed = true;
+@1490:   }
+@1491:   for (const snippet of ['blackboard.items', 'isStrategyBlackboardItem', 'isStrategySelectorAgentTask', 'isStrategyMutatorAgentTask', 'frontierQueue', 'frontierQueueQuery', 'onClick={onRunStrategySelection}', 'zhCN.ai.strategyPanelMeta', 'zhCN.ai.strategySelect', 'zhCN.ai.strategySelecting', 'zhCN.ai.strategyNoState', 'zhCN.ai.strategyLatestSelection', 'zhCN.ai.strategyLatestTask', 'zhCN.ai.strategySelectorTasks', 'zhCN.ai.strategyMutatorTasks']) {
+@1492:     if (!strategyPanelBlock.includes(snippet)) {
+@1493:       console.error(`AIStrategyStatePanel must render real blackboard strategy_selection, agent strategy tasks, frontier query/queue state, and Chinese copy: ${snippet}`);
+@1494:       failed = true;
+@1495:     }
+@1496:   }
+@1497:   for (const snippet of ["kind === 'strategy_selection'", 'strategy_selector', 'strategy_mutator']) {
+@1498:     if (!shell.includes(snippet)) {
+@1499:       console.error(`OuroborosIDE.tsx must back AIStrategyStatePanel helpers with real strategy state literals: ${snippet}`);
+@1500:       failed = true;
+@1501:     }
+@1502:   }
+@1503:   const failureStrategyPanelBlock = shell.match(/function AIFailureStrategyPanel[\s\S]*?function AIFrontierDependenciesPanel/)?.[0] || '';
+@1504:   if (!failureStrategyPanelBlock) {
+@1505:     console.error('OuroborosIDE.tsx must define AIFailureStrategyPanel before the Frontier dependency panel');
+@1506:     failed = true;
+@1507:   }
+@1508:   for (const snippet of [
+@1509:     'executions',
+@1510:     'executions.length',
+@1511:     'selectedExecutionId',
+@1512:     'selectedExecution',
+@1513:     'onRunFailureStrategySisyphus',
+@1514:     'onRunFailureStrategyFollowup',
+@1515:     'data-ai-failure-strategy-panel="true"',
+@1516:     'data-ai-failure-execution-select',
+@1517:     'data-ai-failure-action="conclude"',
+@1518:     'data-ai-failure-action="frontier-autopilot"',
+@1519:     'data-ai-failure-action="harness-from-failure"',
+@1520:     'data-ai-failure-blackboard-id',
+@1521:     'data-ai-failure-agent-task-id',
+@1522:     'data-ai-failure-prompt-version',
+@1523:     'data-ai-failure-mutation-hint',
+@1524:     'zhCN.ai.failureStrategyTitle',
+@1525:     'zhCN.ai.failureStrategyStatus',
+@1526:     'zhCN.ai.failureStrategyConclude',
+@1527:     'zhCN.ai.failureStrategyFrontierAutopilot',
+@1528:     'zhCN.ai.failureStrategyHarnessFromFailure',
+@1529:     'zhCN.ai.failureStrategyExecution',
+@1530:     'zhCN.ai.failureStrategyBlackboard',
+@1531:     'zhCN.ai.failureStrategyAgentTask',
+@1532:     'zhCN.ai.failureStrategyPromptVersion',
+@1533:     'zhCN.ai.failureStrategyMutationHint',
+@1534:   ]) {
+@1535:     if (!failureStrategyPanelBlock.includes(snippet)) {
+@1536:       console.error(`AIFailureStrategyPanel must render real execution-backed failure analysis, strategy mutation, Frontier autopilot controls, stable selectors, and Chinese copy: ${snippet}`);
+@1537:       failed = true;
+@1538:     }
+@1539:   }
+@1540:   for (const snippet of [
+@1541:     'function runFailureStrategySisyphus',
+@1542:     "actionId: 'sisyphus.conclude_failure'",
+@1543:     "actionId: 'frontier.autopilot'",
+@1544:     "actionId: 'harness.cases.from_failure'",
+@1545:     'executionId: selectedExecutionId',
+@1546:   ]) {
+@1547:     if (!shell.includes(snippet)) {
+@1548:       console.error(`OuroborosIDE.tsx must wire failure strategy handlers to backend AI action ids without fake data: ${snippet}`);
+@1549:       failed = true;
+@1550:     }
+@1551:   }
+@1552:   for (const snippet of ['loadFrontierDependencies', 'FrontierDependencySelection', 'FrontierDependencyCluster', 'AIFrontierDependenciesPanel', 'frontierDependenciesStatus', 'frontierDependenciesBusy', 'onRefreshFrontierDependencies', 'onRunFrontierDependency', 'refreshFrontierDependencies(frontierQueueQueryRef.current)', 'refreshFrontierDependencies(frontierQueueQuery)', 'runFrontierDependencyAction', "actionId: 'frontier.execute_next'", 'data-ai-frontier-dependencies="true"', 'data-frontier-dependency-cluster-id', 'data-frontier-dependency-blocked-id', 'data-frontier-dependency-unblock-id', 'data-frontier-dependency-action="refresh"', 'data-frontier-dependency-action="execute-next"',
+@1552:    'zhCN.ai.frontierDependencies']) {
+@1553:     if (!shell.includes(snippet)) {
+@1554:       console.error(`OuroborosIDE.tsx must expose real Frontier dependency selection controls: ${snippet}`);
+@1555:       failed = true;
+@1556:     }
+@1557:   }
+@1558:   for (const snippet of ['loadFrontierMonitor', 'FrontierMonitor', 'AIFrontierMonitorPanel', 'frontierMonitorStatus', 'frontierMonitorBusy', 'onRefreshFrontierMonitor', 'refreshFrontierMonitor(frontierQueueQueryRef.current)', 'refreshFrontierMonitor(frontierQueueQuery)', 'data-ai-frontier-monitor="true"', 'data-frontier-monitor-status="true"', 'data-frontier-monitor-task-id', 'data-frontier-monitor-plan-id', 'data-frontier-monitor-execution-id', 'data-frontier-monitor-event-id', 'data-frontier-monitor-action="refresh"', 'frontierMonitorStatusLabel', 'frontierMonitorStatusTone', 'zhCN.ai.frontierMonitor']) {
+@1559:     if (!shell.includes(snippet)) {
+@1560:       console.error(`OuroborosIDE.tsx must expose real Frontier monitor projection controls: ${snippet}`);
+@1561:       failed = true;
+@1562:     }
+@1563:   }
+@1564:   for (const snippet of ["action.kind === 'blackboard'", 'isBlackboardAIAction', 'zhCN.aiActions.blackboardKind', 'buildAIBlackboardInput', 'blackboard.read', 'blackboard.write', 'blackboardItemKindInput', 'blackboardTitleInput', 'blackboardContentInput', 'blackboardStatusInput', 'blackboardPriorityInput', 'blackboardSourceInput', 'blackboardFilePathInput', 'blackboardExecutionInput', 'input: blackboardInput']) {
+@1565:     if (!shell.includes(snippet)) {
+@1566:       console.error(`OuroborosIDE.tsx must expose structured Blackboard AI action input fields: ${snippet}`);
+@1567:       failed = true;
+@1568:     }
+@1569:   }
+@1570:   for (const snippet of ['isWorkspaceFileAIAction', 'buildAIActionRequest', 'renderAIActionInput', 'renderAIActionResult', 'zhCN.aiActions.fileKind', 'zhCN.aiActions.pathInput', 'zhCN.aiActions.contentInput', 'zhCN.aiActions.queryInput', 'zhCN.aiActions.targetPathInput']) {
+@1571:     if (!shell.includes(snippet)) {
+@1572:       console.error(`OuroborosIDE.tsx must expose structured workspace file AI action UI: ${snippet}`);
+@1573:       failed = true;
+@1574:     }
+@1575:   }
+@1576:   for (const snippet of ['workspace.list_files', 'workspace.read_file', 'workspace.read_files', 'workspace.search', 'workspace.write_file', 'workspace.preview_patch', 'workspace.apply_patch', 'workspace.rename_file', 'workspace.delete_file', 'const workspaceInput = buildAIWorkspaceFileInput(action, aiActionInputs)', 'input: workspaceInput']) {
+@1577:     if (!shell.includes(snippet)) {
+@1578:       console.error(`OuroborosIDE.tsx must send workspace file AI action fields through structured arguments: ${snippet}`);
+@1579:       failed = true;
+@1580:     }
+@1581:   }
+@1582:   const workspaceFileInputBlock = shell.match(/function buildAIWorkspaceFileInput[\s\S]*?function buildAIBlackboardInput/)?.[0] || '';
+@1583:   for (const snippet of ["case 'workspace.read_files':", "aiActionInputValue(aiActionInputs, action.id, 'paths')", 'paths.length > 0 ? { paths } : null']) {
+@1584:     if (!workspaceFileInputBlock.includes(snippet)) {
+@1585:       console.error(`OuroborosIDE.tsx must build workspace.read_files paths[] input without falling back to raw arguments: ${snippet}`);
+@1586:       failed = true;
+@1587:     }
+@1588:   }
+@1589:   for (const snippet of ['zhCN.aiActions.pathsInput', 'zhCN.aiActions.pathsPlaceholder']) {
+@1590:     if (!shell.includes(snippet)) {
+@1591:       console.error(`OuroborosIDE.tsx must render Chinese workspace.read_files paths input controls: ${snippet}`);
+@1592:       failed = true;
+@1593:     }
+@1594:   }
+@1595:   for (const snippet of ['result.result.kind', 'result.result.file?.path', 'result.result.files', 'result.result.fileContents', 'data-ai-action-file-list="true"', 'data-ai-action-file-path', 'data-ai-action-file-contents="true"', 'data-ai-action-file-content="true"', 'data-workspace-file-path={file.path}', 'result.result.searchResults', 'result.result.deletedFile?.path', 'result.result.patch', 'zhCN.aiActions.resultStatus', 'zhCN.aiActions.patchDiff', 'zhCN.aiActions.fileContents']) {
+@1596:     if (!shell.includes(snippet)) {
+@1597:       console.error(`OuroborosIDE.tsx must render backend-authored AI action result/status without fake rows: ${snippet}`);
+@1598:       failed = true;
+@1599:     }
+@1600:   }
+@1601:   for (const snippet of ["case 'file_contents':", 'return zhCN.aiActions.fileContents;', 'actionResult.fileContents ?? []']) {
+@1602:     if (!shell.includes(snippet)) {
+@1603:       console.error(`OuroborosIDE.tsx must render workspace.read_files file_contents results with Chinese labels and workspace file actions: ${snippet}`);
+@1604:       failed = true;
+@1605:     }
+@1606:   }
+@1607:   for (const snippet of ['AIFileChangeSetPanel', 'const fileChanges = useMemo', 'buildAIFileChangeSet(displayedActionTrace, streamEvents, actionResult)', 'changes={fileChanges}', 'const displayedActionTrace = conversation?.actionTrace.filter', 'streamEvents', 'actionResult', 'onOpenFile={onOpenReportActionFile}']) {
+@1608:     if (!shell.includes(snippet)) {
+@1609:       console.error(`OuroborosIDE.tsx must expose an AI file change set derived from real conversation/actionTrace/actionResult data: ${snippet}`);
+@1610:       failed = true;
+@1611:     }
+@1612:   }
+@1613:   const evidenceReferenceBlock = shell.match(/function appendEvidenceItemReferences[\s\S]*?function referencesForEvidenceItem/)?.[0] || '';
+@1614:   for (const snippet of ['appendAIProvenanceReferences(references, item)']) {
+@1615:     if (!evidenceReferenceBlock.includes(snippet)) {
+@1616:       console.error(`OuroborosIDE.tsx must turn AI evidence provenance into clickable GUI references: ${snippet}`);
+@1617:       failed = true;
+@1618:     }
+@1619:   }
+@1620:   const findingReferenceBlock = shell.match(/function appendReportFindingReferences[\s\S]*?function referencesForReportFinding/)?.[0] || '';
+@1621:   for (const snippet of ['appendAIProvenanceReferences(references, finding)']) {
+@1622:     if (!findingReferenceBlock.includes(snippet)) {
+@1623:       console.error(`OuroborosIDE.tsx must turn report finding provenance into clickable GUI references: ${snippet}`);
+@1624:       failed = true;
+@1625:     }
+@1626:   }
+@1627:   const provenanceReferenceBlock = shell.match(/function appendAIProvenanceReferences[\s\S]*?function referencesForReportFinding/)?.[0] || '';
+@1628:   for (const snippet of ['item.aiMessageIds', 'item.toolCallIds', 'item.actionTraceIds', 'item.agentTaskId', 'item.blackboardItemId', 'item.promptId', 'item.promptVersionId', "'aiMessage'", "'aiActionTrace'", "'agentTask'", "'blackboard'", "'promptVersion'"]) {
+@1629:     if (!provenanceReferenceBlock.includes(snippet)) {
+@1630:       console.error(`OuroborosIDE.tsx must turn evidence/finding AI provenance into clickable GUI references: ${snippet}`);
+@1631:       failed = true;
+@1632:     }
+@1633:   }
+@1634:   const aiFileChangeSetBlock = shell.match(/function AIFileChangeSetPanel\([\s\S]*?function buildAIFileChangeSet/)?.[0] || '';
+@1635:   if (!aiFileChangeSetBlock) {
+@1636:     console.error('OuroborosIDE.tsx must define AIFileChangeSetPanel before building AI file change set helpers');
+@1637:     failed = true;
+@1638:   }
+@1639:   for (const snippet of ['data-ai-file-change-set="true"', 'data-ai-file-change-item="true"', 'data-ai-file-change-open="primary"', 'data-ai-file-change-open="target"', 'data-workspace-file-path={change.path}', 'onOpenFile(change.path)', 'changes.map(change =>', 'data-ai-file-change-no-patch="true"', 'zhCN.ai.fileChangeSet', 'zhCN.ai.fileChangeSetMeta', 'zhCN.ai.fileChangeSetEmpty', 'zhCN.ai.fileChangeOpenFile', 'zhCN.ai.fileChangeOpenTarget', 'zhCN.ai.fileChangeNoPatch']) {
+@1640:     if (!aiFileChangeSetBlock.includes(snippet)) {
+@1641:       console.error(`AIFileChangeSetPanel must render testable Chinese file change set controls: ${snippet}`);
+@1642:       failed = true;
+@1643:     }
+@1644:   }
+@1645:   const aiFileChangeSetBuilderBlock = shell.match(/function buildAIFileChangeSet[\s\S]*?function AIFrontierQueuePanel/)?.[0] || '';
+@1646:   if (!aiFileChangeSetBuilderBlock) {
+@1647:     console.error('OuroborosIDE.tsx must build AI file change set data before rendering AIFileChangeSetPanel');
+@1648:     failed = true;
+@1649:   }
+@1650:   for (const snippet of ['traces: AIActionTraceItem[]', 'streamEvents: AIChatStreamEvent[]', 'manualActionResult: AIActionRunResponse | null', "pushAIActionResultFileChanges(manualActionResult, 'result', pushChange)", 'streamEvents.forEach', 'traces.forEach', 'trace.contextReferences', "reference.kind === 'fileDiff'", 'workspace.write_file', 'workspace.apply_patch', 'workspace.rename_file', 'workspace.delete_file', 'result.fileChanges ?? []', 'result.fileDiffs ?? []', 'aiToolMessagePatch(messageItem.content)']) {
+@1651:     if (!aiFileChangeSetBuilderBlock.includes(snippet)) {
+@1652:       console.error(`buildAIFileChangeSet must derive file changes from real AI conversation/actionTrace/actionResult payloads: ${snippet}`);
+@1653:       failed = true;
+@1654:     }
+@1655:   }
+@1656:   for (const snippet of ['fakeFileChange', 'mockFileChange', 'demoFileChange', 'sampleFileChange', 'fileChanges: []']) {
+@1657:     if (shell.includes(snippet)) {
+@1658:       console.error(`OuroborosIDE.tsx must not fabricate AI file change set rows: ${snippet}`);
+@1659:       failed = true;
+@1660:     }
+@1661:   }
+@1662:   for (const snippet of ["action.kind === 'report'", 'zhCN.aiActions.reportKind', 'report.create_finding', 'buildAIReportInput', 'reportTitleInput', 'reportSeverityInput', 'reportEndpointInput', 'reportDescriptionInput', 'reportEvidenceInput', 'reportRecommendationInput', 'reportFindingRequired', "'description'", "'recommendation'", "'evidence'", 'result.result.reportFinding', 'result.result.reportFindings', 'result.result.executions', 'result.result.executionLogs', 'result.result.executionArtifacts', 'result.result.reportExport', 'zhCN.aiActions.reportFindings', 'zhCN.aiActions.reportArtifacts']) {
+@1663:     if (!shell.includes(snippet)) {
+@1664:       console.error(`OuroborosIDE.tsx must render backend-authored AI report action results: ${snippet}`);
+@1665:       failed = true;
+@1666:     }
+@1667:   }
+@1668:   for (const snippet of ["evidence.ingest", 'buildAIEvidenceInput', 'evidenceTitleInput', 'evidenceSummaryInput', 'evidenceSeverityInput', 'evidenceExecutionInput', 'evidenceArtifactInput', 'evidenceFilePathInput', 'evidenceSourceInput', 'evidenceNodeInput', 'evidenceReplayInput', 'evidenceIngestRequired', 'input: evidenceInput']) {
+@1669:     if (!shell.includes(snippet)) {
+@1670:       console.error(`OuroborosIDE.tsx must expose structured AI evidence ingestion fields: ${snippet}`);
+@1671:       failed = true;
+@1672:     }
+@1673:   }
+@1674:   for (const snippet of ['result.result.evidenceItem', 'AIActionEvidenceItem', 'zhCN.aiActions.evidenceIngestResult', 'zhCN.aiActions.evidenceTitle', 'zhCN.aiActions.evidenceSummary', 'zhCN.aiActions.evidenceSeverity', 'zhCN.aiActions.evidenceExecutionId', 'zhCN.aiActions.evidenceArtifactPath', 'zhCN.aiActions.evidenceFilePath', 'zhCN.aiActions.evidenceGraphNodeId', 'zhCN.aiActions.evidenceSource']) {
+@1675:     if (!shell.includes(snippet)) {
+@1676:       console.error(`OuroborosIDE.tsx must render backend-authored AI evidence ingestion result: ${snippet}`);
+@1677:       failed = true;
+@1678:     }
+@1679:   }
+@1680:   for (const snippet of ['const actionResultReferences = aiActionResultReferences(result);', '<AIActionStructuredReferenceActions references={actionResultReferences} onOpenReference={onOpenReference} />', 'function aiActionResultReferences(result: AIActionRunResponse): AIContextReference[]', 'appendEvidenceItemReferences', 'appendReportFindingReferences', 'appendHarnessResultReferences', 'appendPromptReferences', 'appendReportExportReferences', 'dedupeAIContextReferences', '<AIActionHarnessResult key={item.id} result={item} onOpenFile={onOpenReportActionFile} onOpenReference={onOpenReference} />', 'renderAIReportActionResult(reportActionResult, onOpenReportActionFile, onOpenReference)']) {
+@1681:     if (!shell.includes(snippet)) {
+@1682:       console.error(`OuroborosIDE.tsx must render AI action result evidence/report/finding/harness/prompt references as clickable Chinese IDE controls: ${snippet}`);
+@1683:       failed = true;
+@1684:     }
+@1685:   }
+@1686:   const reportInputBlock = shell.match(/function buildAIReportInput[\s\S]*?function buildAIActionRequest/)?.[0] || '';
+@1687:   const reportFieldsBlock = shell.match(/if \(action\.id === 'report\.create_finding'\)[\s\S]*?return <span className="ai-action-no-input"/)?.[0] || '';
+@1688:   for (const snippet of ["'content'", "'expectedResult'"]) {
+@1689:     if (reportInputBlock.includes(snippet) || reportFieldsBlock.includes(`updateStructuredInput(${snippet}`)) {
+@1690:       console.error(`OuroborosIDE.tsx must send report.create_finding fields using backend contract names, not legacy report field aliases: ${snippet}`);
+@1691:       failed = true;
+@1692:     }
+@1693:   }
+@1694:   for (const snippet of ['result.result.blackboardItems', 'result.result.blackboardItem', 'AIActionBlackboardItem', 'zhCN.aiActions.blackboardReadResult', 'zhCN.aiActions.blackboardWriteResult', 'zhCN.aiActions.noBlackboardItems']) {
+@1695:     if (!shell.includes(snippet)) {
+@1696:       console.error(`OuroborosIDE.tsx must render backend-authored Blackboard AI action results: ${snippet}`);
+@1697:       failed = true;
+@1698:     }
+@1699:   }
+@1700:   for (const snippet of ['zhCN.ai.title', 'zhCN.ai.loadingConversation', 'zhCN.ai.send', 'zhCN.ai.providerMissing', 'zhCN.ai.sendFailed', 'zhCN.ai.tokenUsage']) {
+@1701:     if (!shell.includes(snippet)) {
+@1702:       console.error(`OuroborosIDE.tsx must render Chinese AI workbench state copy: ${snippet}`);
+@1703:       failed = true;
+@1704:     }
+@1705:   }
+@1706:   for (const snippet of ['zhCN.aiActions.loading', 'zhCN.aiActions.empty', 'zhCN.aiActions.commandInput', 'zhCN.aiActions.parametersInput', 'zhCN.aiActions.executionId', 'zhCN.aiActions.executionStatus', 'zhCN.aiActions.runFailed']) {
+@1707:     if (!shell.includes(snippet)) {
+@1708:       console.error(`OuroborosIDE.tsx must render Chinese AI Actions state copy: ${snippet}`);
+@1709:       failed = true;
+@1710:     }
+@1711:   }
+@1712:   for (const snippet of ["role: 'assistant'", "provider: 'mock'", "provider: 'demo'", "model: 'demo'", "message: { role: 'assistant'", 'fakeAssistant', 'mockAssistant', 'demoConversation']) {
+@1713:     if (shell.includes(snippet)) {
+@1714:       console.error(`OuroborosIDE.tsx must not fabricate AI assistant/provider/message fallbacks: ${snippet}`);
+@1715:       failed = true;
+@1716:     }
+@1717:   }
+@1718:   for (const snippet of ['fakeAIAction', 'mockAIAction', 'demoAIAction', 'fallbackAIAction', 'sampleAIAction', 'actions: [] as AIAction[]']) {
+@1719:     if (shell.includes(snippet)) {
+@1720:       console.error(`OuroborosIDE.tsx must not fabricate AI Actions or fake action fallbacks: ${snippet}`);
+@1721:       failed = true;
+@1722:     }
+@1723:   }
+@1724:   for (const snippet of ['fakeEvidence', 'mockEvidence', 'demoEvidence', 'sampleEvidence', '证据内容示例', '示例证据内容', '样例证据内容']) {
+@1725:     if (shell.includes(snippet)) {
+@1726:       console.error(`OuroborosIDE.tsx must not mock AI evidence ingestion content in the frontend: ${snippet}`);
+@1727:       failed = true;
+@1728:     }
+@1729:   }
+@1730: }
+@1731: 

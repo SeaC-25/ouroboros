@@ -1,9 +1,17 @@
 #!/bin/sh
 set -eu
 
-TRUSTED_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-PATH="$TRUSTED_PATH"
-export PATH
+# Trusted PATH pinning is opt-in. By default this script keeps the inherited
+# PATH so toolchains installed outside the classic system directories (for
+# example Go under "C:\Program Files\Go\bin" on Windows Git Bash) remain
+# reachable. Set OURO_TRUSTED_PATH to a colon-separated directory list to
+# replace PATH with that strict allowlist.
+TRUSTED_PATH_DEFAULT="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+TRUSTED_PATH="${OURO_TRUSTED_PATH:-$TRUSTED_PATH_DEFAULT}"
+if [ -n "${OURO_TRUSTED_PATH:-}" ]; then
+	PATH="$TRUSTED_PATH"
+	export PATH
+fi
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 GOPROXY="${GOPROXY:-https://goproxy.cn,direct}"
@@ -67,15 +75,11 @@ assert_sha256() {
 }
 
 run_ouro() {
-	subcommand="$1"
-	if [ -x "$ROOT/bin/ouro" ] && "$ROOT/bin/ouro" "$subcommand" --help >/dev/null 2>&1; then
-		"$ROOT/bin/ouro" "$@"
-	else
-		(
-			cd "$ROOT"
-			env PATH="$TRUSTED_PATH" GOPROXY="$GOPROXY" TMPDIR="$TMPDIR_BASE" go run ./cmd/ouro "$@"
-		)
+	if [ ! -x "$OURO_BIN" ] && [ -x "$OURO_BIN.exe" ]; then
+		OURO_BIN="$OURO_BIN.exe"
 	fi
+	[ -x "$OURO_BIN" ] || fail "ouro binary missing after fresh build: $OURO_BIN"
+	"$OURO_BIN" "$@"
 }
 
 case "$TMPDIR_BASE" in
@@ -86,6 +90,11 @@ esac
 mkdir -p "$TMPDIR_BASE"
 TRUSTED_SH="$(find_trusted_shell)" || fail "trusted system shell not found"
 command -v go >/dev/null 2>&1 || fail "go not found on trusted PATH"
+
+# 优先构建而非 go run:bin 缺失或源码更新时先重建,OURO_SMOKE_SKIP_BUILD=1 可跳过。
+OURO_BIN="$ROOT/bin/ouro"
+. "$ROOT/scripts/smoke_fresh_bin.sh"
+ensure_fresh_ouro_bin "$OURO_BIN" || fail "unable to build fresh ouro binary"
 
 RULE_BUNDLE_DIR="$ROOT/toolchains/managed-bundles/nuclei-templates"
 RULE_BUNDLE_MANIFEST="$RULE_BUNDLE_DIR/bundle.yaml"
@@ -153,7 +162,7 @@ printf 'final-evidence-fixture: policy %s\n' "$POLICY"
 printf 'final-evidence-fixture: rule-bundle-sha256 %s\n' "$RULE_SHA"
 
 env \
-	PATH="$TRUSTED_PATH" \
+	PATH="$PATH" \
 	GOPROXY="$GOPROXY" \
 	TMPDIR="$TMPDIR_BASE" \
 	OURO_PRODUCTION_ACCEPTANCE_INVENTORY="$INVENTORY" \
@@ -185,7 +194,7 @@ ATTESTATION="$EVIDENCE_DIR/completion-attestation.env"
 printf 'final-evidence-fixture: attestation %s\n' "$ATTESTATION"
 
 env \
-	PATH="$TRUSTED_PATH" \
+	PATH="$PATH" \
 	GOPROXY="$GOPROXY" \
 	TMPDIR="$TMPDIR_BASE" \
 	OURO_COMPLETION_AUDIT_PRODUCTION_SUMMARY="$SUMMARY" \

@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 type SQLiteStore struct {
@@ -23,7 +23,7 @@ func OpenSQLite(path string) (*SQLiteStore, error) {
 		return nil, errors.New("sqlite path is required")
 	}
 
-	db, err := sql.Open("sqlite3", path)
+	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
@@ -56,7 +56,7 @@ func OpenSQLiteReadOnly(path string) (*SQLiteStore, error) {
 	query.Set("_foreign_keys", "1")
 	uri.RawQuery = query.Encode()
 
-	db, err := sql.Open("sqlite3", uri.String())
+	db, err := sql.Open("sqlite", uri.String())
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite read-only: %w", err)
 	}

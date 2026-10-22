@@ -1,24 +1,79 @@
-import { app, BrowserWindow, ipcMain, Menu } from 'electron';
+import { app, BrowserWindow, ipcMain, Menu, nativeImage, shell } from 'electron';
 import { fileURLToPath } from 'node:url';
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import { BackendManager } from './backend.js';
 import { DesktopStateManager } from './desktop-state.js';
 import { WorkspaceManager } from './workspace.js';
-import { loadOuroEnv } from './env.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
-loadOuroEnv({ app });
 
 const isDev = !app.isPackaged;
 const backend = new BackendManager({ app });
 const desktopState = new DesktopStateManager({ app });
 const workspace = new WorkspaceManager({ app });
 let mainWindow = null;
+let backendStopBeforeQuit = false;
+let fatalShutdownStarted = false;
+const singleInstanceLock = app.requestSingleInstanceLock();
+
+if (!singleInstanceLock) {
+  app.quit();
+} else {
+  configureElectronRuntime();
+  registerProcessDiagnostics();
+  backend.startDesktopRuntimeSession();
+
+  app.whenReady().then(async () => {
+    registerIPC();
+    backend.on('status', status => {
+      broadcastBackendStatus(status);
+    });
+    await createWindow();
+
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) {
+        void createWindow();
+      }
+    });
+  }).catch(error => {
+    void shutdownFromFatalError('desktop.ready_failed', error);
+  });
+
+  app.on('second-instance', (_event, argv, workingDirectory) => {
+    const status = backend.snapshot();
+    backend.writeDiagnostic('desktop.second_instance', {
+      argv,
+      workingDirectory,
+      status: status.status,
+      processId: status.processId,
+      workspace: status.workspace,
+      apiBaseURL: status.apiBaseURL,
+    });
+    focusMainWindow();
+    sendBackendSnapshotToWindow(mainWindow, 'second-instance');
+    sendMenuAction(mainWindow, 'refresh');
+  });
+}
+
+function configureElectronRuntime() {
+  app.disableHardwareAcceleration();
+  app.commandLine.appendSwitch('disable-gpu');
+  app.commandLine.appendSwitch('disable-gpu-compositing');
+  app.commandLine.appendSwitch('disable-gpu-sandbox');
+  app.commandLine.appendSwitch('disable-vulkan');
+  app.commandLine.appendSwitch('disable-webgl');
+  app.commandLine.appendSwitch('disable-3d-apis');
+  app.commandLine.appendSwitch('disable-features', 'Vulkan,WebGPU,UseSkiaRenderer,CanvasOopRasterization,VizDisplayCompositor');
+}
 
 async function createWindow() {
   const windowState = await desktopState.loadWindowState();
+  const windowIcon = nativeImage.createFromPath(path.join(__dirname, 'assets', 'ouroboros-icon.png'));
+  if (windowIcon.isEmpty()) {
+    throw new Error('无法加载 Ouroboros 桌面蛇图标');
+  }
   const window = new BrowserWindow({
     x: windowState.x,
     y: windowState.y,
@@ -27,6 +82,7 @@ async function createWindow() {
     minWidth: 960,
     minHeight: 640,
     backgroundColor: '#0a0a0a',
+    icon: windowIcon,
     title: 'Ouroboros',
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
     webPreferences: {
@@ -35,45 +91,59 @@ async function createWindow() {
       nodeIntegration: false
     }
   });
+  if (process.platform !== 'darwin') {
+    window.setIcon(windowIcon);
+  }
   mainWindow = window;
+  wireDesktopProcessDiagnostics(window);
   if (windowState.maximized) {
     window.maximize();
   }
   wireWindowStatePersistence(window);
+  wireRendererStartupSync(window);
 
   const lastWorkspace = await workspace.loadLastWorkspace();
   applyApplicationMenu(window);
   if (lastWorkspace) {
-    void backend.start(lastWorkspace).catch(error => {
+    void backend.start(lastWorkspace).then(() => {
+      applyApplicationMenu(window);
+      sendBackendSnapshotToWindow(window, 'workspace-auto-start');
+      sendMenuAction(window, 'refresh');
+    }).catch(error => {
+      backend.writeDiagnostic('desktop.auto_start_failed', diagnosticError(error));
+      sendBackendSnapshotToWindow(window, 'workspace-auto-start-failed');
       console.error('启动后端失败:', error);
     });
   }
 
   if (isDev) {
-    window.loadURL(process.env.VITE_DEV_SERVER_URL ?? 'http://127.0.0.1:5173');
+    await window.loadURL(developmentServerURL());
     window.webContents.openDevTools({ mode: 'detach' });
     return;
   }
 
-  window.loadFile(path.join(__dirname, '../renderer/index.html'));
+  await window.loadFile(path.join(__dirname, '../renderer/index.html'));
 }
 
-app.whenReady().then(async () => {
-  registerIPC();
-  backend.on('status', status => {
-    broadcastBackendStatus(status);
-  });
-  await createWindow();
-
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      void createWindow();
-    }
-  });
-});
+function developmentServerURL() {
+  const value = String(process.env.VITE_DEV_SERVER_URL || '').trim();
+  if (!value) {
+    throw new Error('桌面开发启动器未提供 Vite 服务地址');
+  }
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(`桌面开发 Vite 服务地址无效：${value}`);
+  }
+  if (!['http:', 'https:'].includes(url.protocol)) {
+    throw new Error(`桌面开发 Vite 服务协议无效：${url.protocol}`);
+  }
+  return url.href;
+}
 
 function registerIPC() {
-  ipcMain.handle('backend:get-api-base-url', () => backend.snapshot().apiBaseURL || process.env.VITE_OURO_API_BASE_URL || '');
+  ipcMain.handle('backend:get-api-base-url', () => backend.snapshot().apiBaseURL || '');
   ipcMain.handle('backend:status', () => backend.snapshot());
   ipcMain.handle('backend:restart', async () => {
     const status = await backend.restart();
@@ -93,7 +163,9 @@ function registerIPC() {
   });
   ipcMain.handle('desktop:recent-workspaces', () => workspace.recentWorkspaces());
   ipcMain.handle('desktop:open-recent-workspace', async (_event, workspacePath) => openWorkspacePath(workspacePath, 'workspace:opened'));
+  ipcMain.handle('desktop:show-workspace-file', async (_event, filePath) => showWorkspaceFile(filePath));
   ipcMain.handle('desktop:window-state', () => desktopState.snapshot());
+  ipcMain.handle('desktop:runtime-info', () => backend.runtimeInfo());
   ipcMain.handle('window:minimize', event => {
     const window = BrowserWindow.fromWebContents(event.sender);
     if (!window || window.isDestroyed()) {
@@ -166,6 +238,7 @@ function buildApplicationMenu(window) {
         menuModeItem(window, 'graph', '攻击图谱', 'CmdOrCtrl+2'),
         menuModeItem(window, 'replay', '回放', 'CmdOrCtrl+3'),
         menuModeItem(window, 'report', '报告', 'CmdOrCtrl+4'),
+        menuModeItem(window, 'runtime', '运行时', 'CmdOrCtrl+5'),
         menuModeItem(window, 'settings', '设置', 'CmdOrCtrl+,'),
         { type: 'separator' },
         {
@@ -186,8 +259,13 @@ function buildApplicationMenu(window) {
         {
           label: '重启后端',
           click: () => {
-            sendMenuAction(window, 'backend:restart');
-            void backend.restart().then(() => sendMenuAction(window, 'refresh'));
+            void backend.restart().then(() => {
+              sendBackendSnapshotToWindow(window, 'menu-backend-restart');
+              sendMenuAction(window, 'refresh');
+            }).catch(error => {
+              backend.writeDiagnostic('desktop.menu_restart_failed', diagnosticError(error));
+              sendBackendSnapshotToWindow(window, 'menu-backend-restart-failed');
+            });
           },
         },
       ],
@@ -241,19 +319,80 @@ async function openWorkspacePath(workspacePath, action) {
   return { ...workspace.snapshot(), backend: backend.snapshot() };
 }
 
+async function showWorkspaceFile(filePath) {
+  const workspacePath = workspace.snapshot().workspace;
+  if (!workspacePath || typeof filePath !== 'string' || filePath.trim() === '') {
+    return { shown: false, path: '', reason: 'missing-workspace-file' };
+  }
+  const root = path.resolve(workspacePath);
+  const absolutePath = path.resolve(root, filePath);
+  const relativePath = path.relative(root, absolutePath);
+  if (relativePath === '' || relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
+    return { shown: false, path: '', reason: 'outside-workspace' };
+  }
+  try {
+    const stat = await fs.stat(absolutePath);
+    if (!stat.isFile()) {
+      return { shown: false, path: absolutePath, reason: 'not-file' };
+    }
+  } catch {
+    return { shown: false, path: absolutePath, reason: 'missing-file' };
+  }
+  shell.showItemInFolder(absolutePath);
+  return { shown: true, path: absolutePath };
+}
+
 function sendMenuAction(window, action) {
   if (!window || window.isDestroyed()) {
     return;
   }
-  window.webContents.send('desktop:menu-action', action);
+  try {
+    window.webContents.send('desktop:menu-action', action);
+  } catch (error) {
+    backend.writeDiagnostic('desktop.menu_action_send_failed', diagnosticError(error));
+  }
 }
 
 function broadcastBackendStatus(status) {
   for (const window of BrowserWindow.getAllWindows()) {
     if (!window.isDestroyed()) {
-      window.webContents.send('backend:status-changed', status);
+      try {
+        window.webContents.send('backend:status-changed', status);
+      } catch (error) {
+        backend.writeDiagnostic('desktop.backend_status_broadcast_failed', diagnosticError(error));
+      }
     }
   }
+}
+
+function sendBackendSnapshotToWindow(window, reason) {
+  if (!window || window.isDestroyed()) {
+    return;
+  }
+  const status = backend.snapshot();
+  backend.writeDiagnostic('desktop.renderer_status_sync', {
+    reason,
+    status: status.status,
+    processId: status.processId,
+    workspace: status.workspace,
+    apiBaseURL: status.apiBaseURL,
+  });
+  try {
+    window.webContents.send('backend:status-changed', status);
+  } catch (error) {
+    backend.writeDiagnostic('desktop.renderer_status_send_failed', diagnosticError(error));
+  }
+}
+
+function focusMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return;
+  }
+  if (mainWindow.isMinimized()) {
+    mainWindow.restore();
+  }
+  mainWindow.show();
+  mainWindow.focus();
 }
 
 function wireWindowStatePersistence(window) {
@@ -281,12 +420,162 @@ function wireWindowStatePersistence(window) {
   });
 }
 
+function wireRendererStartupSync(window) {
+  window.webContents.once('did-finish-load', () => {
+    sendBackendSnapshotToWindow(window, 'did-finish-load');
+    sendMenuAction(window, 'refresh');
+  });
+}
+
+function wireDesktopProcessDiagnostics(window) {
+  window.on('unresponsive', () => {
+    recordDesktopRuntimeIssue('desktop.window_unresponsive', window, {
+      message: '窗口无响应',
+    });
+  });
+  window.on('responsive', () => {
+    backend.writeDiagnostic('desktop.window_responsive', {
+      windowId: window.id,
+    });
+  });
+  window.webContents.on('render-process-gone', (_event, details) => {
+    recordDesktopRuntimeIssue('desktop.render_process_gone', window, details);
+    sendBackendSnapshotToWindow(window, 'render-process-gone');
+  });
+  window.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    recordDesktopRuntimeIssue('desktop.renderer_load_failed', window, {
+      errorCode,
+      errorDescription,
+      validatedURL,
+      isMainFrame,
+    });
+  });
+}
+
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit();
   }
 });
 
-app.on('before-quit', () => {
-  void backend.stop();
+app.on('before-quit', event => {
+  const status = backend.snapshot();
+  if (backendStopBeforeQuit || !status.running) {
+    return;
+  }
+  event.preventDefault();
+  backendStopBeforeQuit = true;
+  void stopBackendBeforeQuit(status, 'before-quit').finally(() => app.quit());
 });
+
+function registerProcessDiagnostics() {
+  app.on('child-process-gone', (_event, details) => {
+    backend.recordDesktopRuntimeIssue('desktop.child_process_gone', normalizeChildProcessGoneDetails(details));
+    sendBackendSnapshotToWindow(mainWindow, 'child-process-gone');
+  });
+  app.on('will-quit', () => {
+    backend.stopDesktopRuntimeSession('will-quit');
+  });
+  app.on('quit', () => {
+    backend.stopDesktopRuntimeSession('quit');
+  });
+  process.on('uncaughtException', error => {
+    void shutdownFromFatalError('desktop.uncaught_exception', error);
+  });
+  process.on('unhandledRejection', reason => {
+    void shutdownFromFatalError('desktop.unhandled_rejection', reason);
+  });
+  for (const signal of ['SIGINT', 'SIGTERM']) {
+    process.on(signal, () => {
+      void shutdownFromProcessSignal(signal);
+    });
+  }
+}
+
+async function shutdownFromFatalError(event, error) {
+  if (fatalShutdownStarted) {
+    return;
+  }
+  fatalShutdownStarted = true;
+  backendStopBeforeQuit = true;
+  const details = diagnosticError(error);
+  backend.recordDesktopRuntimeIssue(event, details);
+  backend.stopDesktopRuntimeSession(`fatal:${event}`, 'crashed');
+  console.error('桌面端发生致命错误:', error);
+  await stopBackendBeforeQuit(backend.snapshot(), event);
+  backend.stopDesktopRuntimeSession(`fatal:${event}`, 'crashed');
+  app.exit(1);
+}
+
+async function shutdownFromProcessSignal(signal) {
+  if (backendStopBeforeQuit) {
+    return;
+  }
+  backendStopBeforeQuit = true;
+  const status = backend.snapshot();
+  backend.writeDiagnostic('desktop.process_signal', {
+    signal,
+    status: status.status,
+    processId: status.processId,
+    workspace: status.workspace,
+    apiBaseURL: status.apiBaseURL,
+  });
+  await stopBackendBeforeQuit(status, signal);
+  backend.stopDesktopRuntimeSession(`process-signal:${signal}`);
+  app.exit(0);
+}
+
+async function stopBackendBeforeQuit(status, reason) {
+  try {
+    backend.writeDiagnostic('backend.before_quit', {
+      reason,
+      status: status.status,
+      processId: status.processId,
+      workspace: status.workspace,
+      apiBaseURL: status.apiBaseURL,
+    });
+    await backend.stop();
+  } catch (error) {
+    console.error('停止后端失败:', error);
+  }
+}
+
+function diagnosticError(error) {
+  if (error instanceof Error) {
+    return {
+      message: error.message,
+      stack: error.stack || '',
+    };
+  }
+  return {
+    message: String(error),
+    stack: '',
+  };
+}
+
+function recordDesktopRuntimeIssue(event, window, details = {}) {
+  const status = backend.snapshot();
+  backend.recordDesktopRuntimeIssue(event, {
+    ...normalizeChildProcessGoneDetails(details),
+    windowId: window?.id ?? 0,
+    status: status.status,
+    processId: status.processId,
+    workspace: status.workspace,
+    apiBaseURL: status.apiBaseURL,
+  });
+}
+
+function normalizeChildProcessGoneDetails(details = {}) {
+  return {
+    type: typeof details.type === 'string' ? details.type : '',
+    reason: typeof details.reason === 'string' ? details.reason : '',
+    exitCode: typeof details.exitCode === 'number' ? details.exitCode : null,
+    serviceName: typeof details.serviceName === 'string' ? details.serviceName : '',
+    name: typeof details.name === 'string' ? details.name : '',
+    message: typeof details.message === 'string' ? details.message : '',
+    errorCode: typeof details.errorCode === 'number' ? details.errorCode : null,
+    errorDescription: typeof details.errorDescription === 'string' ? details.errorDescription : '',
+    validatedURL: typeof details.validatedURL === 'string' ? details.validatedURL : '',
+    isMainFrame: typeof details.isMainFrame === 'boolean' ? details.isMainFrame : null,
+  };
+}

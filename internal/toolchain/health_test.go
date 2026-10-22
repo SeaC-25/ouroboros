@@ -1,4 +1,4 @@
-﻿package toolchain
+package toolchain
 
 import (
 	"errors"

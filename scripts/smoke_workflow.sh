@@ -1,9 +1,17 @@
 #!/bin/sh
 set -eu
 
-TRUSTED_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-PATH="$TRUSTED_PATH"
-export PATH
+# Trusted PATH pinning is opt-in. By default this script keeps the inherited
+# PATH so toolchains installed outside the classic system directories (for
+# example Go under "C:\Program Files\Go\bin" on Windows Git Bash) remain
+# reachable. Set OURO_TRUSTED_PATH to a colon-separated directory list to
+# replace PATH with that strict allowlist.
+TRUSTED_PATH_DEFAULT="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+TRUSTED_PATH="${OURO_TRUSTED_PATH:-$TRUSTED_PATH_DEFAULT}"
+if [ -n "${OURO_TRUSTED_PATH:-}" ]; then
+	PATH="$TRUSTED_PATH"
+	export PATH
+fi
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 GOPROXY="${GOPROXY:-https://goproxy.cn,direct}"
@@ -40,8 +48,17 @@ if [ "$workspace_provided" -eq 1 ] && [ -d "$WORKSPACE" ]; then
 	fi
 fi
 
+# README-(fresh binary) — 防陈旧验收:bin 缺失或源码更新则先 go build;
+# OURO_SMOKE_SKIP_BUILD=1 可跳过(默认必须构建)。优先 go build 而非 go run。
+OURO_BIN="$ROOT/bin/ouro"
+. "$ROOT/scripts/smoke_fresh_bin.sh"
+ensure_fresh_ouro_bin "$OURO_BIN" || fail "unable to build fresh ouro binary"
+if [ ! -x "$OURO_BIN" ] && [ -x "$OURO_BIN.exe" ]; then
+	OURO_BIN="$OURO_BIN.exe"
+fi
+
 run_ouro() {
-	env GOPROXY="$GOPROXY" go run ./cmd/ouro "$@"
+	env GOPROXY="$GOPROXY" "$OURO_BIN" "$@"
 }
 
 run_ouro_logged() {

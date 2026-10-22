@@ -440,6 +440,8 @@ providers:
 }
 
 func TestRunWorkspaceProviderPreflightFailsOverWhenConfigured(t *testing.T) {
+	// 本用例专门验证拨号 preflight 行为:显式开启(套件默认关闭)。
+	t.Setenv(ProviderPreflightEnvVar, "on")
 	ctx := context.Background()
 	root := filepath.Join(t.TempDir(), "workspace")
 	if err := InitWorkspace(root); err != nil {
@@ -12016,6 +12018,8 @@ providers:
 }
 
 func TestRunWorkspacePreflightsOpenAICompatibleProvider(t *testing.T) {
+	// 本用例专门验证拨号 preflight 行为:显式开启(套件默认关闭)。
+	t.Setenv(ProviderPreflightEnvVar, "on")
 	root := filepath.Join(t.TempDir(), "workspace")
 	if err := InitWorkspace(root); err != nil {
 		t.Fatalf("init workspace: %v", err)
@@ -12100,6 +12104,8 @@ providers:
 }
 
 func TestRunWorkspaceRejectsOpenAICompatibleProviderNon2xxPreflight(t *testing.T) {
+	// 本用例专门验证拨号 preflight 行为:显式开启(套件默认关闭)。
+	t.Setenv(ProviderPreflightEnvVar, "on")
 	root := filepath.Join(t.TempDir(), "workspace")
 	if err := InitWorkspace(root); err != nil {
 		t.Fatalf("init workspace: %v", err)

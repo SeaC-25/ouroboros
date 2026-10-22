@@ -1,9 +1,18 @@
 #!/bin/sh
 set -eu
 
-TRUSTED_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-PATH="$TRUSTED_PATH"
-export PATH
+# Trusted PATH pinning is opt-in. By default this script keeps the inherited
+# PATH so toolchains installed outside the classic system directories (for
+# example Go under "C:\Program Files\Go\bin" on Windows Git Bash) remain
+# reachable. Set OURO_TRUSTED_PATH to a colon-separated directory list to
+# replace PATH with that strict allowlist. Child scripts are invoked with the
+# exported PATH as-is; they apply the same opt-in rule themselves.
+TRUSTED_PATH_DEFAULT="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+TRUSTED_PATH="${OURO_TRUSTED_PATH:-$TRUSTED_PATH_DEFAULT}"
+if [ -n "${OURO_TRUSTED_PATH:-}" ]; then
+	PATH="$TRUSTED_PATH"
+	export PATH
+fi
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 GOPROXY="${GOPROXY:-https://goproxy.cn,direct}"
@@ -118,7 +127,7 @@ find_trusted_shell() {
 }
 
 TRUSTED_SH="$(find_trusted_shell)" || fail "trusted system shell not found"
-command -v go >/dev/null 2>&1 || fail "go not found on trusted PATH"
+command -v go >/dev/null 2>&1 || fail "go not found on PATH (inherit PATH or set OURO_TRUSTED_PATH to include it)"
 
 assert_not_symlink_file() {
 	label="$1"
@@ -387,6 +396,10 @@ assert_output_file_path "workflow closure log" "$WORKFLOW_CLOSURE_LOG"
 
 cd "$ROOT"
 
+# Fresh-binary note: this script never consumes a prebuilt bin/ouro directly.
+# The IDE bin is rebuilt below via scripts/build.sh, and every delegated
+# smoke_* script self-verifies freshness via scripts/smoke_fresh_bin.sh.
+
 PRODUCTION_ACCEPTANCE_SCRIPT_SHA256="$(file_sha256 "$PRODUCTION_ACCEPTANCE_SCRIPT")"
 IDE_SMOKE_SCRIPT_SHA256="$(file_sha256 "$IDE_SMOKE_SCRIPT")"
 IDE_DIRECT_USE_SCRIPT_SHA256="$(file_sha256 "$IDE_DIRECT_USE_SCRIPT")"
@@ -405,13 +418,11 @@ printf 'policy: status=approved environment=%s accepted_by=%s\n' "$DEPLOYMENT_EN
 IDE_SMOKE_LOG_TMP_PATH="$(mktemp "$OURO_PRODUCTION_ACCEPTANCE_SMOKE_LOG_DIR/.ide-smoke.txt.XXXXXX")" || fail "unable to create IDE smoke log temporary file"
 if ! {
 	env \
-		PATH="$TRUSTED_PATH" \
 		GOPROXY="$GOPROXY" \
 		BIN_DIR="$IDE_SMOKE_BIN_DIR" \
 		BIN="$IDE_SMOKE_BIN" \
 		"$TRUSTED_SH" "$ROOT/scripts/build.sh"
 	env \
-		PATH="$TRUSTED_PATH" \
 		GOPROXY="$GOPROXY" \
 		WORKSPACE="$IDE_WORKSPACE" \
 		OURO_IDE_SMOKE_BIN="$IDE_SMOKE_BIN" \
@@ -443,7 +454,6 @@ printf 'ide-smoke: ok\n'
 
 RELEASE_MANAGED_LOG_TMP_PATH="$(mktemp "$OURO_PRODUCTION_ACCEPTANCE_SMOKE_LOG_DIR/.release-managed.txt.XXXXXX")" || fail "unable to create release managed log temporary file"
 if ! env \
-		PATH="$TRUSTED_PATH" \
 		GOPROXY="$GOPROXY" \
 		WORKSPACE="$RELEASE_WORKSPACE" \
 		DIST_DIR="$RELEASE_DIST" \
@@ -466,7 +476,6 @@ printf 'release-managed: ok\n'
 
 MANAGED_PAYLOADS_LOG_TMP_PATH="$(mktemp "$OURO_PRODUCTION_ACCEPTANCE_SMOKE_LOG_DIR/.managed-payloads.txt.XXXXXX")" || fail "unable to create managed payloads log temporary file"
 if ! env \
-		PATH="$TRUSTED_PATH" \
 		GOPROXY="$GOPROXY" \
 		WORKSPACE="$MANAGED_WORKSPACE" \
 	OURO_MANAGED_PAYLOADS_SMOKE_LOG_DIR="$MANAGED_LOG_DIR" \
@@ -498,7 +507,6 @@ printf 'managed-payloads: ok\n'
 
 WORKFLOW_CLOSURE_LOG_TMP_PATH="$(mktemp "$OURO_PRODUCTION_ACCEPTANCE_SMOKE_LOG_DIR/.workflow-closure.txt.XXXXXX")" || fail "unable to create workflow closure log temporary file"
 if ! env \
-		PATH="$TRUSTED_PATH" \
 		GOPROXY="$GOPROXY" \
 		WORKSPACE="$WORKFLOW_WORKSPACE" \
 		OURO_WORKFLOW_CLOSURE_SMOKE_LOG_DIR="$WORKFLOW_LOG_DIR" \

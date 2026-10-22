@@ -98,6 +98,13 @@ func DefaultAuthoredToolRegistry() AuthoredToolRegistry {
 					DependencyNames:  []string{"sqlmap"},
 				},
 				{
+					ID:               "auth_test",
+					Description:      "Test credential dictionaries against an authorized HTTP(S) login endpoint.",
+					RequiredInputs:   []AuthoredToolInputContract{{Name: "target_url", Types: []string{"url"}}},
+					SupportedParsers: []string{"auth_test_jsonl", "generic_jsonl"},
+					DependencyNames:  []string{"hydra"},
+				},
+				{
 					ID:               "subdomain_discovery",
 					Description:      "Discover subdomains for an authorized root domain.",
 					RequiredInputs:   []AuthoredToolInputContract{{Name: "root_domain", Types: []string{"domain"}}},
@@ -212,8 +219,55 @@ func DefaultAuthoredToolRegistry() AuthoredToolRegistry {
 		{ID: "trufflehog_json", Format: "json", Description: "TruffleHog JSON output."},
 		{ID: "binwalk_text", Format: "text", Description: "binwalk text output."},
 		{ID: "exiftool_json", Format: "json", Description: "ExifTool JSON output."},
+		{ID: "auth_test_jsonl", Format: "jsonl", Description: "hydra-style credential testing JSONL output."},
 	}
+	adapters = append(adapters, nativeGoAdapter(adapters[0]))
 	return newAuthoredToolRegistry(adapters, parsers)
+}
+
+// nativeGoAdapter derives the in-process adapter from the managed_binary
+// definition so the two can never drift: identical operation IDs, required
+// inputs, supported parsers and dependency names. The dependency names stay
+// recorded because the catalog contract requires a tool's declared dependency
+// to be allowed by its operation, and because the managed bundle remains
+// installable as a fallback. Only operations implemented by internal/nativetools
+// are exposed; everything else keeps managed_binary.
+func nativeGoAdapter(managed AuthoredToolAdapterDefinition) AuthoredToolAdapterDefinition {
+	implemented := map[string]bool{
+		"http_probe":          true,
+		"port_scan":           true,
+		"dns_probe":           true,
+		"metadata_extract":    true,
+		"secret_scan":         true,
+		"path_fuzz":           true,
+		"crawl":               true,
+		"parameter_discovery": true,
+		"tls_assessment":      true,
+		"subdomain_discovery": true,
+		"archive_discovery":   true,
+		"firmware_analyze":    true,
+		"service_fingerprint": true,
+		"xss_scan":            true,
+		"injection_test":      true,
+		"template_scan":       true,
+		"static_code_scan":    true,
+		"apk_decompile":       true,
+		"auth_test":           true,
+	}
+	operations := make([]AuthoredToolOperationDefinition, 0, len(implemented))
+	for _, operation := range managed.Operations {
+		if !implemented[operation.ID] {
+			continue
+		}
+		clone := operation
+		clone.Description = operation.Description + " (in-process Go implementation)"
+		operations = append(operations, clone)
+	}
+	return AuthoredToolAdapterDefinition{
+		ID:          "native_go",
+		Description: "Execute an in-process Go implementation of the tool through Ouroboros scope, isolation, and authorization gates.",
+		Operations:  operations,
+	}
 }
 
 func newAuthoredToolRegistry(adapters []AuthoredToolAdapterDefinition, parsers []AuthoredToolParserDefinition) AuthoredToolRegistry {
@@ -304,4 +358,17 @@ func (r AuthoredToolRegistry) AdapterOperation(adapterID string, operationID str
 		}
 	}
 	return AuthoredToolOperationDefinition{}, false
+}
+
+// NativeGoOperations lists the operation ids the in-process adapter exposes.
+func (r AuthoredToolRegistry) NativeGoOperations() []string {
+	adapter, ok := r.adapters["native_go"]
+	if !ok {
+		return nil
+	}
+	operations := make([]string, 0, len(adapter.Operations))
+	for _, operation := range adapter.Operations {
+		operations = append(operations, operation.ID)
+	}
+	return operations
 }

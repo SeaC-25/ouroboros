@@ -1,4 +1,4 @@
-﻿package app
+package app
 
 import (
 	"errors"
@@ -754,6 +754,13 @@ dependencies:
     health_command: [sslscan, --version]
     install_hint: install the managed sslscan bundle or an approved sslscan package
     install_command: [ouro-toolchain, install, sslscan]
+  - name: hydra
+    kind: binary
+    optional: true
+    source: hydra/hydra
+    health_command: [hydra, -h]
+    install_hint: install the managed hydra bundle or an approved hydra package
+    install_command: [ouro-toolchain, install, hydra]
 `,
 	"ctf-pack": `name: ctf-pack
 version: "0.1.0"

@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	_ "modernc.org/sqlite"
+
 	"github.com/ouroboros/ouroboros/internal/eventlog"
 )
 
@@ -623,7 +625,7 @@ func TestExecuteReportProjectionDispatchRejectsSameCountReplayMutationBeforeWrit
 	if err != nil {
 		t.Fatalf("encode tampered event payload: %v", err)
 	}
-	db, err := sql.Open("sqlite3", filepath.Join(root, "replay", "events.db"))
+	db, err := sql.Open("sqlite", filepath.Join(root, "replay", "events.db"))
 	if err != nil {
 		t.Fatalf("open sqlite for replay mutation: %v", err)
 	}

@@ -14,6 +14,9 @@ type GUIBootstrapDTO struct {
 	Reports        []ReportDTO          `json:"reports"`
 	ReportFindings []ReportFindingDTO   `json:"reportFindings"`
 	Files          []WorkspaceFileDTO   `json:"files"`
+	Blackboard     any                  `json:"blackboard"`
+	AgentState     any                  `json:"agentState"`
+	Harness        any                  `json:"harness"`
 	Settings       SettingsDTO          `json:"settings"`
 	Backend        BackendDTO           `json:"backend"`
 }
