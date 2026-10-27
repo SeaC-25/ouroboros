@@ -45,6 +45,17 @@ func WrapSnapshotThrottle(options RunOptions) RunOptions {
 	return options
 }
 
+// FlushSnapshotThrottle delivers any snapshot still pending inside the
+// coalescing window. Run owners call it after the run completes so the
+// terminal state reaches display consumers even when the run ends inside
+// the window.
+func FlushSnapshotThrottle(options RunOptions) {
+	if options.snapshotThrottle == nil {
+		return
+	}
+	_ = options.snapshotThrottle.flush()
+}
+
 // offer either emits immediately (window elapsed) or defers the newest
 // snapshot to a single window-boundary flush.
 func (t *snapshotThrottle) offer(snapshot eventlog.ReplaySnapshot) error {

@@ -2024,6 +2024,9 @@ func runInteractiveWorkspace(ctx context.Context, root string, out io.Writer, pr
 		// snapshot still flushes, so the terminal state is always exact.
 		options = app.WrapSnapshotThrottle(options)
 		result, err := runWorkspaceWithOptions(runCtx, root, options)
+		// The run is over: deliver any snapshot still sitting inside the
+		// coalescing window so the terminal state is always exact.
+		app.FlushSnapshotThrottle(options)
 		if err != nil {
 			session.Quit()
 		}
