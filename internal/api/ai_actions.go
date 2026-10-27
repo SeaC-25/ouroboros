@@ -57,6 +57,7 @@ type AIActionRunRequestDTO struct {
 		PromptContent  string   `json:"promptContent,omitempty"`
 		InputText      string   `json:"inputText,omitempty"`
 		HarnessCaseId  string   `json:"harnessCaseId,omitempty"`
+		Target         string   `json:"target,omitempty"`
 		Roles          []string `json:"roles,omitempty"`
 		Commands       []string `json:"commands,omitempty"`
 		Agents         []string `json:"agents,omitempty"`
@@ -65,13 +66,21 @@ type AIActionRunRequestDTO struct {
 	} `json:"input,omitempty"`
 	Arguments string `json:"arguments,omitempty"`
 }
+// AIActionFileDiffDTO matches the frontend HarnessFileDiffResponse shape
+// (path/operation/summary/diff) — the old scalar fileDiff had no consumer.
+type AIActionFileDiffDTO struct {
+	Path      string `json:"path,omitempty"`
+	Operation string `json:"operation,omitempty"`
+	Summary   string `json:"summary,omitempty"`
+	Diff      string `json:"diff,omitempty"`
+}
 
 // AIActionResultDTO 匹配前端 AIActionResult
 type AIActionResultDTO struct {
 	Kind            string `json:"kind"`
 	Operation       string `json:"operation,omitempty"`
 	Summary         string `json:"summary,omitempty"`
-	FileDiff        string `json:"fileDiff,omitempty"`
+	FileDiffs       []AIActionFileDiffDTO `json:"fileDiffs,omitempty"`
 	OrchestratorRun *struct {
 		ID             string `json:"id"`
 		ExecutionID    string `json:"executionId,omitempty"`
@@ -86,13 +95,14 @@ type AIActionResultDTO struct {
 		Status         string `json:"status"`
 		CreatedAt      int64  `json:"createdAt"`
 	} `json:"orchestratorRun,omitempty"`
-	BlackboardItem *BlackboardFact       `json:"blackboardItem,omitempty"`
-	AgentTask      *AgentTaskRecord      `json:"agentTask,omitempty"`
-	Prompt         *WorkspacePrompt      `json:"prompt,omitempty"`
-	HarnessCase    *WorkspaceHarnessCase `json:"harnessCase,omitempty"`
-	HarnessRun     *HarnessResult        `json:"harnessRun,omitempty"`
-	SwarmRun       *SwarmWorkflowRun     `json:"swarmRun,omitempty"`
-	Execution      *ExecutionDTO         `json:"execution,omitempty"`
+	BlackboardItem *BlackboardFact        `json:"blackboardItem,omitempty"`
+	Observation    *BlackboardObservation `json:"observation,omitempty"`
+	AgentTask      *AgentTaskRecord       `json:"agentTask,omitempty"`
+	Prompt         *WorkspacePrompt       `json:"prompt,omitempty"`
+	HarnessCase    *WorkspaceHarnessCase  `json:"harnessCase,omitempty"`
+	HarnessRun     *HarnessResult         `json:"harnessRun,omitempty"`
+	SwarmRun       *SwarmWorkflowRun      `json:"swarmRun,omitempty"`
+	Execution      *ExecutionDTO          `json:"execution,omitempty"`
 }
 
 // AIActionRunResponseDTO 匹配前端 AIActionRunResponse
@@ -188,9 +198,17 @@ func (s *Server) handleAIActions(w http.ResponseWriter, r *http.Request) {
 		{
 			ID:           "blackboard.create",
 			Kind:         "blackboard",
-			Label:        "记录黑板发现",
+			Label:        "记录结论笔记",
 			Status:       "ready",
-			Description:  "在黑板中持久化一条真实发现",
+			Description:  "把模型推理得出的结论笔记持久化到黑板（动作 ID 保留，供前端/回放兼容）",
+			Capabilities: []string{"chat", "reasoning"},
+		},
+		{
+			ID:           "observation.create",
+			Kind:         "observation",
+			Label:        "记录原始观测",
+			Status:       "ready",
+			Description:  "把一次原始观测（如 http_observe 输出）写入观测存储，不做任何判定",
 			Capabilities: []string{"chat", "reasoning"},
 		},
 		{
@@ -259,6 +277,8 @@ func (s *Server) handleAIActionRun(w http.ResponseWriter, r *http.Request) {
 	switch request.ActionID {
 	case "blackboard.create":
 		s.runBlackboardCreate(w, request.ActionID, input)
+	case "observation.create":
+		s.runObservationCreate(w, request.ActionID, input)
 	case "file.write":
 		s.runFileWrite(w, request.ActionID, input)
 	case "agent.create":
@@ -302,6 +322,8 @@ func aiActionKind(actionID string) string {
 		return "orchestrator"
 	case "blackboard.create":
 		return "blackboard"
+	case "observation.create":
+		return "observation"
 	case "file.write":
 		return "file"
 	case "agent.create":
@@ -326,7 +348,9 @@ func aiActionLabel(actionID string) string {
 	case "orchestrator.run":
 		return "AI 编排执行"
 	case "blackboard.create":
-		return "记录黑板发现"
+		return "记录结论笔记"
+	case "observation.create":
+		return "记录原始观测"
 	case "file.write":
 		return "写入工作区文件"
 	case "agent.create":
@@ -363,6 +387,7 @@ func (s *Server) runBlackboardCreate(w http.ResponseWriter, actionID string, inp
 	PromptContent  string   `json:"promptContent,omitempty"`
 	InputText      string   `json:"inputText,omitempty"`
 	HarnessCaseId  string   `json:"harnessCaseId,omitempty"`
+	Target         string   `json:"target,omitempty"`
 	Roles          []string `json:"roles,omitempty"`
 	Commands       []string `json:"commands,omitempty"`
 	Agents         []string `json:"agents,omitempty"`
@@ -371,20 +396,76 @@ func (s *Server) runBlackboardCreate(w http.ResponseWriter, actionID string, inp
 }) {
 	content := strings.TrimSpace(input.Content)
 	if content == "" {
-		respondError(w, http.StatusBadRequest, "记录黑板发现需要 content")
+		respondError(w, http.StatusBadRequest, "记录结论笔记需要 content")
 		return
 	}
+	// blackboard.create 动作 ID 保留（前端/回放兼容），语义已从"发现"降级为
+	// "模型推理得出的结论笔记"——观测证据走 observation.create。
 	fact, err := s.appendBlackboardFact("action", content)
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, fmt.Sprintf("记录黑板发现失败: %v", err))
+		respondError(w, http.StatusInternalServerError, fmt.Sprintf("记录结论笔记失败: %v", err))
 		return
 	}
 	factCopy := fact
-	s.respondAIActionSuccess(w, actionID, "ready", "已记录黑板发现", AIActionResultDTO{
+	s.respondAIActionSuccess(w, actionID, "ready", "已记录结论笔记", AIActionResultDTO{
 		Kind:           "blackboard",
 		Operation:      "blackboard_create",
-		Summary:        "已记录黑板发现",
+		Summary:        "已记录结论笔记",
 		BlackboardItem: &factCopy,
+	})
+}
+
+// runObservationCreate 落一条原始观测：kind/target/payload 由调用方给出，
+// 观测先入存储，判定由模型后续推理得出——这里不做任何解释。
+func (s *Server) runObservationCreate(w http.ResponseWriter, actionID string, input *struct {
+	Title          string   `json:"title,omitempty"`
+	Goal           string   `json:"goal,omitempty"`
+	Kind           string   `json:"kind,omitempty"`
+	Command        string   `json:"command,omitempty"`
+	ExpectedResult string   `json:"expectedResult,omitempty"`
+	Priority       string   `json:"priority,omitempty"`
+	Source         string   `json:"source,omitempty"`
+	FilePath       string   `json:"filePath,omitempty"`
+	Content        string   `json:"content,omitempty"`
+	Role           string   `json:"role,omitempty"`
+	PromptName     string   `json:"promptName,omitempty"`
+	PromptContent  string   `json:"promptContent,omitempty"`
+	InputText      string   `json:"inputText,omitempty"`
+	HarnessCaseId  string   `json:"harnessCaseId,omitempty"`
+	Target         string   `json:"target,omitempty"`
+	Roles          []string `json:"roles,omitempty"`
+	Commands       []string `json:"commands,omitempty"`
+	Agents         []string `json:"agents,omitempty"`
+	ExecutionID    string   `json:"executionId,omitempty"`
+	Reason         string   `json:"reason,omitempty"`
+}) {
+	kind := strings.TrimSpace(input.Kind)
+	target := strings.TrimSpace(input.Target)
+	payload := strings.TrimSpace(input.Content)
+	if kind == "" {
+		respondError(w, http.StatusBadRequest, "记录原始观测需要 kind")
+		return
+	}
+	if target == "" {
+		respondError(w, http.StatusBadRequest, "记录原始观测需要 target")
+		return
+	}
+	if payload == "" {
+		payload = strings.TrimSpace(input.PromptContent)
+	}
+	if payload == "" {
+		payload = strings.TrimSpace(input.InputText)
+	}
+	observation, err := s.appendBlackboardObservation(kind, target, payload, strings.TrimSpace(input.Source))
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, fmt.Sprintf("记录原始观测失败: %v", err))
+		return
+	}
+	s.respondAIActionSuccess(w, actionID, "ready", "已记录原始观测", AIActionResultDTO{
+		Kind:        "observation",
+		Operation:   "observation_create",
+		Summary:     "已记录原始观测",
+		Observation: &observation,
 	})
 }
 
@@ -403,6 +484,7 @@ func (s *Server) runFileWrite(w http.ResponseWriter, actionID string, input *str
 	PromptContent  string   `json:"promptContent,omitempty"`
 	InputText      string   `json:"inputText,omitempty"`
 	HarnessCaseId  string   `json:"harnessCaseId,omitempty"`
+	Target         string   `json:"target,omitempty"`
 	Roles          []string `json:"roles,omitempty"`
 	Commands       []string `json:"commands,omitempty"`
 	Agents         []string `json:"agents,omitempty"`
@@ -449,6 +531,7 @@ func (s *Server) runAgentCreate(w http.ResponseWriter, actionID string, input *s
 	PromptContent  string   `json:"promptContent,omitempty"`
 	InputText      string   `json:"inputText,omitempty"`
 	HarnessCaseId  string   `json:"harnessCaseId,omitempty"`
+	Target         string   `json:"target,omitempty"`
 	Roles          []string `json:"roles,omitempty"`
 	Commands       []string `json:"commands,omitempty"`
 	Agents         []string `json:"agents,omitempty"`
@@ -493,6 +576,7 @@ func (s *Server) runPromptSave(w http.ResponseWriter, actionID string, input *st
 	PromptContent  string   `json:"promptContent,omitempty"`
 	InputText      string   `json:"inputText,omitempty"`
 	HarnessCaseId  string   `json:"harnessCaseId,omitempty"`
+	Target         string   `json:"target,omitempty"`
 	Roles          []string `json:"roles,omitempty"`
 	Commands       []string `json:"commands,omitempty"`
 	Agents         []string `json:"agents,omitempty"`
@@ -540,6 +624,7 @@ func (s *Server) runHarnessCreate(w http.ResponseWriter, actionID string, input 
 	PromptContent  string   `json:"promptContent,omitempty"`
 	InputText      string   `json:"inputText,omitempty"`
 	HarnessCaseId  string   `json:"harnessCaseId,omitempty"`
+	Target         string   `json:"target,omitempty"`
 	Roles          []string `json:"roles,omitempty"`
 	Commands       []string `json:"commands,omitempty"`
 	Agents         []string `json:"agents,omitempty"`
@@ -593,6 +678,7 @@ func (s *Server) runHarnessRun(w http.ResponseWriter, actionID string, input *st
 	PromptContent  string   `json:"promptContent,omitempty"`
 	InputText      string   `json:"inputText,omitempty"`
 	HarnessCaseId  string   `json:"harnessCaseId,omitempty"`
+	Target         string   `json:"target,omitempty"`
 	Roles          []string `json:"roles,omitempty"`
 	Commands       []string `json:"commands,omitempty"`
 	Agents         []string `json:"agents,omitempty"`
@@ -639,6 +725,7 @@ func (s *Server) runReportGenerate(w http.ResponseWriter, actionID string, input
 	PromptContent  string   `json:"promptContent,omitempty"`
 	InputText      string   `json:"inputText,omitempty"`
 	HarnessCaseId  string   `json:"harnessCaseId,omitempty"`
+	Target         string   `json:"target,omitempty"`
 	Roles          []string `json:"roles,omitempty"`
 	Commands       []string `json:"commands,omitempty"`
 	Agents         []string `json:"agents,omitempty"`
@@ -747,6 +834,7 @@ func (s *Server) runFailureRecover(w http.ResponseWriter, actionID string, input
 	PromptContent  string   `json:"promptContent,omitempty"`
 	InputText      string   `json:"inputText,omitempty"`
 	HarnessCaseId  string   `json:"harnessCaseId,omitempty"`
+	Target         string   `json:"target,omitempty"`
 	Roles          []string `json:"roles,omitempty"`
 	Commands       []string `json:"commands,omitempty"`
 	Agents         []string `json:"agents,omitempty"`
@@ -818,6 +906,7 @@ func (s *Server) runSwarmWorkflow(w http.ResponseWriter, actionID string, input 
 	PromptContent  string   `json:"promptContent,omitempty"`
 	InputText      string   `json:"inputText,omitempty"`
 	HarnessCaseId  string   `json:"harnessCaseId,omitempty"`
+	Target         string   `json:"target,omitempty"`
 	Roles          []string `json:"roles,omitempty"`
 	Commands       []string `json:"commands,omitempty"`
 	Agents         []string `json:"agents,omitempty"`
@@ -1034,6 +1123,7 @@ func (s *Server) runOrchestratorAI(w http.ResponseWriter, r *http.Request, actio
 	PromptContent  string   `json:"promptContent,omitempty"`
 	InputText      string   `json:"inputText,omitempty"`
 	HarnessCaseId  string   `json:"harnessCaseId,omitempty"`
+	Target         string   `json:"target,omitempty"`
 	Roles          []string `json:"roles,omitempty"`
 	Commands       []string `json:"commands,omitempty"`
 	Agents         []string `json:"agents,omitempty"`

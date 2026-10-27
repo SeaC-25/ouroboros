@@ -31,6 +31,7 @@
   AIConversationSessionSummary,
   AIMessage,
   AIMessageRole,
+  AIChatActionOutcome,
   AIProviderToolCall,
   AIProviderAttempt,
   AIRoutingMetadata,
@@ -43,6 +44,9 @@
   BlackboardItemCreateRequest,
   BlackboardItemUpdateRequest,
   BlackboardQuery,
+  BlackboardObservation,
+  BlackboardObservationQuery,
+  BlackboardObservationState,
   BlackboardState,
   DesktopStatus,
   DesktopRuntimeInfo,
@@ -800,6 +804,22 @@ interface HarnessCountsResponse {
 interface BlackboardResponse {
   path?: string;
   items?: BlackboardItemResponse[];
+  observations?: BlackboardObservationResponse[];
+}
+
+interface BlackboardObservationResponse {
+  id?: string;
+  kind?: string;
+  target?: string;
+  payload?: string;
+  source?: string;
+  createdAt?: number;
+}
+
+interface BlackboardObservationsResponse {
+  path?: string;
+  observations?: BlackboardObservationResponse[];
+  count?: number;
 }
 
 interface BlackboardItemResponse {
@@ -1231,6 +1251,7 @@ interface AIMessageResponse {
   providerToolCalls?: AIProviderToolCallResponse[];
   contextReferences?: AIContextReferenceResponse[];
   context_references?: AIContextReferenceResponse[];
+  actions?: AIChatActionOutcomeResponse[];
   usage?: AIUsageResponse;
   routing?: AIRoutingMetadataResponse;
   routingStrategy?: string;
@@ -1247,6 +1268,18 @@ interface AIMessageResponse {
   providerAttempts?: AIProviderAttemptResponse[];
   provider_attempts?: AIProviderAttemptResponse[];
   attempts?: AIProviderAttemptResponse[];
+}
+
+interface AIChatActionOutcomeResponse {
+  kind?: string;
+  summary?: string;
+  path?: string;
+  output?: string;
+  diff?: string;
+  status?: string;
+  exitCode?: number;
+  executionId?: string;
+  execution_id?: string;
 }
 
 interface AIContextReferenceResponse {
@@ -2525,18 +2558,49 @@ export async function connectIDEEventStream(onEvent: (event: IDEEvent) => void):
   }
   const url = new URL('/api/events/stream', baseURL);
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
-  const socket = new WebSocket(url.toString());
-  socket.addEventListener('message', event => {
-    try {
-      onEvent(JSON.parse(event.data) as IDEEvent);
-    } catch {
-      onEvent({ type: 'stream:invalid-message' });
+
+  // Auto-reconnect with exponential backoff: the backend restarts during
+  // normal operation (restartBackend, desktop updates). Without reconnect
+  // every live push (frontier queue, execution status) silently dies until
+  // the whole GUI is reopened — only the 30s poll kept working.
+  let disposed = false;
+  let attempt = 0;
+  let socket: WebSocket | null = null;
+  let reconnectTimer: number | undefined;
+
+  const connect = () => {
+    if (disposed) {
+      return;
     }
-  });
-  socket.addEventListener('error', () => onEvent({ type: 'stream:error' }));
-  socket.addEventListener('close', () => onEvent({ type: 'stream:closed' }));
+    socket = new WebSocket(url.toString());
+    socket.addEventListener('message', event => {
+      attempt = 0; // healthy traffic resets the backoff
+      try {
+        onEvent(JSON.parse(event.data) as IDEEvent);
+      } catch {
+        onEvent({ type: 'stream:invalid-message' });
+      }
+    });
+    socket.addEventListener('error', () => onEvent({ type: 'stream:error' }));
+    socket.addEventListener('close', () => {
+      socket = null;
+      if (disposed) {
+        return;
+      }
+      onEvent({ type: 'stream:closed' });
+      const delay = Math.min(1000 * 2 ** attempt, 30_000);
+      attempt += 1;
+      reconnectTimer = window.setTimeout(connect, delay);
+    });
+  };
+  connect();
+
   return () => {
-    socket.close();
+    disposed = true;
+    if (reconnectTimer !== undefined) {
+      window.clearTimeout(reconnectTimer);
+    }
+    socket?.close();
   };
 }
 
@@ -2974,6 +3038,31 @@ export async function fetchBlackboard(query: BlackboardQuery = {}): Promise<Blac
 
 export async function queryBlackboardItems(query: BlackboardQuery = {}): Promise<BlackboardState> {
   return fetchBlackboard(query);
+}
+
+// 假定后端端点：GET /api/ai/blackboard/observations（与 /api/blackboard/observations 同一实现）。
+// 支持 kind/target/source/q 过滤与 limit；返回判定前的原始观测，不做任何解释。
+export async function fetchBlackboardObservations(query: BlackboardObservationQuery = {}): Promise<BlackboardObservationState> {
+  const baseURL = await apiBaseURL();
+  if (!baseURL) {
+    throw new Error(zhCN.shell.statusOffline);
+  }
+  const response = await fetch(`${baseURL}${blackboardPath}/observations${blackboardObservationQueryString(query)}`, {
+    headers: { Accept: 'application/json' },
+  });
+  if (!response.ok) {
+    throw new Error(await responseErrorMessage(response, zhCN.blackboard.observationLoadFailed));
+  }
+  const payload = await response.json() as BlackboardObservationsResponse;
+  const observations = (payload.observations ?? []).flatMap(observation => {
+    const mapped = mapBlackboardObservation(observation);
+    return mapped ? [mapped] : [];
+  });
+  return {
+    path: payload.path || '',
+    observations,
+    count: isFiniteNumber(payload.count) ? payload.count : observations.length,
+  };
 }
 
 export async function updateBlackboardItem(id: string, request: BlackboardItemUpdateRequest): Promise<BlackboardItem> {
@@ -4727,7 +4816,7 @@ function mapAgentProviderBatchRun(response: AgentProviderBatchRunResponse | unde
 
 function mapBlackboard(response: BlackboardResponse | undefined): BlackboardState {
   if (!response?.path || !Array.isArray(response.items)) {
-    return { path: '', items: [] };
+    return { path: '', items: [], observations: [] };
   }
   return {
     path: response.path,
@@ -4735,7 +4824,50 @@ function mapBlackboard(response: BlackboardResponse | undefined): BlackboardStat
       const mapped = mapBlackboardItem(item);
       return mapped ? [mapped] : [];
     }),
+    observations: (response.observations ?? []).flatMap(observation => {
+      const mapped = mapBlackboardObservation(observation);
+      return mapped ? [mapped] : [];
+    }),
   };
+}
+
+function mapBlackboardObservation(observation: BlackboardObservationResponse | undefined): BlackboardObservation | null {
+  if (!observation?.id || !observation.kind || typeof observation.target !== 'string' || !isFiniteNumber(observation.createdAt)) {
+    return null;
+  }
+  return {
+    id: observation.id,
+    kind: observation.kind,
+    target: observation.target,
+    payload: observation.payload,
+    source: observation.source,
+    createdAt: observation.createdAt,
+  };
+}
+
+function blackboardObservationQueryString(query: BlackboardObservationQuery): string {
+  const params = new URLSearchParams();
+  const entries: Array<[keyof BlackboardObservationQuery, string | number | undefined]> = [
+    ['kind', query.kind],
+    ['target', query.target],
+    ['source', query.source],
+    ['q', query.q],
+    ['limit', query.limit],
+  ];
+  entries.forEach(([key, value]) => {
+    if (key === 'limit') {
+      if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+        params.set(key, String(value));
+      }
+      return;
+    }
+    const normalized = value?.toString().trim();
+    if (normalized) {
+      params.set(key, normalized);
+    }
+  });
+  const queryString = params.toString();
+  return queryString ? `?${queryString}` : '';
 }
 
 function mapBlackboardBatchUpdateResult(response: BlackboardBatchUpdateResponse | undefined): BlackboardBatchUpdateResult {
@@ -7126,9 +7258,28 @@ function mapRequiredAIMessage(message: AIMessageResponse | undefined, context: s
     nativeToolResultForwarded,
     providerToolCalls,
     contextReferences: mapOptionalAIContextReferences(message.contextReferences ?? message.context_references, zhCN.ai.contextMissing),
+    actions: mapAIChatActionOutcomes(message.actions),
     usage: mapAIUsage(message.usage, zhCN.ai.usageMissing),
     routing: mapAIRoutingMetadata(message),
   };
+}
+
+function mapAIChatActionOutcomes(actions: AIChatActionOutcomeResponse[] | undefined): AIChatActionOutcome[] {
+  return (actions ?? []).flatMap(action => {
+    if (!action?.kind || typeof action.summary !== 'string') {
+      return [];
+    }
+    return [{
+      kind: action.kind,
+      summary: action.summary,
+      path: action.path,
+      output: action.output,
+      diff: action.diff,
+      status: action.status,
+      exitCode: isFiniteNumber(action.exitCode) ? action.exitCode : undefined,
+      executionId: action.executionId ?? action.execution_id,
+    }];
+  });
 }
 
 function normalizeAIInstantValue(value: string | number | undefined): string | undefined {
@@ -7686,7 +7837,7 @@ function mapBootstrapUnavailableData(apiStatus: ApiStatus, latency: string): IDE
     evidenceItems: [],
     reportFindings: [],
     reports: [],
-    blackboard: { path: '', items: [] },
+    blackboard: { path: '', items: [], observations: [] },
     agentState: { path: '', eventPath: '', profilePath: '', profiles: [], tasks: [], events: [], counts: {} },
     frontierQueue: mapFrontierQueueResponse({}),
     harness: emptyHarnessState(),

@@ -52,13 +52,6 @@ func (c *DynamicController) AdjustStrategy(coverage float64) {
 	c.setSwitched(previous != c.currentStrategy())
 }
 
-func (c *DynamicController) ShouldSwitch() bool {
-	if c == nil {
-		return false
-	}
-	return dynamicControllerStates[c].switched
-}
-
 func (c *DynamicController) Strategy() Strategy {
 	if c == nil {
 		return StrategyBreadth

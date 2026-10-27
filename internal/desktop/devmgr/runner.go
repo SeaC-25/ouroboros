@@ -90,10 +90,10 @@ func (r *ExecRunner) Command(ctx context.Context, name string, args ...string) C
 
 // execCommand adapts *exec.Cmd to Command.
 type execCommand struct {
-	cmd   *exec.Cmd
-	mu    sync.Mutex
-	done  chan struct{}
-	code  int
+	cmd    *exec.Cmd
+	mu     sync.Mutex
+	done   chan struct{}
+	code   int
 	killed bool
 }
 

@@ -3,13 +3,10 @@ package nativetools
 import (
 	"bytes"
 	"context"
-	"crypto/md5"
-	"encoding/hex"
 	"fmt"
 	"net/http"
 	"net/url"
 	"sort"
-	"strings"
 )
 
 // OpTemplateScan is the nuclei-equivalent (HTTP template engine subset).
@@ -32,6 +29,15 @@ type templateRequest struct {
 	MatchersAny []templateMatcher
 	Extractors  []templateExtractor
 	Condition   string
+	// Interact marks a request whose matchers depend on an out-of-band
+	// callback ({{interacturl}} in the payload, confirmed by polling the
+	// interaction endpoint — see template_engine.go).
+	Interact bool
+	// StopAtFirstMatch ends the request chain once one path matches.
+	StopAtFirstMatch bool
+	// Redirects follows 3xx responses for this request (engine default is
+	// to preserve them for redirect-based matchers).
+	Redirects bool
 }
 
 type templateMatcher struct {
@@ -292,13 +298,58 @@ var builtInTemplates = []builtInTemplate{
 			},
 		}},
 	},
-}
-
-// templateReported is a matched finding plus its request URL.
-type templateReported struct {
-	Template builtInTemplate
-	URL      string
-	Extracts []string
+	{
+		ID:       "ssrf-url-parameter",
+		Name:     "SSRF via URL parameter (out-of-band)",
+		Severity: "high",
+		CWE:      "CWE-918",
+		Requests: []templateRequest{{
+			Method:   http.MethodGet,
+			Path:     []string{"/?url={{interacturl}}&dest={{interacturl}}&redirect={{interacturl}}&image={{interacturl}}&fetch={{interacturl}}"},
+			Interact: true,
+			MatchersAll: []templateMatcher{
+				{Type: "status", Status: []int{200, 201, 204, 301, 302, 303, 307, 308}},
+			},
+		}},
+	},
+	{
+		ID:       "xxe-xml-parameter",
+		Name:     "XXE via XML entity (out-of-band)",
+		Severity: "high",
+		CWE:      "CWE-611",
+		Requests: []templateRequest{{
+			Method:      http.MethodPost,
+			Path:        []string{"/", "/api/xml", "/xmlrpc.php"},
+			ContentType: "application/xml",
+			Body: `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE foo [<!ENTITY xxe SYSTEM "{{interacturl}}">]>
+<root><data>&xxe;</data></root>`,
+			Interact: true,
+			MatchersAll: []templateMatcher{
+				{Type: "status", Status: []int{200, 201, 204, 400, 500}},
+			},
+		}},
+	},
+	{
+		ID:       "file-upload-form",
+		Name:     "File upload endpoint accepts scripts",
+		Severity: "high",
+		CWE:      "CWE-434",
+		Requests: []templateRequest{{
+			Method:      http.MethodPost,
+			Path:        []string{"/upload", "/file/upload", "/api/upload"},
+			ContentType: "multipart/form-data; boundary=OUROBOUNDARY",
+			Body: "--OUROBOUNDARY\r\n" +
+				"Content-Disposition: form-data; name=\"file\"; filename=\"ouro-probe.aspx\"\r\n" +
+				"Content-Type: application/octet-stream\r\n\r\n" +
+				"<%@ Page Language=\"C#\" %>OUROUPLOADPROBE\r\n" +
+				"--OUROBOUNDARY--\r\n",
+			MatchersAll: []templateMatcher{
+				{Type: "status", Status: []int{200, 201}},
+				{Type: "word", Words: []string{"upload", "file", "saved", "success"}, Condition: "or", Part: "all"},
+			},
+		}},
+	},
 }
 
 // ScanTemplates runs the embedded rule set plus any external templates
@@ -315,7 +366,12 @@ func ScanTemplates(ctx context.Context, target string, opts Options) (string, er
 		return "", fmt.Errorf("parse template target: %w", err)
 	}
 
-	engine := &templateEngine{client: opts.httpClientPreserveRedirects(), target: parsed, timeout: opts.timeout()}
+	engine := &templateEngine{
+		client:       opts.httpClientPreserveRedirects(),
+		followClient: opts.httpClient(),
+		target:       parsed,
+		timeout:      opts.timeout(),
+	}
 	scanCtx, cancel := context.WithTimeout(ctx, opts.timeout())
 	defer cancel()
 
@@ -375,15 +431,4 @@ func headerString(resp *http.Response) string {
 		}
 	}
 	return builder.String()
-}
-
-// templateFingerprint exposes the embedded template set for drift tests.
-func templateFingerprint() string {
-	ids := make([]string, 0, len(builtInTemplates))
-	for _, tmpl := range builtInTemplates {
-		ids = append(ids, tmpl.ID)
-	}
-	sort.Strings(ids)
-	sum := md5.Sum([]byte(strings.Join(ids, ",")))
-	return hex.EncodeToString(sum[:])
 }

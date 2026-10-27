@@ -13,7 +13,17 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist/renderer',
-    emptyOutDir: true
+    emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          // Split the react runtime from the 1.2 MB workbench chunk so the
+          // shell + vendor load in parallel and vendor stays cache-stable
+          // across app-code edits.
+          'vendor-react': ['react', 'react-dom'],
+        },
+      },
+    },
   },
   server: {
     host: '127.0.0.1',

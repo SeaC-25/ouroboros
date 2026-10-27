@@ -139,13 +139,6 @@ func (b *BudgetGate) TokensLeft() int64 {
 	return b.cfg.MaxTokens - b.tokensSpent
 }
 
-// Elapsed reports wall-clock time since the gate was constructed.
-func (b *BudgetGate) Elapsed() time.Duration {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return time.Since(b.start)
-}
-
 // WallClockLeft reports remaining wall-clock allowance (0 once HardStop).
 func (b *BudgetGate) WallClockLeft() time.Duration {
 	b.mu.Lock()

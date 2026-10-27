@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
-	"net/url"
 	"strconv"
 	"strings"
 
@@ -152,16 +151,4 @@ func urlListSurfaceFactID(request ToolExecutionRequest, surface urlListSurface, 
 
 func urlListSurfaceStatement(surface urlListSurface) string {
 	return "archive | " + surface.URL + " | domain=" + surface.Domain
-}
-
-func archiveDiscoveryDomainFromURL(value string) string {
-	parsed, err := url.Parse(strings.TrimSpace(value))
-	if err != nil || parsed.Host == "" {
-		return ""
-	}
-	domain, ok := normalizeSubfinderDNSName(parsed.Hostname())
-	if !ok {
-		return ""
-	}
-	return domain
 }

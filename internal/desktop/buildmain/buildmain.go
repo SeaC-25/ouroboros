@@ -30,6 +30,12 @@ var requiredOutputs = []string{
 	"assets/ouroboros-icon.png",
 }
 
+// RequiredOutputs exposes the post-build manifest so callers (tests, other
+// packages) track the build contract without duplicating the list.
+func RequiredOutputs() []string {
+	return append([]string(nil), requiredOutputs...)
+}
+
 // Options controls Build. Output overrides the destination directly; when
 // empty, env (OURO_DESKTOP_MAIN_OUTPUT) and then <guiRoot>/dist/main apply,
 // in that order — the same precedence as the mjs script.

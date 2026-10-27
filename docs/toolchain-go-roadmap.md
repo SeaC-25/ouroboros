@@ -16,6 +16,8 @@
 
 | 检测能力升级 | nuclei→**通用模板引擎**(template_engine.go:完整 matchers status/word/regex/binary/size/DSL-lite/negative、extractors regex/kval/json/xpath、多请求变量流转、YAML 模板解析、`OURO_TEMPLATES_DIR` 外部模板目录、重定向保留;内置模板 13 个);sqlmap→**五技术全检测**(error/boolean/time-based/UNION 列数/stacked、GET/POST/Cookie 三 place、参数自动发现、19 签名 DBMS 指纹);dalfox→参数自动发现+DOM sink 启发 | ✅ |
 | 认证测试(新增 operation) | **hydra 等价 `auth_test`**(`authtest.go`:HTTP Basic/Form 双模式、表单字段发现、哨兵基线差分、锁定检测防账号锁死、`OURO_AUTH_USERWORDS`/`OURO_AUTH_PASSWORDS`/`OURO_AUTH_LOCKOUT_THRESHOLD` 字典与阈值 env、每用户串行+跨用户并发、密码打码 fact) | ✅ |
+| 原语深化(2026-10 第二轮,给模型供原材料) | gitleaks 规则 8→**31**(Slack/Stripe/Twilio/OpenAI/私钥/JWT/连接串/熵检);semgrep 规则 12→**28**(命令注入/XXE/SSRF/反序列化/路径拼接/DEBUG 残留);nmap 指纹 24→**91** 条+UDP 顶端口 6 协议(DNS/NTP/SNMP/SSDP/mDNS/memcached)+banner 深度解析(HTTP/SSH/证书 CN);testssl.sh **Heartbleed 真实 TLS record 探测**(手工 ClientHello+RFC6520 扩展)+协议降级实测+弱套件逐个强制;sslscan 全套件枚举(24 个,含 TLS1.3 组探测);katana 补 meta-refresh/HTML 注释/JS 路由拍取;gau/waybackurls 多域名;ffuf 字典 13→**360**+递归一层+403 bypass(X-Original-URL/X-Rewrite-URL);arjun 参数 GET/POST/JSON 三面 | ✅ |
+| 观测原语(模型推理路径) | **`http_observe` 新 operation**(`http_observe.go`):调用方指定任意请求形状(method/path/query/headers/body/content-type/baseline),回传全量原始观测(status/headers/时延/body 摘要/表单/链接/JSON 键/基线差分),**零判定**——结论由模型推理产生,防模板固化思维。参数通道闭环:`RunOptions.ToolParameters` → `ToolExecutionRequest.Parameters` → `nativetools.Options.SpecJSON` → dispatch 解析;env 入口 `OURO_HTTP_OBSERVE_SPEC`(JSON) | ✅ |
 
 **26/26 工具全部具备原生 handler(25 个外部工具 + hydra 等价)**。语义边界:内置 13 个高信号
 http 模板,外部模板目录(`OURO_TEMPLATES_DIR`)可挂任意 nuclei 格式模板集无限扩展;amass 复用
@@ -31,9 +33,27 @@ Basic/Form)。深度利用(利用链、数据提取、解包、源码恢复)仍�
 开关:`OURO_NATIVE_TOOLS=<tool,tool|all>`,默认空 = 全部走 `managed_binary`(行为可复现)。
 共享 operation 按 `Options.ParserID` 分流输出格式(如 `tls_assessment` 视 parser 出 XML 或 JSON,
 `dns_probe`/`secret_scan`/`subdomain_discovery`/`static_code_scan`/`apk_decompile` 同理)。
+交互盲打(`OURO_INTERACT_URL`,interactsh 风格契约:回调打到 `<base>/<marker>`,`<base>?poll=<marker>` 查询;
+模板请求标 `interact: true` 注入 `{{interacturl}}`,发出后 30s 预算内轮询确认,未确认不报告;
+SSRF/XXE 内置模板默认静默跳过,配置 env 后生效)。
+**观测原语(模型推理路径,2026-10 新方向)**:`http_observe` operation(`internal/nativetools/http_observe.go`)
+执行调用方指定的任意 HTTP 请求形状,回传全量原始观测(status/headers/时延/body 摘要/表单/链接/
+JSON 键/基线差分),**不做任何判定**——检测结论由模型基于观测推理产生,避免模板固化思维。
+参数通道已闭环:`RunOptions.ToolParameters`(Go API)或 `OURO_HTTP_OBSERVE_SPEC`(env,JSON)
+→ `ToolExecutionRequest.Parameters` → `nativetools.Options.SpecJSON` → handler;observe 仅接受
+url scope target(host/domain 不发错误请求)。
+模型可见性:TUI AI 对话的 workspace context 注入 `native_operations.list`(registry 动态,22 个)
+与 `http_observe` 用法行,模型能直接看到可推理的 operation 面;观测事实(kind=observation)
+经投影层落为 Artifact 证据,链路兼容。
+运行参数环境变量(`internal/nativetools/env.go`,调用时求值):`OURO_CT_ENDPOINT`(crt.sh 源)、`OURO_CDX_ENDPOINT`(CDX 源)、`OURO_ARCHIVE_LIMIT`、`OURO_CRAWL_LIMIT`——外部可观测参数一律可覆盖,不硬编码。
 
-运行参数环境变量(`internal/nativetools/env.go`,调用时求值):`OURO_CT_ENDPOINT`(crt.sh 源)、
-`OURO_CDX_ENDPOINT`(CDX 源)、`OURO_ARCHIVE_LIMIT`、`OURO_CRAWL_LIMIT`——外部可观测参数一律可覆盖,不硬编码。
+**黑板→观测-推理循环架构迁移(2026-10 完成)**:黑板包降级为事实/观测存储基础设施,推理模式
+全面切换为观测驱动。核心链路:工具回传原始观测(Observation:kind/target/payload)→ 模型分析
+证据形成假设 → 下一观测验证 → 结论落 Fact(带 SourceObservations 证据回链)。落点:
+`sisyphus.StepFromObservations`(未处理观测恒优先于假设验证,判定权在模型侧)、AI 对话
+`ACTION:OBSERVE`(观测即落 observations.jsonl,最近 5 条注入模型上下文)、API
+`GET /api/blackboard/observations`(kind/target/source/q/limit 过滤)、replay 透传
+SourceObservations(回放不丢回链)、前端观测-推理工作台(观测时间线/推理流/结论区)。
 
 ## 1. 已核实的接缝事实
 

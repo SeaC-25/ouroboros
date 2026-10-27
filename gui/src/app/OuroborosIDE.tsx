@@ -49,9 +49,10 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import ouroborosEmptyMark from '../assets/ouroboros-empty-mark.webp';
 import ouroborosMark from '../assets/ouroboros-mark.webp';
-import { batchUpdateBlackboardItems, buildToolchainManifestYaml, closeDesktopWindow, connectIDEEventStream, createAgentProfile, createAgentTask, createAgentTaskEvent, createBlackboardItem, createDesktopWorkspace, createHarnessCase, deleteAgentProfile, deleteProviderConfig, deleteWorkspaceFile, exportAIConversationSession, exportEvidenceGraph, exportReport, fetchAIActions, fetchAIConversation, fetchAIConversationSessions, fetchHarnessState, fetchPromptRegistry, linkBlackboardItemDependencies, loadDesktopStatus, loadEventlogEvents, loadExecutionArtifacts, loadExecutionLogs, loadFrontierDependencies, loadFrontierMonitor, loadFrontierQueue, loadIDEData, loadReportFile, loadRuntimeWorkerState, loadToolchainActions, loadToolchainPacks, loadWorkspaceFile, minimizeDesktopWindow, onDesktopBackendStatus, onDesktopMenuAction, openRecentDesktopWorkspace, queryBlackboardItems, renameWorkspaceFile, restartDesktopBackend, restoreAIConversationSession, retryExecution, runAgentTasksWithProviderBatch, runAgentTaskWithProvider, runAIAction, runHarnessCase, runToolchainAction, saveMission, savePromptRegistry, saveProviderConfig, saveReportFile, saveToolchainPack, saveWorkspaceFile, saveWorkspaceSettings, searchAIConversationSessions, searchWorkspace, selectDesktopWorkspace, sendAIChatMessage, showDesktopWorkspaceFile, startExecution, startMission, startNewAIConversationSession, stopExecution, streamAIChatMessage, testProviderConfig, toggleMaximizeDesktopWindow, updateAgentProfile, updateAgentTask, updateBlackboardItem } from './api';
+import { batchUpdateBlackboardItems, buildToolchainManifestYaml, closeDesktopWindow, connectIDEEventStream, createAgentProfile, createAgentTask, createAgentTaskEvent, createBlackboardItem, createDesktopWorkspace, createHarnessCase, deleteAgentProfile, deleteProviderConfig, deleteWorkspaceFile, exportAIConversationSession, exportEvidenceGraph, exportReport, fetchAIActions, fetchAIConversation, fetchAIConversationSessions, fetchBlackboardObservations, fetchHarnessState, fetchPromptRegistry, linkBlackboardItemDependencies, loadDesktopStatus, loadEventlogEvents, loadExecutionArtifacts, loadExecutionLogs, loadFrontierDependencies, loadFrontierMonitor, loadFrontierQueue, loadIDEData, loadReportFile, loadRuntimeWorkerState, loadToolchainActions, loadToolchainPacks, loadWorkspaceFile, minimizeDesktopWindow, onDesktopBackendStatus, onDesktopMenuAction, openRecentDesktopWorkspace, queryBlackboardItems, renameWorkspaceFile, restartDesktopBackend, restoreAIConversationSession, retryExecution, runAgentTasksWithProviderBatch, runAgentTaskWithProvider, runAIAction, runHarnessCase, runToolchainAction, saveMission, savePromptRegistry, saveProviderConfig, saveReportFile, saveToolchainPack, saveWorkspaceFile, saveWorkspaceSettings, searchAIConversationSessions, searchWorkspace, selectDesktopWorkspace, sendAIChatMessage, showDesktopWorkspaceFile, startExecution, startMission, startNewAIConversationSession, stopExecution, streamAIChatMessage, testProviderConfig, toggleMaximizeDesktopWindow, updateAgentProfile, updateAgentTask, updateBlackboardItem } from './api';
 import { buildDesktopDiagnosticItems } from './desktop-diagnostics';
-import type { AgentProfile, AgentProfileCreateRequest, AgentProfileUpdateRequest, AgentProviderBatchRun, AgentProviderBatchRunRequest, AgentProviderRun, AgentProviderRunRequest, AgentState, AgentTask, AgentTaskCreateRequest, AgentTaskEvent, AgentTaskEventCreateRequest, AgentTaskUpdateRequest, AIAction, AIActionFileChange, AIActionRunInput, AIActionRunResponse, AIActionTraceItem, AIChatResponse, AIChatStreamEvent, AIContextReference, AIConversation, AIConversationExportResult, AIConversationRuntime, AIConversationSearchResult, AIConversationSessionSummary, AIMessage, AIProviderAttempt, AIRoutingMetadata, AIUsage, BlackboardBatchUpdateRequest, BlackboardBatchUpdateResult, BlackboardDependencyLinkRequest, BlackboardItem, BlackboardItemCreateRequest, BlackboardItemUpdateRequest, BlackboardQuery, BlackboardState, DesktopStatus, EventlogEvents, EventlogQuery, EventlogRun, EvidenceItem, ExecutionArtifact, ExecutionLog, ExecutionStep, FrontierDependencyCluster, FrontierDependencySelection, FrontierMonitor, FrontierPriorityItem, FrontierQueue, FrontierQueueQuery, GraphEdge, GraphNode, HarnessCase, HarnessCaseCreateRequest, HarnessEventlogReference, HarnessFileDiff, HarnessResult, IDEData, IDEEvent, IDEMode, MissionState, OrchestratorAdvance, OrchestratorObservation, OrchestratorRun, OrchestratorState, PlannerPlan, PlannerState, PromptHarnessBatchComparisonItem, PromptRegistry, PromptVariable, ProviderConfig, ProviderSettings, ProviderTestResult, ProviderUsageRecord, ProviderUsageState, ReplayEvent, ReportDocument, ReportExportResult, ReportFinding, RuntimeWorker, RuntimeWorkerOrchestration, RuntimeWorkerState, Severity, ToolAction, ToolActionRunRequest, ToolchainPackSettings, WorkspaceFileContent, WorkspaceItem, WorkspaceSearchResult, WorkspaceSettings } from './types';
+import { readStoredTheme, setTheme, type ThemeMode } from './theme';
+import type { AgentProfile, AgentProfileCreateRequest, AgentProfileUpdateRequest, AgentProviderBatchRun, AgentProviderBatchRunRequest, AgentProviderRun, AgentProviderRunRequest, AgentState, AgentTask, AgentTaskCreateRequest, AgentTaskEvent, AgentTaskEventCreateRequest, AgentTaskUpdateRequest, AIAction, AIActionFileChange, AIActionRunInput, AIActionRunResponse, AIActionTraceItem, AIChatResponse, AIChatStreamEvent, AIContextReference, AIConversation, AIConversationExportResult, AIConversationRuntime, AIConversationSearchResult, AIConversationSessionSummary, AIChatActionOutcome, AIMessage, AIProviderAttempt, AIRoutingMetadata, AIUsage, BlackboardBatchUpdateRequest, BlackboardBatchUpdateResult, BlackboardDependencyLinkRequest, BlackboardItem, BlackboardItemCreateRequest, BlackboardItemUpdateRequest, BlackboardObservation, BlackboardObservationQuery, BlackboardObservationState, BlackboardQuery, BlackboardState, DesktopStatus, EventlogEvents, EventlogQuery, EventlogRun, EvidenceItem, ExecutionArtifact, ExecutionLog, ExecutionStep, FrontierDependencyCluster, FrontierDependencySelection, FrontierMonitor, FrontierPriorityItem, FrontierQueue, FrontierQueueQuery, GraphEdge, GraphNode, HarnessCase, HarnessCaseCreateRequest, HarnessEventlogReference, HarnessFileDiff, HarnessResult, IDEData, IDEEvent, IDEMode, MissionState, OrchestratorAdvance, OrchestratorObservation, OrchestratorRun, OrchestratorState, PlannerPlan, PlannerState, PromptHarnessBatchComparisonItem, PromptRegistry, PromptVariable, ProviderConfig, ProviderSettings, ProviderTestResult, ProviderUsageRecord, ProviderUsageState, ReplayEvent, ReportDocument, ReportExportResult, ReportFinding, RuntimeWorker, RuntimeWorkerOrchestration, RuntimeWorkerState, Severity, ToolAction, ToolActionRunRequest, ToolchainPackSettings, WorkspaceFileContent, WorkspaceItem, WorkspaceSearchResult, WorkspaceSettings } from './types';
 import { rawFieldLabel, zhCN } from './zh-cn';
 
 const modes: Array<{ id: IDEMode; icon: LucideIcon }> = [
@@ -111,7 +112,7 @@ interface AIFileChangeItem {
 const maxAIStreamEvents = 48;
 const DEFAULT_HARNESS_ENVIRONMENT_SNAPSHOT_SOURCE = '桌面环境快照';
 
-type SettingsSectionID = 'status' | 'workspace' | 'provider' | 'toolchain' | 'prompts';
+type SettingsSectionID = 'status' | 'appearance' | 'workspace' | 'provider' | 'toolchain' | 'prompts';
 type SettingsFocus = {
   section: SettingsSectionID;
   providerName?: string;
@@ -305,6 +306,7 @@ const emptyData: IDEData = {
   blackboard: {
     path: '',
     items: [],
+    observations: [],
   },
   agentState: {
     path: '',
@@ -667,6 +669,14 @@ export function OuroborosIDE() {
 
   async function refresh() {
     const [next, desktop] = await Promise.all([loadIDEData(), loadDesktopStatus()]);
+    // Transient failure guard: a single failed bootstrap (backend restart
+    // window, momentary ECONNREFUSED) must not wipe the whole IDE — the
+    // unavailable payload carries empty lists that would blank the tree,
+    // graph and executions until the next successful poll.
+    if (next.status.api === 'bootstrap-error') {
+      setIDEData(current => ({ ...current, status: next.status }));
+      return;
+    }
     setIDEData(next);
     setDesktopStatus(desktop);
     syncFrontierQueueFromIDEData(next);
@@ -975,6 +985,14 @@ export function OuroborosIDE() {
       if (cancelled) {
         return;
       }
+    // Transient failure guard: a single failed bootstrap (backend restart
+    // window, momentary ECONNREFUSED) must not wipe the whole IDE — the
+    // unavailable payload carries empty lists that would blank the tree,
+    // graph and executions until the next successful poll.
+    if (next.status.api === 'bootstrap-error') {
+      setIDEData(current => ({ ...current, status: next.status }));
+      return;
+    }
       setIDEData(next);
       setDesktopStatus(desktop);
       syncFrontierQueueFromIDEData(next);
@@ -1123,6 +1141,10 @@ export function OuroborosIDE() {
       setFileDraft(file.content);
       setRenameFilePath(file.path);
       setFileStatus(file.path);
+      // The file editor lives in the mission workbench side panel: from any
+      // other mode the user clicked a file in the tree, so follow the open
+      // with a mode switch so the result is actually visible.
+      setMode('mission');
     } catch {
       setFileStatus(zhCN.editor.error);
     }
@@ -16397,6 +16419,43 @@ function AIMessageToolCorrelation({ message }: { message: AIMessage }) {
   );
 }
 
+// AIMessageActionOutcomes 渲染 AI 对话内联动作结果：观测-推理循环里
+// ACTION:OBSERVE 的原始观测以折叠 JSON 块呈现，ACTION:BLACKBOARD 的
+// 结论笔记直接展示——原始证据默认折叠，模型结论保持可读。
+function AIMessageActionOutcomes({ actions }: { actions: AIChatActionOutcome[] }) {
+  return (
+    <div className="ai-message-action-outcomes" data-ai-message-action-outcomes="true">
+      {actions.map((action, index) => (
+        <article className="ai-message-action-outcome" key={`${action.kind}-${index}`} data-ai-message-action-kind={action.kind}>
+          <strong>{aiChatActionOutcomeLabel(action.kind)}</strong>
+          <span>{action.summary}</span>
+          {action.path && <code>{action.path}</code>}
+          {action.kind === 'observe' && action.output ? (
+            <details className="ai-message-observe-payload" data-ai-message-observe-payload="true">
+              <summary>{zhCN.aiActions.observePayloadDetails}</summary>
+              <pre>{formatBlackboardObservationPayload(action.output)}</pre>
+            </details>
+          ) : action.output ? (
+            <pre>{aiDisplayText(action.output, '')}</pre>
+          ) : null}
+          {action.executionId && <small>{zhCN.aiActions.executionId}: {action.executionId}</small>}
+        </article>
+      ))}
+    </div>
+  );
+}
+
+function aiChatActionOutcomeLabel(kind: string): string {
+  const labels: Record<string, string> = {
+    observe: zhCN.aiActions.observeResultKind,
+    blackboard: zhCN.aiActions.blackboardResultKind,
+    execute: zhCN.aiActions.executeResultKind,
+    write: zhCN.aiActions.writeResultKind,
+    read: zhCN.aiActions.readResultKind,
+  };
+  return labels[kind] || kind;
+}
+
 function AIMessageRow({
   message,
   onOpenReference,
@@ -16433,6 +16492,7 @@ function AIMessageRow({
           </div>
         )}
         <AIMessageToolCorrelation message={message} />
+        {message.actions && message.actions.length > 0 && <AIMessageActionOutcomes actions={message.actions} />}
         {protocolHidden && <small className="ai-message-protocol-hidden">{zhCN.ai.actionProtocolHidden}</small>}
         {status && <small className="ai-message-status">{localizedStatusLabel(status)}</small>}
         {references.length > 0 && (
@@ -19953,6 +20013,56 @@ function harnessKindLabel(kind?: string) {
   }
 }
 
+function ObservationTimeline({ observations, path }: { observations: BlackboardObservation[]; path: string }) {
+  return (
+    <section className="blackboard-observation-timeline" data-blackboard-observation-timeline="true">
+      <PanelTitle icon={Activity} title={zhCN.blackboard.observationTimeline} meta={path || zhCN.blackboard.observationTimelineMeta} />
+      {observations.length === 0 && <EmptyState text={zhCN.blackboard.observationEmpty} />}
+      {observations.map(observation => (
+        <article className="blackboard-observation-card" key={observation.id} data-blackboard-observation-id={observation.id}>
+          <div className="blackboard-observation-head">
+            <strong>{blackboardObservationKindLabel(observation.kind)}</strong>
+            <span>{observation.target || observation.id}</span>
+            <time>{formatDetailTime(observation.createdAt)}</time>
+          </div>
+          <DetailGrid rows={[
+            [zhCN.blackboard.observationKind, blackboardObservationKindLabel(observation.kind)],
+            [zhCN.blackboard.observationTarget, observation.target],
+            [zhCN.blackboard.observationSource, observation.source],
+            [zhCN.blackboard.observationCreatedAt, formatDetailTime(observation.createdAt)],
+          ]} />
+          {observation.payload && (
+            <details className="blackboard-observation-payload">
+              <summary>{zhCN.blackboard.observationPayload}</summary>
+              <pre>{formatBlackboardObservationPayload(observation.payload)}</pre>
+            </details>
+          )}
+        </article>
+      ))}
+    </section>
+  );
+}
+
+function blackboardObservationKindLabel(kind?: string): string {
+  const normalized = (kind ?? '').trim();
+  if (zhCN.blackboard.observationKinds[normalized as keyof typeof zhCN.blackboard.observationKinds]) {
+    return zhCN.blackboard.observationKinds[normalized as keyof typeof zhCN.blackboard.observationKinds];
+  }
+  return normalized || zhCN.blackboard.observationKinds.unknown;
+}
+
+function formatBlackboardObservationPayload(payload: string): string {
+  const trimmed = payload.trim();
+  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) {
+    return trimmed;
+  }
+  try {
+    return JSON.stringify(JSON.parse(trimmed), null, 2);
+  } catch {
+    return trimmed;
+  }
+}
+
 function BlackboardWorkbench({
   blackboard,
   filters,
@@ -19999,6 +20109,34 @@ function BlackboardWorkbench({
   onUpdateItem: (item: BlackboardItem, request: BlackboardItemUpdateRequest) => void;
 }) {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [observations, setObservations] = useState<BlackboardObservation[]>([]);
+  const [observationsPath, setObservationsPath] = useState('');
+  const [observationBusy, setObservationBusy] = useState(false);
+  const [observationError, setObservationError] = useState('');
+
+  async function refreshObservations() {
+    setObservationBusy(true);
+    setObservationError('');
+    try {
+      const state = await fetchBlackboardObservations();
+      setObservations(state.observations);
+      setObservationsPath(state.path);
+    } catch (error) {
+      setObservationError(`${zhCN.blackboard.observationLoadFailed}: ${formatErrorMessage(error)}`);
+    } finally {
+      setObservationBusy(false);
+    }
+  }
+
+  // 原始观测在黑板写入/更新后可能新增或被更新：依赖条目的 id+updatedAt
+  // 内容指纹（长度不变的内容变化也要重拉）与忙碌状态。filterBusy 等先
+  // 归一为布尔，避免表达式依赖。
+  const blackboardBusy = filterBusy || batchBusy !== null || updateBusy !== null;
+  const blackboardItemsSignature = blackboard.items.map(item => `${item.id}:${item.updatedAt ?? ''}`).join('|');
+  useEffect(() => {
+    void refreshObservations();
+  }, [blackboardItemsSignature, blackboardBusy]);
+
   const visibleIds = blackboard.items.map(item => item.id);
   const selectedVisibleIds = selectedIds.filter(id => visibleIds.includes(id));
   const allVisibleSelected = visibleIds.length > 0 && visibleIds.every(id => selectedIds.includes(id));
@@ -20087,11 +20225,25 @@ function BlackboardWorkbench({
         <div className="workbench-header-meta">
           <span>{blackboard.path || zhCN.blackboard.noPath}</span>
           <strong>{blackboard.items.length} {zhCN.blackboard.itemCount}</strong>
+          <strong>{observations.length} {zhCN.blackboard.observationCount}</strong>
         </div>
       </div>
-      <div className="blackboard-grid">
+      <div className="blackboard-grid blackboard-grid-three">
+        <ObservationTimeline observations={observations} path={observationsPath} />
         <section className="blackboard-list">
           <PanelTitle icon={ClipboardList} title={zhCN.blackboard.items} meta={blackboard.path || zhCN.blackboard.meta} />
+          {observationError && (
+            <div className="blackboard-update-status" data-blackboard-observation-error="true">
+              <AlertCircle size={14} />
+              <span>{observationError}</span>
+            </div>
+          )}
+          <div className="ai-collaboration-dispatch-actions" data-blackboard-observation-refresh="true">
+            <button type="button" onClick={() => void refreshObservations()} disabled={observationBusy}>
+              <RefreshCw size={14} />
+              {observationBusy ? zhCN.blackboard.filtering : zhCN.blackboard.observationOpen}
+            </button>
+          </div>
           <form className="ai-collaboration-dispatch-form" data-blackboard-filter="true" onSubmit={submitFilter}>
             <div className="ai-collaboration-dispatch-fields">
               <label>
@@ -20221,11 +20373,24 @@ function BlackboardWorkbench({
         <section className="blackboard-summary">
           <PanelTitle icon={Activity} title={zhCN.blackboard.summary} meta={zhCN.blackboard.summaryMeta} />
           <DetailGrid rows={[
+            [zhCN.blackboard.observationCount, observations.length],
             [zhCN.blackboard.total, blackboard.items.length],
             [zhCN.blackboard.openItems, blackboard.items.filter(item => item.status === 'open').length],
             [zhCN.blackboard.doneItems, blackboard.items.filter(item => item.status === 'done').length],
             [zhCN.blackboard.path, blackboard.path],
           ]} />
+          {blackboard.items.length > 0 && (
+            <div className="blackboard-conclusion-sources" data-blackboard-conclusion-sources="true">
+              <PanelTitle icon={ClipboardList} title={zhCN.blackboard.items} meta={zhCN.blackboard.observationTimelineMeta} />
+              {blackboard.items.map(item => (
+                <div className="blackboard-conclusion-source-row" key={item.id} data-blackboard-conclusion-id={item.id}>
+                  <strong>{item.title}</strong>
+                  <span>{blackboardKindLabel(item.kind)}</span>
+                  <code>{item.source || item.id}</code>
+                </div>
+              ))}
+            </div>
+          )}
         </section>
       </div>
     </section>
@@ -22835,11 +23000,32 @@ type PromptHarnessDraft = {
 
 const settingsSections: Array<{ id: SettingsSectionID; label: string }> = [
   { id: 'status', label: zhCN.settings.sections.status },
+  { id: 'appearance', label: zhCN.settings.sections.appearance },
   { id: 'workspace', label: zhCN.settings.sections.workspace },
   { id: 'provider', label: zhCN.settings.sections.provider },
   { id: 'toolchain', label: zhCN.settings.sections.toolchain },
   { id: 'prompts', label: zhCN.settings.sections.prompts },
 ];
+
+function ThemeModeSelector() {
+  const [mode, setMode] = useState<ThemeMode>(readStoredTheme);
+  return (
+    <div className="theme-mode-selector" role="radiogroup" aria-label={zhCN.settings.rows.themeMode}>
+      {([['system', '跟随系统'], ['light', '浅色'], ['dark', '深色']] as Array<[ThemeMode, string]>).map(([value, label]) => (
+        <button
+          key={value}
+          type="button"
+          role="radio"
+          aria-checked={mode === value}
+          className={mode === value ? 'theme-mode-option active' : 'theme-mode-option'}
+          onClick={() => { setMode(value); setTheme(value); }}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 function SettingsWorkbench({
   data,
@@ -22873,6 +23059,12 @@ function SettingsWorkbench({
   focus?: SettingsFocus | null;
 }) {
   const [workspaceDraft, setWorkspaceDraft] = useState<WorkspaceSettings>(data.workspace);
+  // Dirty guards: a background refresh (30s poll, event stream) replaces
+  // ideData wholesale; without these flags the reset effects below would
+  // silently wipe whatever the operator is typing in the Settings forms
+  // (same pattern as missionDirty above).
+  const [workspaceDraftDirty, setWorkspaceDraftDirty] = useState(false);
+  const [providerDraftDirty, setProviderDraftDirty] = useState(false);
   const [workspaceStatus, setWorkspaceStatus] = useState(data.workspace.status);
   const [draft, setDraft] = useState<ProviderSettings>(data.provider);
   const [selectedProviderName, setSelectedProviderName] = useState(data.providerConfig.active.name || data.provider.name);
@@ -22905,16 +23097,22 @@ function SettingsWorkbench({
     : '--';
 
   useEffect(() => {
+    if (workspaceDraftDirty) {
+      return;
+    }
     setWorkspaceDraft(data.workspace);
     setWorkspaceStatus(data.workspace.status);
-  }, [data.workspace]);
+  }, [data.workspace, workspaceDraftDirty]);
 
   useEffect(() => {
+    if (providerDraftDirty) {
+      return;
+    }
     const selected = selectedProviderForConfig(data.providerConfig, data.provider);
     setSelectedProviderName(selected.name);
     setDraft(providerDraftWithRouting(selected, data.providerConfig));
     setStatus(selected.status);
-  }, [data.provider, data.providerConfig]);
+  }, [data.provider, data.providerConfig, providerDraftDirty]);
 
   useEffect(() => {
     setToolchainPacks(data.toolchainPacks);
@@ -23041,6 +23239,7 @@ function SettingsWorkbench({
   }, [focus?.sequence, promptRegistry]);
 
   function updateWorkspaceDraft(field: keyof WorkspaceSettings, value: string | string[]) {
+    setWorkspaceDraftDirty(true);
     setWorkspaceDraft(current => ({ ...current, [field]: value }));
   }
 
@@ -23048,6 +23247,7 @@ function SettingsWorkbench({
     setWorkspaceStatus(zhCN.settings.actions.savingWorkspace);
     try {
       await onSaveWorkspaceSettings(workspaceDraft);
+      setWorkspaceDraftDirty(false);
       setWorkspaceStatus(zhCN.settings.actions.workspaceSaved);
     } catch {
       setWorkspaceStatus(zhCN.settings.actions.saveWorkspaceFailed);
@@ -23055,6 +23255,7 @@ function SettingsWorkbench({
   }
 
   function updateProviderDraft(field: keyof ProviderSettings, value: string | boolean | number | string[]) {
+    setProviderDraftDirty(true);
     setDraft(current => ({ ...current, [field]: value }));
   }
 
@@ -23087,6 +23288,7 @@ function SettingsWorkbench({
     setProviderBusyAction('save');
     try {
       const config = await onSaveProvider(draft);
+      setProviderDraftDirty(false);
       const selected = selectedProviderForConfig(config, draft);
       setSelectedProviderName(selected.name);
       setDraft(providerDraftWithRouting(selected, config));
@@ -23648,6 +23850,13 @@ function SettingsWorkbench({
               <SettingRow label={zhCN.settings.rows.desktopLastStderr}><SettingValue>{desktopRuntime?.lastStderr || zhCN.settings.runtimeModes.none}</SettingValue></SettingRow>
             </SettingsGroup>
           </>
+        )}
+        {settingsActiveSection === 'appearance' && (
+          <SettingsGroup title={zhCN.settings.groups.appearance}>
+            <SettingRow label={zhCN.settings.rows.themeMode}>
+              <ThemeModeSelector />
+            </SettingRow>
+          </SettingsGroup>
         )}
         {settingsActiveSection === 'workspace' && (
           <SettingsGroup title={zhCN.settings.groups.workspaceSettings}>

@@ -242,7 +242,7 @@ const (
 type FailurePattern string
 
 const (
-	PatternIsolated    FailurePattern = "isolated"
-	PatternRecurring   FailurePattern = "recurring"
+	PatternIsolated     FailurePattern = "isolated"
+	PatternRecurring    FailurePattern = "recurring"
 	PatternIntermittent FailurePattern = "intermittent"
 )

@@ -24,6 +24,21 @@ export interface AIMessage {
   contextReferences?: AIContextReference[];
   usage?: AIUsage;
   routing?: AIRoutingMetadata;
+  // AI 对话内联动作结果（后端 ChatMessage.Actions）：observe=原始观测，blackboard=结论笔记。
+  actions?: AIChatActionOutcome[];
+}
+
+// AIChatActionOutcome 是聊天消息内联动作的结构化结果（观测-推理循环中
+// ACTION:OBSERVE / ACTION:BLACKBOARD 的回传），原样透传不判定。
+export interface AIChatActionOutcome {
+  kind: string;
+  summary: string;
+  path?: string;
+  output?: string;
+  diff?: string;
+  status?: string;
+  exitCode?: number;
+  executionId?: string;
 }
 
 export interface AIContextReference {
@@ -1347,6 +1362,32 @@ export interface EvidenceItem {
 export interface BlackboardState {
   path: string;
   items: BlackboardItem[];
+  observations: BlackboardObservation[];
+}
+
+// BlackboardObservation 是判定前的原始观测：工具回传的原始测量
+// （http_observe 输出、端口探测时延等），模型推理后才升级为结论条目。
+export interface BlackboardObservation {
+  id: string;
+  kind: string;
+  target: string;
+  payload?: string;
+  source?: string;
+  createdAt: number;
+}
+
+export interface BlackboardObservationQuery {
+  kind?: string;
+  target?: string;
+  source?: string;
+  q?: string;
+  limit?: number;
+}
+
+export interface BlackboardObservationState {
+  path: string;
+  observations: BlackboardObservation[];
+  count: number;
 }
 
 export interface BlackboardItem {

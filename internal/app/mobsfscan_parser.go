@@ -174,6 +174,12 @@ func parserEventsForToolExecution(runID string, request ToolExecutionRequest, re
 			return []eventlog.Event{parserStatusEvent(runID, request, result, parserID, "parse_failed", err.Error(), 0)}
 		}
 		return events
+	case "observe_json":
+		events, err := observeParserEvents(runID, request, result)
+		if err != nil {
+			return []eventlog.Event{parserStatusEvent(runID, request, result, parserID, "parse_failed", err.Error(), 0)}
+		}
+		return events
 	default:
 		return nil
 	}

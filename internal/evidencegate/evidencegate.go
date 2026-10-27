@@ -11,7 +11,6 @@ package evidencegate
 
 import (
 	"context"
-	"fmt"
 	"regexp"
 	"strings"
 )
@@ -156,8 +155,4 @@ func (l EvidenceLevel) String() string { return string(l) }
 type VerifyError struct {
 	FindingID string
 	Reason    string
-}
-
-func (e *VerifyError) Error() string {
-	return fmt.Sprintf("evidence gate: finding %s: %s", e.FindingID, e.Reason)
 }

@@ -44,6 +44,10 @@ type Options struct {
 	MaxWorkers int
 	// HTTPClient overrides the client used by HTTP handlers (tests).
 	HTTPClient *http.Client
+	// SpecJSON carries a caller-specified request shape (RunOptions →
+	// ToolExecutionRequest.Parameters["spec"]). Only handlers that take
+	// free-form input (http_observe) consume it.
+	SpecJSON string
 	// ParserID is the plan node's parser, letting one operation serve several
 	// interchangeable tools by emitting the matching output shape (for example
 	// tls_assessment → sslscan_xml vs testssl_json, or secret_scan →
@@ -155,10 +159,20 @@ func Run(ctx context.Context, operation string, target Target, opts Options) (st
 			return DecompileAPKApktool(ctx, target.Value, opts)
 		}
 		return DecompileAPKJadx(ctx, target.Value, opts)
+	case OpInjectionTest:
+		return DetectInjection(ctx, target.Value, opts)
 	case OpXSSScan:
 		return ScanReflectedXSS(ctx, target.Value, opts)
 	case OpAuthTest:
 		return TestAuth(ctx, target.Value, opts)
+	case OpHTTPObserve:
+		spec := ObserveSpec{}
+		if opts.SpecJSON != "" {
+			if err := json.Unmarshal([]byte(opts.SpecJSON), &spec); err != nil {
+				return "", fmt.Errorf("http_observe spec: %w", err)
+			}
+		}
+		return ObserveHTTP(ctx, target.Value, spec, opts)
 	default:
 		return "", fmt.Errorf("native tool operation %q is not implemented", operation)
 	}

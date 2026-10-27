@@ -236,8 +236,9 @@ func (s *Server) StartExecution(request ExecutionCreateRequestDTO) (ExecutionDTO
 	s.registerExecution(id, cancel)
 	s.appendExecutionEvent(id, meta, "started", "")
 	s.broadcastExecutionStatus("started", meta)
-
+	s.execWG.Add(1)
 	go func() {
+		defer s.execWG.Done()
 		err := cmd.Wait()
 		_ = logFile.Close()
 		s.unregisterExecution(id)

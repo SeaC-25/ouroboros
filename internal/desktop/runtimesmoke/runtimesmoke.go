@@ -26,8 +26,9 @@ import (
 const (
 	// defaultDebugPort mirrors the original cleanup needle default.
 	defaultDebugPort = "19224"
-	// defaultPackageDirName mirrors the original hardcoded ExecutablePath needle.
-	defaultPackageDirName = "Ouroboros-win32-x64"
+	// defaultPackageDirName follows the packager's output convention
+	// (Ouroboros-{GOOS}-{GOARCH} under gui/dist/desktop).
+	defaultPackageDirName = "Ouroboros-" + runtime.GOOS + "-" + runtime.GOARCH
 
 	envDebugPort  = "OURO_DESKTOP_DEBUG_PORT"
 	envPackageDir = "OURO_DESKTOP_PACKAGE_DIR"

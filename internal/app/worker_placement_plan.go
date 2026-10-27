@@ -691,6 +691,7 @@ func runtimeWorkerPlacementToolRequests(root string, runID string) ([]ToolExecut
 		scopeConfig.Execution.ResourceLimits,
 		scopeConfig.Execution.PackPolicies,
 		scopeConfig.Execution.WorkerPools,
+		nil,
 	), nil
 }
 

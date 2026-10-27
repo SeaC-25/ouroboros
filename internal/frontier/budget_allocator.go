@@ -63,10 +63,6 @@ func (a *BudgetAllocator) Spend(cost float64) bool {
 	return true
 }
 
-func (a *BudgetAllocator) UpdateStrategy(strategy Strategy) {
-	a.strategy = strategy
-}
-
 func (a *BudgetAllocator) RecommendedStrategy() Strategy {
 	state := a.State()
 	switch state {

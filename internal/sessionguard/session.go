@@ -42,9 +42,6 @@ func NewLease(cookies map[string]string) *Lease {
 // produces version 1.
 func (l *Lease) Version() int64 { return l.version }
 
-// CreatedAt returns the UTC creation time of this snapshot.
-func (l *Lease) CreatedAt() time.Time { return l.createdAt }
-
 // Frozen reports whether this snapshot came from a frozen session.
 func (l *Lease) Frozen() bool { return l.frozen }
 

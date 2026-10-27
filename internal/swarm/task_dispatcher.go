@@ -22,45 +22,45 @@ type TaskDispatcher struct {
 
 // DispatchTask represents a task with dispatch metadata.
 type DispatchTask struct {
-	Task       AgentTask
-	Priority   int
-	Dependencies []string
-	Status     TaskStatus
+	Task           AgentTask
+	Priority       int
+	Dependencies   []string
+	Status         TaskStatus
 	AssignedWorker string
-	SubmittedAt time.Time
-	StartedAt   *time.Time
-	CompletedAt *time.Time
-	Result     *AgentResult
-	Error      error
+	SubmittedAt    time.Time
+	StartedAt      *time.Time
+	CompletedAt    *time.Time
+	Result         *AgentResult
+	Error          error
 }
 
 type TaskStatus string
 
 const (
-	TaskStatusPending   TaskStatus = "pending"
-	TaskStatusReady     TaskStatus = "ready"
+	TaskStatusPending    TaskStatus = "pending"
+	TaskStatusReady      TaskStatus = "ready"
 	TaskStatusDispatched TaskStatus = "dispatched"
-	TaskStatusRunning   TaskStatus = "running"
-	TaskStatusComplete  TaskStatus = "complete"
-	TaskStatusFailed    TaskStatus = "failed"
+	TaskStatusRunning    TaskStatus = "running"
+	TaskStatusComplete   TaskStatus = "complete"
+	TaskStatusFailed     TaskStatus = "failed"
 )
 
 type DispatchStrategy string
 
 const (
-	StrategyFIFO        DispatchStrategy = "fifo"
-	StrategyPriority    DispatchStrategy = "priority"
-	StrategyRoleAware   DispatchStrategy = "role_aware"
+	StrategyFIFO         DispatchStrategy = "fifo"
+	StrategyPriority     DispatchStrategy = "priority"
+	StrategyRoleAware    DispatchStrategy = "role_aware"
 	StrategyLoadBalanced DispatchStrategy = "load_balanced"
 )
 
 // NewTaskDispatcher creates a new task dispatcher.
 func NewTaskDispatcher(pool *WorkerPool, store *blackboard.MemoryStore) *TaskDispatcher {
 	return &TaskDispatcher{
-		workerPool:   pool,
-		store:        store,
-		activeTasks:  make(map[string]*DispatchTask),
-		strategy:     StrategyPriority,
+		workerPool:  pool,
+		store:       store,
+		activeTasks: make(map[string]*DispatchTask),
+		strategy:    StrategyPriority,
 	}
 }
 

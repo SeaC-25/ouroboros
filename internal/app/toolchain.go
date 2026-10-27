@@ -2403,10 +2403,6 @@ func toolCompilePreviewSignalPathScore(path ToolCompilePreviewSignalPath) float6
 	return frontier.Score(path.toCandidatePath())
 }
 
-func toolCompilePreviewIntentDomain(intent toolCompilePreviewReplayIntentPayload) (frontier.Domain, bool) {
-	return toolCompilePreviewDomainForFields(intent.Domain, intent.Target, firstNonEmptyString(intent.IntentID, intent.ID))
-}
-
 func toolCompilePreviewDomainForFields(domainText, targetText, idText string) (frontier.Domain, bool) {
 	if domain, err := parseToolCompilePreviewSignalDomain(domainText); err == nil {
 		return domain, true
@@ -6040,10 +6036,6 @@ func releaseManagedToolBundleStatusFromError(dir string, manifestPath string, er
 		ReleaseManifestPath: manifestPath,
 		Error:               err.Error(),
 	}
-}
-
-func releaseManagedToolBundleStatusForWorkspace(root string, bundle ReleaseManagedToolBundle) ReleaseManagedToolBundleStatus {
-	return releaseManagedToolBundleStatusForWorkspaceWithExpectedSHA(root, bundle, "")
 }
 
 func releaseManagedToolBundleStatusForWorkspaceWithExpectedSHA(root string, bundle ReleaseManagedToolBundle, expectedSHA string) ReleaseManagedToolBundleStatus {

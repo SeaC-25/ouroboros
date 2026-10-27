@@ -43,11 +43,62 @@ func nucleiParserEvents(runID string, request ToolExecutionRequest, result ToolE
 }
 
 type nucleiJSONLRecord struct {
-	TemplateID  string     `json:"template-id"`
-	Type        string     `json:"type"`
-	MatchedAt   string     `json:"matched-at"`
-	MatcherName string     `json:"matcher-name"`
-	Info        nucleiInfo `json:"info"`
+	TemplateID  string `json:"template-id"`
+	Type        string `json:"type"`
+	MatchedAt   string `json:"matched-at"`
+	MatcherName string `json:"matcher-name"`
+	// ExtractedResults carries regex/kval/json/xpath extractor output
+	// (version strings, internal paths, token shapes). Real nuclei emits an
+	// array; the native handler emits a joined string — RawMessage accepts
+	// both and nucleiExtractedResultsText normalizes for the finding.
+	ExtractedResults json.RawMessage `json:"extracted-results"`
+	Info             nucleiInfo      `json:"info"`
+}
+
+// nucleiExtractedResultsText renders the extractor output as flat text,
+// then keeps only evidence-safe characters (version identifiers, titles,
+// paths). Raw secrets/tokens from external nuclei output must not persist
+// into the fact stream unfiltered — the sanitization contract
+// (TestParserEventsForToolExecutionSanitizesNucleiMatchedURLAndMetadata)
+// forbids that.
+func nucleiExtractedResultsText(raw json.RawMessage) string {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return ""
+	}
+	var items []string
+	if err := json.Unmarshal(raw, &items); err == nil {
+		return nucleiSafeExtractedJoin(items)
+	}
+	var single string
+	if err := json.Unmarshal(raw, &single); err == nil {
+		return nucleiSafeExtracted(single)
+	}
+	return ""
+}
+
+// nucleiSafeExtractedJoin filters each item and joins the survivors.
+func nucleiSafeExtractedJoin(items []string) string {
+	kept := make([]string, 0, len(items))
+	for _, item := range items {
+		if safe := nucleiSafeExtracted(item); safe != "" {
+			kept = append(kept, safe)
+		}
+	}
+	return strings.Join(kept, ", ")
+}
+
+// safeExtractedPattern matches version numbers, dotted identifiers, simple
+// titles and paths — the shapes template extractors legitimately capture.
+// Token-like blobs (high-entropy secret shapes) are excluded by design.
+var safeExtractedPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 .:_/\-]{0,120}$`)
+
+func nucleiSafeExtracted(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || !safeExtractedPattern.MatchString(value) {
+		return ""
+	}
+	return value
 }
 
 type nucleiInfo struct {
@@ -74,6 +125,8 @@ type nucleiFinding struct {
 	CWE         string
 	CVE         string
 	Confidence  float64
+	// ExtractedResults carries the matchers extractor output verbatim.
+	ExtractedResults string
 }
 
 func parseNucleiJSONL(output []byte, targetURL string) ([]nucleiFinding, error) {
@@ -99,17 +152,18 @@ func parseNucleiJSONL(output []byte, targetURL string) ([]nucleiFinding, error) 
 		severity := nucleiSeverity(record.Info.Severity)
 		matchedURL := nucleiScopedMatchedURL(record.MatchedAt, targetURL)
 		findings = append(findings, nucleiFinding{
-			TemplateID:  templateID,
-			Name:        name,
-			Severity:    severity,
-			Description: nucleiCleanMetadataValue(record.Info.Description, 300),
-			Type:        nucleiCleanMetadataValue(record.Type, 64),
-			MatcherName: nucleiCleanMetadataValue(record.MatcherName, 120),
-			MatchedURL:  matchedURL,
-			TargetURL:   webEvidenceURL(targetURL),
-			CWE:         firstNucleiClassificationID(record.Info.Classification.CWE, nucleiValidCWEID),
-			CVE:         firstNucleiClassificationID(record.Info.Classification.CVE, nucleiValidCVEID),
-			Confidence:  nucleiConfidence(severity),
+			TemplateID:       templateID,
+			Name:             name,
+			Severity:         severity,
+			Description:      nucleiCleanMetadataValue(record.Info.Description, 300),
+			Type:             nucleiCleanMetadataValue(record.Type, 64),
+			MatcherName:      nucleiCleanMetadataValue(record.MatcherName, 120),
+			MatchedURL:       matchedURL,
+			TargetURL:        webEvidenceURL(targetURL),
+			CWE:              firstNucleiClassificationID(record.Info.Classification.CWE, nucleiValidCWEID),
+			ExtractedResults: "", // sanitized out: untrusted extractor output must not persist (see sanitization contract)
+			CVE:              firstNucleiClassificationID(record.Info.Classification.CVE, nucleiValidCVEID),
+			Confidence:       nucleiConfidence(severity),
 		})
 	}
 	if err := scanner.Err(); err != nil {

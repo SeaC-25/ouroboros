@@ -3386,9 +3386,9 @@ if (existsSync(copyPath)) {
     "noGraph: '暂无攻击图谱数据'",
     "noSelectedGraphNode: '尚未选择图谱节点'",
     "refresh: '刷新'",
-    "collaborationContextEmpty: '当前黑板、智能体、编排与规划状态没有可显示的协作数据'",
+    "collaborationContextEmpty: '当前观测结论、智能体、编排与规划状态没有可显示的协作数据'",
     "collaborationReferencesEmpty: '当前协作状态没有可定位的文件、执行或事件引用'",
-    "collaborationTopologyEmpty: '当前黑板、智能体和前沿队列没有可绘制的拓扑节点'",
+    "collaborationTopologyEmpty: '当前观测结论、智能体和前沿队列没有可绘制的拓扑节点'",
     "collaborationTopologyEdgesEmpty: '当前拓扑节点之间没有依赖关系'",
     "collaborationTopologyHarnessMissing: '当前 AI 会话没有可沉淀的消息'",
     "agentTaskQueueEmpty: '当前智能体状态中没有任务'",
@@ -3640,13 +3640,13 @@ if (existsSync(copyPath)) {
       failed = true;
     }
   }
-  for (const snippet of ['失败归纳', 'Sisyphus 失败归纳', '失败执行 ID', '失败类型', '失败说明', '策略目标', '失败记录文本', '失败归纳需要失败执行 ID 或失败记录', '失败黑板条目', '策略变异任务', '归纳摘要']) {
+  for (const snippet of ['失败归纳', 'Sisyphus 失败归纳', '失败执行 ID', '失败类型', '失败说明', '策略目标', '失败记录文本', '失败归纳需要失败执行 ID 或失败记录', '失败观测结论', '策略变异任务', '归纳摘要']) {
     if (!copy.includes(snippet)) {
       console.error(`zh-cn.ts missing Chinese Sisyphus AI action copy: ${snippet}`);
       failed = true;
     }
   }
-  for (const snippet of ['失败闭环链路证据', '闭环动作', '黑板证据', '任务证据', '评测证据', '前沿证据']) {
+  for (const snippet of ['失败闭环链路证据', '闭环动作', '结论证据', '任务证据', '评测证据', '前沿证据']) {
     if (!copy.includes(snippet)) {
       console.error(`zh-cn.ts missing Chinese AI failure loop evidence copy: ${snippet}`);
       failed = true;
@@ -3658,7 +3658,7 @@ if (existsSync(copyPath)) {
       failed = true;
     }
   }
-  for (const snippet of ['目标拆解', '总目标', '标题', '来源', '优先级', '最大子目标数', '目标拆解需要总目标', '写入的黑板条目', '创建的智能体任务', '前沿队列摘要']) {
+  for (const snippet of ['目标拆解', '总目标', '标题', '来源', '优先级', '最大子目标数', '目标拆解需要总目标', '写入的观测结论', '创建的智能体任务', '前沿队列摘要']) {
     if (!copy.includes(snippet)) {
       console.error(`zh-cn.ts missing Chinese goal.decompose AI action copy: ${snippet}`);
       failed = true;
@@ -3700,7 +3700,7 @@ if (existsSync(copyPath)) {
       failed = true;
     }
   }
-  for (const snippet of ['agents:', '智能体', '多智能体工作台', '智能体任务', '暂无智能体任务', '任务统计', '任务目标', '执行角色', '智能体 ID', '关联黑板条目', '创建智能体任务', '读取智能体任务', '后端返回的智能体任务为空']) {
+  for (const snippet of ['agents:', '智能体', '多智能体工作台', '智能体任务', '暂无智能体任务', '任务统计', '任务目标', '执行角色', '智能体 ID', '关联观测结论', '创建智能体任务', '读取智能体任务', '后端返回的智能体任务为空']) {
     if (!copy.includes(snippet)) {
       console.error(`zh-cn.ts missing Chinese Agent Orchestrator v1 copy: ${snippet}`);
       failed = true;
@@ -3712,13 +3712,13 @@ if (existsSync(copyPath)) {
       failed = true;
     }
   }
-  for (const snippet of ['blackboard:', '黑板', '黑板条目', '暂无黑板条目', '黑板摘要', '全部条目', '打开条目', '完成条目', '打开文件', '查看执行', '定位图谱', '定位回放', '定位报告', '目标', '假设', '发现', '问题', '失败项', '打开', '完成', '高', '中', '低']) {
+  for (const snippet of ['blackboard:', '观测', '观测-推理工作台', '观测-推理循环', '观测结论', '已验证结论', '观测结论摘要', '观测时间线', '原始观测', '暂无观测结论', '全部条目', '打开条目', '完成条目', '打开文件', '查看执行', '定位图谱', '定位回放', '定位报告', '目标', '假设', '发现', '问题', '失败项', '打开', '完成', '高', '中', '低']) {
     if (!copy.includes(snippet)) {
       console.error(`zh-cn.ts missing Chinese Blackboard copy: ${snippet}`);
       failed = true;
     }
   }
-  for (const snippet of ['黑板动作', '条目类型', '黑板标题', '黑板内容', '状态', '优先级', '来源', '关联文件', '关联执行', '黑板条目', '后端返回的黑板条目为空']) {
+  for (const snippet of ['观测结论动作', '条目类型', '观测结论标题', '观测结论内容', '状态', '优先级', '来源', '关联文件', '关联执行', '观测结论', '后端返回的观测结论为空']) {
     if (!copy.includes(snippet)) {
       console.error(`zh-cn.ts missing Chinese Blackboard AI action copy: ${snippet}`);
       failed = true;
@@ -3748,7 +3748,7 @@ if (existsSync(copyPath)) {
       failed = true;
     }
   }
-  for (const snippet of ['规划分派', '规划状态', '来自真实工作区规划文件', '后端会读取真实工作区、黑板、智能体、评测和编排状态，再写入规划与分派对象', '规划标题', '规划目标', '下一步标题', '下一步目标', '下一步命令', '期望结果', '规划分派需要标题和目标', 'AI 规划分派', '规划状态文件', '规划数量', '规划记录', '真实上下文摘要', '关联编排运行', '关联评测用例', '后端返回的规划记录为空']) {
+  for (const snippet of ['规划分派', '规划状态', '来自真实工作区规划文件', '后端会读取真实工作区、观测结论、智能体、评测和编排状态，再写入规划与分派对象', '规划标题', '规划目标', '下一步标题', '下一步目标', '下一步命令', '期望结果', '规划分派需要标题和目标', 'AI 规划分派', '规划状态文件', '规划数量', '规划记录', '真实上下文摘要', '关联编排运行', '关联评测用例', '后端返回的规划记录为空']) {
     if (!copy.includes(snippet)) {
       console.error(`zh-cn.ts missing Chinese Planner Dispatch v1 action copy: ${snippet}`);
       failed = true;
@@ -3761,8 +3761,8 @@ if (existsSync(copyPath)) {
       failed = true;
     }
   }
-  if (!/modes:\s*\{[\s\S]*?blackboard:\s*'黑板'/m.test(copy)) {
-    console.error("zh-cn.ts must expose the Blackboard mode label as Chinese visible copy: blackboard: '黑板'");
+  if (!/modes:\s*\{[\s\S]*?blackboard:\s*'观测'/m.test(copy)) {
+    console.error("zh-cn.ts must expose the observation workbench mode label as Chinese visible copy: blackboard: '观测'");
     failed = true;
   }
   if (!/modes:\s*\{[\s\S]*?agents:\s*'智能体'/m.test(copy)) {

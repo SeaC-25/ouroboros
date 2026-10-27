@@ -46,11 +46,6 @@ func (g Graph) To(nodeID string) *QueryBuilder {
 	return (&QueryBuilder{graph: (*Projector)(&g)}).To(nodeID)
 }
 
-// NewQueryBuilder creates a builder for graph.
-func NewQueryBuilder(graph *Projector) *QueryBuilder {
-	return &QueryBuilder{graph: graph}
-}
-
 // From sets the source node for the query.
 func (q *QueryBuilder) From(nodeID string) *QueryBuilder {
 	if q == nil {

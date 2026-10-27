@@ -8,13 +8,13 @@ import (
 // AntColony implements the Ant Colony pattern: parallel path search with shared trail memory.
 // It manages multiple workers exploring paths and depositing pheromones to guide convergence.
 type AntColony struct {
-	pattern       Pattern
-	currentNode   string
-	stepCount     int
-	trails        map[string]*Trail
-	workers       []*Worker
-	maxWorkers    int
-	explorations  int
+	pattern      Pattern
+	currentNode  string
+	stepCount    int
+	trails       map[string]*Trail
+	workers      []*Worker
+	maxWorkers   int
+	explorations int
 }
 
 // NewAntColony creates an AntColony executor from a pattern definition.
@@ -221,10 +221,10 @@ type Trail struct {
 
 // Worker represents a parallel exploration worker.
 type Worker struct {
-	ID            string
-	Status        string
-	CurrentPath   string
-	FactsFound    int
+	ID          string
+	Status      string
+	CurrentPath string
+	FactsFound  int
 }
 
 // TrailSummary provides overview of trail state.

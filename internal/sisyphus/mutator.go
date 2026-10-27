@@ -226,10 +226,10 @@ func (m *Mutator) applyToolMutation(goal string, hint string) string {
 
 // AnalyzeMutationHistory tracks mutation effectiveness over time.
 type MutationHistory struct {
-	Mutations       []MutationRecord
-	SuccessRate     float64
-	MostEffective   []string
-	LeastEffective  []string
+	Mutations      []MutationRecord
+	SuccessRate    float64
+	MostEffective  []string
+	LeastEffective []string
 }
 
 type MutationRecord struct {

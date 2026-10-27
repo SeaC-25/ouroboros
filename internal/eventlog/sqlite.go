@@ -1,4 +1,4 @@
-﻿package eventlog
+package eventlog
 
 import (
 	"context"
@@ -23,10 +23,16 @@ func OpenSQLite(path string) (*SQLiteStore, error) {
 		return nil, errors.New("sqlite path is required")
 	}
 
-	db, err := sql.Open("sqlite", path)
+	// busy_timeout: the API server and a CLI run share this database; without
+	// a wait window concurrent writers fail fast with SQLITE_BUSY (events
+	// would be silently dropped by log-and-continue callers). One pooled
+	// connection serializes writes inside the process and matches SQLite's
+	// single-writer model.
+	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)")
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
+	db.SetMaxOpenConns(1)
 
 	store := &SQLiteStore{db: db}
 	if err := store.migrate(); err != nil {
@@ -51,9 +57,13 @@ func OpenSQLiteReadOnly(path string) (*SQLiteStore, error) {
 	uri := url.URL{Scheme: "file", Path: slashed}
 	query := uri.Query()
 	query.Set("mode", "ro")
-	query.Set("immutable", "1")
-	query.Set("_query_only", "1")
-	query.Set("_foreign_keys", "1")
+	// immutable=1 would tell SQLite the file never changes: it ignores the
+	// WAL, so freshly committed events (the -wal file) stay invisible to
+	// TUI/replay readers while a run is live, and a mid-read checkpoint can
+	// surface torn pages. mode=ro alone is the correct read-only posture;
+	// _query_only was never a valid modernc parameter (silent no-op).
+	query.Add("_pragma", "busy_timeout(5000)")
+	query.Add("_pragma", "foreign_keys(1)")
 	uri.RawQuery = query.Encode()
 
 	db, err := sql.Open("sqlite", uri.String())

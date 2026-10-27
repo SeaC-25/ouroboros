@@ -9,11 +9,12 @@ import (
 )
 
 type MemoryStore struct {
-	mu      sync.RWMutex
-	nextID  int
-	facts   []Fact
-	intents map[string]Intent
-	hints   []Hint
+	mu           sync.RWMutex
+	nextID       int
+	facts        []Fact
+	intents      map[string]Intent
+	hints        []Hint
+	observations []Observation
 }
 
 func NewMemoryStore() *MemoryStore {
@@ -36,6 +37,8 @@ func (s *MemoryStore) AppendFact(fact Fact) (Fact, error) {
 	now := time.Now().UTC()
 	fact.ID = s.newID("fact")
 	fact.CreatedAt = now
+	// SourceObservations is caller-supplied evidence backlink metadata; it
+	// passes through untouched so facts keep pointing at their observations.
 	s.facts = append(s.facts, fact)
 	return fact, nil
 }
@@ -111,7 +114,14 @@ func (s *MemoryStore) ClaimIntent(intentID string, agentID string, ttl time.Dura
 	if !ok {
 		return Lease{}, fmt.Errorf("intent not found: %s", intentID)
 	}
-	if intent.State != IntentOpen && intent.State != IntentReleased {
+	if intent.State == IntentClaimed && intent.Lease != nil {
+		// An existing lease only blocks re-claim while unexpired: a worker
+		// that died mid-lease must not wedge the intent forever, so an
+		// expired lease can be taken over with a fresh leaseID.
+		if now := time.Now().UTC(); intent.Lease.ExpiresAt.After(now) {
+			return Lease{}, fmt.Errorf("intent %s is claimed by %s until %s", intentID, intent.Lease.AgentID, intent.Lease.ExpiresAt.Format(time.RFC3339))
+		}
+	} else if intent.State != IntentOpen && intent.State != IntentReleased {
 		return Lease{}, fmt.Errorf("intent %s cannot be claimed from state %s", intentID, intent.State)
 	}
 
@@ -147,6 +157,11 @@ func (s *MemoryStore) Heartbeat(intentID string, leaseID string, ttl time.Durati
 	}
 	if intent.Lease.ID != leaseID {
 		return Lease{}, fmt.Errorf("lease mismatch for intent %s", intentID)
+	}
+	// A heartbeat on an already-expired lease must not resurrect it: the
+	// worker is presumed dead and another agent may have taken over.
+	if now := time.Now().UTC(); !intent.Lease.ExpiresAt.After(now) {
+		return Lease{}, fmt.Errorf("lease for intent %s expired at %s", intentID, intent.Lease.ExpiresAt.Format(time.RFC3339))
 	}
 
 	now := time.Now().UTC()
@@ -224,9 +239,10 @@ func (s *MemoryStore) State() ProjectState {
 	}
 
 	return ProjectState{
-		Facts:   append([]Fact(nil), s.facts...),
-		Intents: intents,
-		Hints:   append([]Hint(nil), s.hints...),
+		Facts:        append([]Fact(nil), s.facts...),
+		Intents:      intents,
+		Hints:        append([]Hint(nil), s.hints...),
+		Observations: append([]Observation(nil), s.observations...),
 	}
 }
 

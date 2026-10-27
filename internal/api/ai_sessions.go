@@ -172,6 +172,9 @@ func (s *Server) handleAIConversationExport(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *Server) writeAIConversation(messages []ChatMessage) error {
+	// stateMu: serialize against appends and other rewrites (see Server).
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
 	path := filepath.Join(s.workspace, "runtime", "ai-conversation.jsonl")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err

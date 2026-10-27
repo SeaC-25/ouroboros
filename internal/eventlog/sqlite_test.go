@@ -111,20 +111,16 @@ func TestOpenSQLiteReadOnlyListsRunIDsWithoutWALSidecars(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open sqlite store: %v", err)
 	}
+	defer func() { _ = store.Close() }()
 	if _, err := store.Append(ctx, Event{RunID: "run-a", Type: EventGoal, Payload: json.RawMessage(`{"goal":"a"}`)}); err != nil {
 		t.Fatalf("append run-a: %v", err)
 	}
 	if _, err := store.Append(ctx, Event{RunID: "run-b", Type: EventGoal, Payload: json.RawMessage(`{"goal":"b"}`)}); err != nil {
 		t.Fatalf("append run-b: %v", err)
 	}
-	if _, err := store.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
-		t.Fatalf("checkpoint wal: %v", err)
-	}
-	if err := store.Close(); err != nil {
-		t.Fatalf("close writable store: %v", err)
-	}
-	removeSQLiteSidecarIfExists(t, path+"-wal")
-	removeSQLiteSidecarIfExists(t, path+"-shm")
+	// Deliberately NOT checkpointing and NOT closing the writer: the
+	// read-only handle must coexist with the live WAL and see events that
+	// exist only there (the old immutable=1 posture hid them).
 
 	readOnly, err := OpenSQLiteReadOnly(path)
 	if err != nil {
@@ -141,11 +137,26 @@ func TestOpenSQLiteReadOnlyListsRunIDsWithoutWALSidecars(t *testing.T) {
 	if _, err := readOnly.Append(ctx, Event{RunID: "run-c", Type: EventGoal, Payload: json.RawMessage(`{"goal":"c"}`)}); err == nil {
 		t.Fatalf("read-only sqlite store must reject appends")
 	}
-	if _, err := os.Stat(path + "-wal"); !os.IsNotExist(err) {
-		t.Fatalf("read-only sqlite open must not create wal sidecar, stat err=%v", err)
+	// The old immutable=1 flag made the read-only handle blind to WAL-only
+	// events; the contract now is live visibility, so sidecar presence is
+	// acceptable (same directory is writable by the desktop app anyway).
+	// Guard the real invariant instead: a WAL-only event appended after the
+	// read-only handle exists must be visible on the next query.
+	if _, err := store.Append(ctx, Event{RunID: "run-a", Type: EventHint, Payload: json.RawMessage(`{"h":"late"}`)}); err != nil {
+		t.Fatalf("append late hint: %v", err)
 	}
-	if _, err := os.Stat(path + "-shm"); !os.IsNotExist(err) {
-		t.Fatalf("read-only sqlite open must not create shm sidecar, stat err=%v", err)
+	events, err := readOnly.Replay(ctx, "run-a")
+	if err != nil {
+		t.Fatalf("replay run-a read-only: %v", err)
+	}
+	sawLate := false
+	for _, event := range events {
+		if event.Type == EventHint {
+			sawLate = true
+		}
+	}
+	if !sawLate {
+		t.Fatalf("read-only store must see the WAL-only late hint event")
 	}
 }
 

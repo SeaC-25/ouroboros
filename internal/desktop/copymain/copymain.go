@@ -18,12 +18,6 @@ const MainDir = "src/main"
 // join(guiRoot, 'dist', 'main') in copy-main.mjs.
 const DestDir = "dist/main"
 
-// GUIRoot returns the default GUI root (the gui/ directory under the
-// repository root), resolved relative to the current working directory.
-func GUIRoot() string {
-	return "gui"
-}
-
 // Copy copies <guiRoot>/src/main into <guiRoot>/dist/main and returns the
 // destination path. It mirrors cpSync(src, dest, {recursive, force: true}):
 // existing files are overwritten, directories are merged.

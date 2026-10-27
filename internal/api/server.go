@@ -5,8 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
+	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,8 +27,18 @@ type Server struct {
 	clients    map[*websocket.Conn]bool
 	clientsMu  sync.Mutex
 	wsWriteMu  sync.Mutex
-	broadcast  chan []byte
-	execMu     sync.Mutex
+	// stateMu serializes every runtime/*.jsonl read-modify-write
+	// (conversation/blackboard/agent tasks). Concurrent HTTP handlers used
+	// to interleave O_TRUNC rewrites with O_APPEND appends, corrupting the
+	// journal (interleaved lines = silently dropped messages on load).
+	stateMu   sync.Mutex
+	broadcast chan []byte
+	execMu    sync.Mutex
+	// execWG tracks in-flight execution goroutines so Stop can wait for
+	// their terminal appendExecutionEvent before closing the event store
+	// (closing first dropped the final execution event — replay stopped at
+	// "running" forever).
+	execWG     sync.WaitGroup
 	executions map[string]context.CancelFunc
 	done       chan struct{} // 用于优雅停止 goroutine
 	stopOnce   sync.Once
@@ -107,6 +121,7 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/ai/conversation/export", s.handleAIConversationExport)
 	mux.HandleFunc("/api/ai/blackboard", s.handleAIBlackboard)
 	mux.HandleFunc("/api/ai/blackboard/", s.handleAIBlackboard)
+	mux.HandleFunc("/api/blackboard/observations", s.handleBlackboardObservations)
 	mux.HandleFunc("/api/ai/agents", s.handleAIAgents)
 	mux.HandleFunc("/api/ai/prompts", s.handleAIPrompts)
 	mux.HandleFunc("/api/ai/harness/cases", s.handleAIHarnessCases)
@@ -114,15 +129,29 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/ai/swarm/runs", s.handleAISwarmRuns)
 	mux.HandleFunc("/api/events/stream", s.handleWebSocket)
 
-	// CORS中间件
-	handler := corsMiddleware(mux)
+	// CORS + 请求体上限中间件：所有 JSON handler 都直接 Decode(r.Body)，
+	// 无认证无配额，放任无界请求体可被单个恶意请求耗尽内存。10MB 足够
+	// 最大合法载荷（conversation 导入、harness cases）。
+	handler := limitRequestBody(10<<20, corsMiddleware(mux))
 
-	s.server = &http.Server{
-		Addr:    fmt.Sprintf(":%d", s.port),
-		Handler: handler,
+	// Loopback-only bind: every route on this server is unauthenticated and
+	// several execute commands / read-write workspace files. Binding the
+	// wildcard interface exposed all of it to the LAN; 127.0.0.1 is the
+	// contract the desktop app (and the serve log line) always assumed.
+	// OURO_API_BIND=0.0.0.0 is the explicit operator opt-out for remote use.
+	bindHost := strings.TrimSpace(os.Getenv("OURO_API_BIND"))
+	if bindHost == "" {
+		bindHost = "127.0.0.1"
 	}
-
-	log.Printf("🚀 Ouroboros API服务器启动在 http://localhost:%d", s.port)
+	s.server = &http.Server{
+		Addr:              net.JoinHostPort(bindHost, strconv.Itoa(s.port)),
+		Handler:           handler,
+		ReadHeaderTimeout: 30 * time.Second,
+		ReadTimeout:       120 * time.Second,
+		WriteTimeout:      120 * time.Second,
+		IdleTimeout:       180 * time.Second,
+	}
+	log.Printf("🚀 Ouroboros API服务器启动在 http://%s:%d", bindHost, s.port)
 	return s.server.ListenAndServe()
 }
 
@@ -143,16 +172,19 @@ func (s *Server) Stop(ctx context.Context) error {
 	s.clients = make(map[*websocket.Conn]bool) // 清空map
 	s.clientsMu.Unlock()
 
-	// 4. 关闭 SQLite 连接
+	// 4. 先关 HTTP 服务器（等 handler 退出），再等执行 goroutine 落完
+	// 终态事件，最后才关事件库——反过来会丢最后一条执行事件（回放
+	// 永远停在 running）。
+	if s.server != nil {
+		if err := s.server.Shutdown(ctx); err != nil {
+			log.Printf("HTTP 服务器关闭失败: %v", err)
+		}
+	}
+	s.execWG.Wait()
 	if s.eventStore != nil {
 		if err := s.eventStore.Close(); err != nil {
 			log.Printf("关闭事件存储失败: %v", err)
 		}
-	}
-
-	// 5. 关闭 HTTP 服务器
-	if s.server != nil {
-		return s.server.Shutdown(ctx)
 	}
 	return nil
 }
@@ -171,6 +203,16 @@ func corsMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
+		next.ServeHTTP(w, r)
+	})
+}
+
+// limitRequestBody 用 http.MaxBytesReader 限制请求体大小，超出上限的
+// 请求在 handler 解析前即被 413 拒绝，防止无界读取耗尽内存。WebSocket
+// 升级请求不带 body，不受影响。
+func limitRequestBody(max int64, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, max)
 		next.ServeHTTP(w, r)
 	})
 }
@@ -405,10 +447,34 @@ func (s *Server) handleToolchainHealth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// WebSocket升级器
+// WebSocket升级器：Origin 白名单。Electron 渲染进程（file:// 或 dev
+// server）与同源浏览器页面允许；任意网页不得订阅执行事件流（命令、
+// transcript 预览都会广播）。缺 Origin 头的非浏览器客户端照常放行。
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
-		return true // 允许所有来源（生产环境需要更严格的检查）
+		origin := strings.TrimSpace(r.Header.Get("Origin"))
+		if origin == "" || origin == "null" {
+			// Non-browser clients (Go/ws CLI) never send Origin.
+			return true
+		}
+		originURL, err := url.Parse(origin)
+		if err != nil || originURL.Host == "" {
+			// Electron file:// pages send "file://" (empty host).
+			return strings.HasPrefix(origin, "file://")
+		}
+		// Same-origin: the API host itself (the desktop app proxies through).
+		if originURL.Host == r.Host {
+			return true
+		}
+		// Loopback frontends (Vite dev server, Electron renderer) are the
+		// legitimate cross-origin consumers; a remote page can never claim
+		// a loopback Origin.
+		switch originURL.Hostname() {
+		case "127.0.0.1", "localhost":
+			return true
+		default:
+			return false
+		}
 	},
 }
 
@@ -591,6 +657,10 @@ func (s *Server) BroadcastEvent(eventType string, payload interface{}) {
 func (s *Server) writeWebSocketMessage(conn *websocket.Conn, messageType int, data []byte) error {
 	s.wsWriteMu.Lock()
 	defer s.wsWriteMu.Unlock()
+	// 写超时 5s：gorilla/websocket 的 Write 会随底层 TCP 阻塞，半开连接
+	// （对端断网/挂起）可把全局 wsWriteMu 占住分钟级，拖死所有客户端的
+	// 广播。带 deadline 的写失败即从 clients 移除该连接。
+	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	return conn.WriteMessage(messageType, data)
 }
 

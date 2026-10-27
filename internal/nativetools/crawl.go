@@ -33,9 +33,27 @@ type katanaRecord struct {
 
 var htmlLinkPattern = regexp.MustCompile(`(?i)(?:href|src|action)\s*=\s*["']([^"'#]+)["']`)
 
-// Crawl performs a breadth-first static HTML crawl limited to the target
-// origin and emits katana-compatible JSONL. JavaScript execution is out of
-// scope; the managed katana remains available for rendered crawling.
+// metaRefreshPattern captures <meta http-equiv="refresh" content="N; url=...">;
+// the URL lives inside the content attribute so htmlLinkPattern cannot see it.
+var metaRefreshPattern = regexp.MustCompile(`(?i)<meta[^>]*http-equiv\s*=\s*["']?refresh["']?[^>]*content\s*=\s*["'][^"']*url=([^"'>]+)["']`)
+
+// htmlCommentPattern captures path-like tokens inside HTML comments
+// (<!-- /backup/admin -->, <!-- old: /api/v1/legacy -->).
+var htmlCommentPattern = regexp.MustCompile(`(?i)(?:/[a-z0-9_\-.\%@]{2,}){2,}`)
+
+// htmlCommentBlockPattern isolates <!-- ... --> bodies so comment path
+// extraction only sees tokens the site itself left inside comments.
+var htmlCommentBlockPattern = regexp.MustCompile(`(?s)<!--(.*?)-->`)
+
+// jsRoutePattern extracts path-like string literals from JavaScript bodies:
+// quoted "/api/..." routes, '/static/...' assets and fetch/axios URL arguments.
+var jsRoutePattern = regexp.MustCompile(`(?i)(?:fetch|axios(?:\.(?:get|post|put|delete|patch))?|url)\s*[:(]\s*["` + "`" + `]([^"` + "`" + `]+)["` + "`" + `]`)
+
+// Crawl performs a breadth-first static crawl limited to the target origin
+// and emits katana-compatible JSONL. It mines HTML attributes, meta-refresh
+// targets, HTML comment paths and JavaScript string literals for route
+// candidates; executing JavaScript is out of scope and the managed katana
+// remains available for rendered crawling.
 func Crawl(ctx context.Context, target string, opts Options) (string, error) {
 	start := normalizeURL(target)
 	if start == "" {
@@ -45,7 +63,16 @@ func Crawl(ctx context.Context, target string, opts Options) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("parse crawl target: %w", err)
 	}
-	origin := parsed.Scheme + "://" + parsed.Host
+	// sameOrigin rejects prefix tricks (https://target.com.evil.com/): the
+	// link must parse to the identical scheme+host, not merely start with
+	// an origin string prefix.
+	sameOrigin := func(link string) bool {
+		parsedLink, err := url.Parse(link)
+		if err != nil {
+			return false
+		}
+		return parsedLink.Scheme == parsed.Scheme && parsedLink.Host == parsed.Host
+	}
 
 	client := opts.httpClient()
 	crawlCtx, cancel := context.WithTimeout(ctx, opts.timeout())
@@ -76,8 +103,14 @@ func Crawl(ctx context.Context, target string, opts Options) (string, error) {
 				sem <- struct{}{}
 				defer func() { <-sem }()
 
-				body, status, err := fetchForCrawl(crawlCtx, client, item.url)
+				body, status, contentType, err := fetchForCrawl(crawlCtx, client, item.url)
 				if err != nil {
+					return
+				}
+				if status >= 400 {
+					// katana semantics: only successfully fetched routes are
+					// recorded. 4xx/5xx bodies became ghost-route facts on
+					// the blackboard (404 pages parsed as surfaces).
 					return
 				}
 				record := katanaRecord{URL: item.url, Method: http.MethodGet, Depth: item.depth}
@@ -89,15 +122,43 @@ func Crawl(ctx context.Context, target string, opts Options) (string, error) {
 					return
 				}
 				records = append(records, record)
-				if !strings.Contains(strings.ToLower(body), "text/html") && !strings.Contains(body, "<html") && !strings.Contains(body, "<a ") {
+				lowerBody := strings.ToLower(body)
+				isHTML := strings.Contains(lowerBody, "text/html") || strings.Contains(body, "<html") || strings.Contains(body, "<a ")
+				isJS := isJSBody(contentType, item.url)
+				if !isHTML && !isJS {
 					return
 				}
 				for _, link := range extractLinks(body, item.url) {
-					if !strings.HasPrefix(link, origin) || seen[link] {
+					if !sameOrigin(link) || seen[link] {
 						continue
 					}
 					seen[link] = true
 					queue = append(queue, queued{url: link, depth: item.depth + 1})
+				}
+				if isHTML {
+					for _, link := range extractMetaRefreshLinks(body, item.url) {
+						if !sameOrigin(link) || seen[link] {
+							continue
+						}
+						seen[link] = true
+						queue = append(queue, queued{url: link, depth: item.depth + 1})
+					}
+					for _, link := range extractCommentPaths(body, item.url) {
+						if !sameOrigin(link) || seen[link] {
+							continue
+						}
+						seen[link] = true
+						queue = append(queue, queued{url: link, depth: item.depth + 1})
+					}
+				}
+				if isJS {
+					for _, link := range extractJSRoutes(body, item.url) {
+						if !sameOrigin(link) || seen[link] {
+							continue
+						}
+						seen[link] = true
+						queue = append(queue, queued{url: link, depth: item.depth + 1})
+					}
 				}
 			}(item)
 		}
@@ -117,19 +178,20 @@ func Crawl(ctx context.Context, target string, opts Options) (string, error) {
 	return strings.TrimRight(builder.String(), "\n"), nil
 }
 
-func fetchForCrawl(ctx context.Context, client *http.Client, target string) (string, int, error) {
+func fetchForCrawl(ctx context.Context, client *http.Client, target string) (string, int, string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
-		return "", 0, err
+		return "", 0, "", err
 	}
 	req.Header.Set("User-Agent", "ouroboros-native-katana/1")
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", 0, err
+		return "", 0, "", err
 	}
 	defer func() { _ = resp.Body.Close() }()
+	contentType := resp.Header.Get("Content-Type")
 	if resp.StatusCode >= 400 {
-		return "", resp.StatusCode, nil
+		return "", resp.StatusCode, contentType, nil
 	}
 	body := make([]byte, 0, 4096)
 	buffer := make([]byte, 4096)
@@ -142,7 +204,7 @@ func fetchForCrawl(ctx context.Context, client *http.Client, target string) (str
 			break
 		}
 	}
-	return string(body), resp.StatusCode, nil
+	return string(body), resp.StatusCode, contentType, nil
 }
 
 // extractLinks resolves href/src/action values against the page URL.
@@ -169,4 +231,105 @@ func extractLinks(body, pageURL string) []string {
 		links = append(links, resolved.String())
 	}
 	return links
+}
+
+// extractMetaRefreshLinks pulls redirect targets out of
+// <meta http-equiv="refresh" content="N; url=/next"> tags.
+func extractMetaRefreshLinks(body, pageURL string) []string {
+	base, err := url.Parse(pageURL)
+	if err != nil {
+		return nil
+	}
+	links := []string{}
+	for _, match := range metaRefreshPattern.FindAllStringSubmatch(body, -1) {
+		raw := strings.TrimSpace(match[1])
+		if raw == "" {
+			continue
+		}
+		reference, err := url.Parse(raw)
+		if err != nil {
+			continue
+		}
+		resolved := base.ResolveReference(reference)
+		if resolved.Scheme != "http" && resolved.Scheme != "https" {
+			continue
+		}
+		resolved.Fragment = ""
+		links = append(links, resolved.String())
+	}
+	return links
+}
+
+// extractCommentPaths mines path-like tokens (two or more /segments) out of
+// HTML comments; developers routinely leave staging routes behind.
+func extractCommentPaths(body, pageURL string) []string {
+	base, err := url.Parse(pageURL)
+	if err != nil {
+		return nil
+	}
+	links := []string{}
+	for _, block := range htmlCommentBlockPattern.FindAllStringSubmatch(body, -1) {
+		for _, raw := range htmlCommentPattern.FindAllString(block[1], -1) {
+			raw = strings.TrimSpace(raw)
+			if raw == "" {
+				continue
+			}
+			reference, err := url.Parse(raw)
+			if err != nil {
+				continue
+			}
+			resolved := base.ResolveReference(reference)
+			if resolved.Scheme != "http" && resolved.Scheme != "https" {
+				continue
+			}
+			resolved.Fragment = ""
+			links = append(links, resolved.String())
+		}
+	}
+	return links
+}
+
+// extractJSRoutes resolves string literals from fetch/axios/url= call sites
+// and quoted paths inside JavaScript bodies against the script URL.
+func extractJSRoutes(body, pageURL string) []string {
+	base, err := url.Parse(pageURL)
+	if err != nil {
+		return nil
+	}
+	links := []string{}
+	for _, match := range jsRoutePattern.FindAllStringSubmatch(body, -1) {
+		raw := strings.TrimSpace(match[1])
+		if raw == "" || strings.HasPrefix(raw, "//") || !strings.Contains(raw, "/") {
+			continue
+		}
+		if strings.HasPrefix(raw, "javascript:") || strings.HasPrefix(raw, "mailto:") || strings.HasPrefix(raw, "data:") {
+			continue
+		}
+		reference, err := url.Parse(raw)
+		if err != nil {
+			continue
+		}
+		resolved := base.ResolveReference(reference)
+		if resolved.Scheme != "http" && resolved.Scheme != "https" {
+			continue
+		}
+		resolved.Fragment = ""
+		links = append(links, resolved.String())
+	}
+	return links
+}
+
+// isJSBody reports whether a fetched payload should be mined for JavaScript
+// route strings: an explicit JS content type or a .js URL path.
+func isJSBody(contentType, pageURL string) bool {
+	lowered := strings.ToLower(contentType)
+	if strings.Contains(lowered, "application/javascript") || strings.Contains(lowered, "text/javascript") ||
+		strings.Contains(lowered, "application/x-javascript") {
+		return true
+	}
+	parsed, err := url.Parse(pageURL)
+	if err != nil {
+		return false
+	}
+	return strings.HasSuffix(strings.ToLower(parsed.Path), ".js")
 }

@@ -7,10 +7,10 @@ import (
 
 // LoadBalancer manages load distribution across workers.
 type LoadBalancer struct {
-	mu              sync.RWMutex
-	workerLoad      map[string]*WorkerLoad
+	mu               sync.RWMutex
+	workerLoad       map[string]*WorkerLoad
 	roleDistribution map[AgentRole]int
-	balancingPolicy BalancingPolicy
+	balancingPolicy  BalancingPolicy
 }
 
 // WorkerLoad tracks the load on a single worker.
@@ -214,11 +214,11 @@ func (lb *LoadBalancer) GetLoadStats() LoadStats {
 	defer lb.mu.RUnlock()
 
 	stats := LoadStats{
-		TotalWorkers:      len(lb.workerLoad),
-		Policy:            lb.balancingPolicy,
-		RoleDistribution:  make(map[AgentRole]int),
-		AverageLoad:       0.0,
-		MaxLoad:           0.0,
+		TotalWorkers:     len(lb.workerLoad),
+		Policy:           lb.balancingPolicy,
+		RoleDistribution: make(map[AgentRole]int),
+		AverageLoad:      0.0,
+		MaxLoad:          0.0,
 	}
 
 	// Copy role distribution

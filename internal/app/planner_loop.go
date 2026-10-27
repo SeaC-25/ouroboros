@@ -53,7 +53,16 @@ func runClosedLoopPlannerPreviewStage(ctx context.Context, root string, runID st
 	if err != nil {
 		return fmt.Errorf("build closed-loop planner preview snapshot: %w", err)
 	}
-	task := sisyphus.Engine{}.Step(snapshot.Blackboard)
+	// Merge the durable observation journal (cross-run evidence the AI chat
+	// layer persists): the reasoning task must see every unprocessed
+	// observation, not only ones recorded inside this run.
+	snapshot.Blackboard = mergeWorkspaceObservations(root, snapshot.Blackboard)
+	// Observation-driven stepping: unprocessed observations (raw evidence
+	// the model has not yet converted into concluded facts) take priority
+	// over hypothesis verification — the judgement authority stays with the
+	// model side. Falls back to the legacy intent loop only when no
+	// observation backlog exists.
+	task := sisyphus.Engine{}.StepFromObservations(snapshot.Blackboard)
 	compilePreview, err := createClosedLoopPlannerCompilePreview(root, task, *persistedEvents)
 	if err != nil {
 		return err
@@ -125,7 +134,42 @@ func runClosedLoopPlannerPreviewStage(ctx context.Context, root string, runID st
 		}
 	}
 	if options.EnableProviderGeneration {
-		if err := runClosedLoopPlannerProviderGenerationStage(ctx, root, runID, store, options, persistedEvents); err != nil {
+		// The reasoning task carries the unprocessed observation backlog:
+		// the model analyzes this exact evidence (not a generic summary);
+		// its conclusions close the loop when the resulting facts record
+		// the source-observation backlink.
+		obsContext := ""
+		if pending := sisyphus.UnprocessedObservations(snapshot.Blackboard); len(pending) > 0 {
+			// Caps mirror the chat-side context window: latest 5 entries,
+			// 800 runes each, and a total byte budget — the backlog must
+			// never grow the prompt without bound. Truncation is rune-safe
+			// (byte slicing would cut UTF-8 mid-character and could split
+			// the JSON payload mid-token). Each entry carries its ID so the
+			// model can cite it in a BLACKBOARD conclusion (back-link).
+			const maxEntries = 5
+			const maxRunesPerEntry = 800
+			const maxTotalBytes = 8 << 10
+			var builder strings.Builder
+			builder.WriteString("\n\n当前待分析原始观测（工具回传证据，未经任何判定；请逐一分析并给出结论，结论中将 obs-…/fact-… 观测ID写进 ACTION:BLACKBOARD 语句即可回链证据）：\n")
+			start := 0
+			if len(pending) > maxEntries {
+				start = len(pending) - maxEntries
+			}
+			for i, obs := range pending[start:] {
+				preview := []rune(obs.Payload)
+				if len(preview) > maxRunesPerEntry {
+					preview = preview[:maxRunesPerEntry]
+				}
+				entry := fmt.Sprintf("%d. id=%s [%s] target=%s\n%s\n", start+i+1, obs.ID, obs.Kind, obs.Target, string(preview))
+				if builder.Len()+len(entry) > maxTotalBytes {
+					builder.WriteString("（观测积压过大，已按预算截断；其余观测可在结论后再次运行查看）\n")
+					break
+				}
+				builder.WriteString(entry)
+			}
+			obsContext = builder.String()
+		}
+		if err := runClosedLoopPlannerProviderGenerationStage(ctx, root, runID, store, options, persistedEvents, obsContext); err != nil {
 			return err
 		}
 	}
@@ -133,13 +177,13 @@ func runClosedLoopPlannerPreviewStage(ctx context.Context, root string, runID st
 	return appendRunEvent(ctx, store, stageEvent(runID, closedLoopPlannerStageID, "Review replay state for the next closed-loop planner step", "completed"), options, persistedEvents)
 }
 
-func runClosedLoopPlannerProviderGenerationStage(ctx context.Context, root string, runID string, store *eventlog.SQLiteStore, options RunOptions, persistedEvents *[]eventlog.Event) error {
+func runClosedLoopPlannerProviderGenerationStage(ctx context.Context, root string, runID string, store *eventlog.SQLiteStore, options RunOptions, persistedEvents *[]eventlog.Event, observationContext string) error {
 	if err := appendRunEvent(ctx, store, stageEvent(runID, closedLoopPlannerGenerationStageID, "Generate closed-loop planner guidance with the configured provider", "started"), options, persistedEvents); err != nil {
 		return err
 	}
 	result, err := GenerateProviderMessage(ctx, root, ProviderGenerationRequest{
 		SystemPrompt:         options.ProviderGenerationSystemPrompt,
-		UserPrompt:           options.ProviderGenerationPrompt,
+		UserPrompt:           options.ProviderGenerationPrompt + observationContext,
 		MaxTokens:            options.ProviderGenerationMaxTokens,
 		RequiredCapabilities: options.ProviderGenerationRequiredCapabilities,
 		Stream:               options.ProviderGenerationStream,

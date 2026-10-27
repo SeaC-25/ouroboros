@@ -174,10 +174,16 @@ func CreatePlan(o Options) (Plan, error) {
 		}
 		installDir := filepath.Join(base, "Programs", "Ouroboros")
 		p.InstallDir = installDir
+		// Start-menu and desktop shortcuts via the bundled VBScript (no
+		// PowerShell execution-policy dependency); failure is tolerated like
+		// update-desktop-database on Linux.
+		shortcutScript := filepath.Join(o.GUIroot, "..", "internal", "desktop", "installer", "createShortcuts.vbs")
+		appExe := filepath.Join(installDir, "Ouroboros.exe")
 		p.Actions = []Action{
 			{Kind: ActionMkdirAll, Path: filepath.Dir(installDir), Mode: 0o755},
 			{Kind: ActionRemoveAll, Path: installDir},
 			{Kind: ActionCopyDir, Src: packageDir, Path: installDir},
+			{Kind: ActionRun, Command: "cscript", Args: []string{"//nologo", shortcutScript, appExe, installDir}},
 		}
 	case "darwin":
 		installDir := filepath.Join("/Applications", "Ouroboros")

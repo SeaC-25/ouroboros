@@ -9,11 +9,13 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/ouroboros/ouroboros/internal/app"
 	"github.com/ouroboros/ouroboros/internal/eventlog"
+	"github.com/ouroboros/ouroboros/internal/nativetools"
 )
 
 // ChatMessage 持久化的对话消息
@@ -121,7 +123,7 @@ func (s *Server) handleAIChatPost(w http.ResponseWriter, r *http.Request) {
 	s.appendAIConversation(userMsg)
 
 	// 构建系统提示，包含工作区上下文
-	systemPrompt := fmt.Sprintf(`你是 Ouroboros IDE 的 AI 安全操作员。你帮助用户理解工作区、修改文件、运行任务、调用工具、调度多智能体、使用黑板算法、读取结果、保存证据、评测 prompt、运行 harness、回放过程、查看报告、管理配置，并持续推进真实安全工作。
+	systemPrompt := fmt.Sprintf(`你是 Ouroboros IDE 的 AI 安全操作员。你的核心工作方式是**观测-推理循环**：对目标发起原始观测（HTTP 请求拿真实响应：状态/头/时延/表单/链接/基线差分），亲自分析证据、形成假设、再发起下一个观测验证——结论由你基于证据得出，工具不做任何判定。黑板仅作为跨会话的持久化笔记（记录你已经得出的结论），不是推理引擎。
 
 工作区摘要:
 %s
@@ -129,7 +131,8 @@ func (s *Server) handleAIChatPost(w http.ResponseWriter, r *http.Request) {
 
 你可以：
 - 回答用户关于工作区状态的问题
-- 执行命令：使用 ACTION:EXECUTE <命令> 格式
+- HTTP 原始观测：使用 ACTION:OBSERVE <url> [可选JSON spec] 格式——返回完整原始观测（status/headers/时延/body 摘要/表单/链接/JSON 键/基线差分），零判定，结论由你分析证据得出；spec 可指定 {"method":"POST","path":"/login","body":"...","baseline":true}
+- 执行命令：使用 ACTION:EXECUTE CONFIRMED: <命令> 格式（CONFIRMED: 前缀是操作员确认契约，缺前缀会被拒绝执行）
 - 读取文件：使用 ACTION:READ <文件路径> 格式
 - 写入文件：使用 ACTION:WRITE <文件路径> 格式，后跟文件内容
 - 列出文件：使用 ACTION:LIST <目录> 格式
@@ -139,7 +142,7 @@ func (s *Server) handleAIChatPost(w http.ResponseWriter, r *http.Request) {
 - 调用工具动作：使用 ACTION:TOOL <动作ID> <参数> 格式
 - 创建子目标：使用 ACTION:GOAL <标题> 格式
 - 标记子目标完成：使用 ACTION:GOAL-DONE <标题> 格式
-- 记录黑板发现：使用 ACTION:BLACKBOARD <发现内容> 格式
+- 记录结论笔记：使用 ACTION:BLACKBOARD <已验证的结论> 格式（持久化你的推理成果，不是推理本身）
 - 保存 prompt：使用 ACTION:PROMPT-SAVE <名称> <内容> 格式
 - 运行 harness：使用 ACTION:HARNESS <prompt名称> <输入> 格式
 - 启动多智能体调度：使用 ACTION:SWARM <目标> 格式，可带 ;角色:命令，例如 ACTION:SWARM 目标;Planner:echo plan;Operator:echo run
@@ -264,14 +267,23 @@ func (s *Server) buildWorkspaceSummary() string {
 		summary = append(summary, fmt.Sprintf("Agent 任务 (%d 个):\n%s", len(agentTasks), strings.Join(taskList, "\n")))
 	}
 
-	// 黑板事实
+	// 黑板事实（结论笔记）
 	blackboardFacts := s.loadBlackboardFacts()
 	if len(blackboardFacts) > 0 {
 		factList := make([]string, 0, min(len(blackboardFacts), 15))
 		for _, fact := range blackboardFacts {
 			factList = append(factList, fmt.Sprintf("  - [%s] %s (%s)", fact.Kind, fact.Statement, fact.Source))
 		}
-		summary = append(summary, fmt.Sprintf("黑板事实 (%d 个):\n%s", len(blackboardFacts), strings.Join(factList, "\n")))
+		summary = append(summary, fmt.Sprintf("黑板事实/结论笔记 (%d 个):\n%s", len(blackboardFacts), strings.Join(factList, "\n")))
+	}
+
+	// 历史原始观测：最近 5 条注入上下文，模型能回看自己观测过的证据
+	if observations := s.loadBlackboardObservations(); len(observations) > 0 {
+		obsList := make([]string, 0, min(len(observations), 5))
+		for _, obs := range observations[max(0, len(observations)-5):] {
+			obsList = append(obsList, fmt.Sprintf("  - [%s] %s (来源: %s, 摘要: %s)", obs.Kind, obs.Target, obs.Source, truncateForAI(obs.Payload, 120)))
+		}
+		summary = append(summary, fmt.Sprintf("历史原始观测 (共 %d 条，最近 %d 条):\n%s", len(observations), len(obsList), strings.Join(obsList, "\n")))
 	}
 
 	// 子目标
@@ -357,6 +369,17 @@ func (s *Server) appendAIConversation(msg ChatMessage) {
 	runtimeDir := filepath.Join(s.workspace, "runtime")
 	os.MkdirAll(runtimeDir, 0o755)
 
+	data, err := json.Marshal(msg)
+	if err != nil {
+		log.Printf("Failed to marshal AI message: %v", err)
+		return
+	}
+	// Single write (data+\n) under stateMu: the old two-call write could
+	// interleave with a concurrent append or TRUNC rewrite between the two
+	// syscalls, corrupting the journal into an unparseable line that
+	// loadAIConversation then silently drops.
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
 	path := filepath.Join(runtimeDir, "ai-conversation.jsonl")
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
@@ -364,14 +387,9 @@ func (s *Server) appendAIConversation(msg ChatMessage) {
 		return
 	}
 	defer file.Close()
-
-	data, err := json.Marshal(msg)
-	if err != nil {
-		log.Printf("Failed to marshal AI message: %v", err)
-		return
+	if _, err := file.Write(append(data, '\n')); err != nil {
+		log.Printf("Failed to append AI conversation: %v", err)
 	}
-	file.Write(data)
-	file.WriteString("\n")
 
 	s.appendAIReplayEvents(msg)
 }
@@ -453,6 +471,20 @@ func (s *Server) parseAndExecuteAIActions(text string) ([]string, []ChatActionRe
 		if strings.HasPrefix(line, "ACTION:EXECUTE ") {
 			cmd := strings.TrimPrefix(line, "ACTION:EXECUTE ")
 			cmd = strings.TrimSpace(cmd)
+			// Confirmation gate: model text drives a real shell. The model
+			// must echo CONFIRMED: before the command (a prompt-injected
+			// reply cannot guess this contract from a poisoned page), and
+			// the operator can disable the gate explicitly for headless
+			// workflows via OURO_AI_EXECUTE_CONFIRM=0.
+			confirmed := strings.HasPrefix(cmd, "CONFIRMED:")
+			if confirmed {
+				cmd = strings.TrimSpace(strings.TrimPrefix(cmd, "CONFIRMED:"))
+			}
+			gateEnabled := strings.TrimSpace(os.Getenv("OURO_AI_EXECUTE_CONFIRM")) != "0"
+			if cmd != "" && gateEnabled && !confirmed {
+				results = append(results, ChatActionResult{Kind: "execute", Summary: "执行被拒绝: 命令需要 CONFIRMED: 前缀确认（提示注入防护）。如需自动执行，请让模型重发 ACTION:EXECUTE CONFIRMED: <命令>，或设置 OURO_AI_EXECUTE_CONFIRM=0 关闭此门"})
+				continue
+			}
 			if cmd != "" {
 				execution, err := s.StartExecution(ExecutionCreateRequestDTO{
 					Command: "bash",
@@ -645,6 +677,47 @@ func (s *Server) parseAndExecuteAIActions(text string) ([]string, []ChatActionRe
 					}
 				}
 			}
+		} else if strings.HasPrefix(line, "ACTION:OBSERVE ") {
+			// Raw HTTP observation primitive: the model describes a request,
+			// the handler executes it and returns the full observation
+			// (status/headers/timing/forms/links/baseline diff) with no
+			// verdict — the model draws the conclusion.
+			observeSpec := strings.TrimPrefix(line, "ACTION:OBSERVE ")
+			parts := strings.SplitN(strings.TrimSpace(observeSpec), " ", 2)
+			if len(parts) >= 1 && strings.TrimSpace(parts[0]) != "" {
+				targetURL := strings.TrimSpace(parts[0])
+				// Scope gate: the observation primitive issues real HTTP
+				// requests; the target must be an authorized in-scope URL.
+				// Plan-node executions pass requireCommandScopeTarget — the
+				// chat action must not be a silent bypass of that gate.
+				if err := s.authorizeObserveTarget(targetURL); err != nil {
+					results = append(results, ChatActionResult{Kind: "observe", Summary: "观测被拒绝: " + err.Error()})
+					continue
+				}
+				specJSON := ""
+				if len(parts) == 2 {
+					specJSON = strings.TrimSpace(parts[1])
+				}
+				out, err := nativetools.ObserveHTTP(context.Background(), targetURL, nativetools.ObserveSpec{}, nativetools.Options{SpecJSON: specJSON, Timeout: 30 * time.Second})
+				if err != nil {
+					results = append(results, ChatActionResult{Kind: "observe", Summary: "观测失败: " + err.Error()})
+				} else {
+					// 观测落盘：原始观测进入 observations.jsonl，供后续推理回看；
+					// 判定仍由模型侧完成，这里不写任何 fact。
+					obs, obsErr := s.appendBlackboardObservation("http_observe", targetURL, out, "ai-chat")
+					if obsErr != nil {
+						log.Printf("Failed to persist ACTION:OBSERVE observation: %v", obsErr)
+					}
+					// Report the observation ID: conclusions citing it
+					// (ACTION:BLACKBOARD ... obs-123...) back-link automatically,
+					// draining the reasoning backlog for this evidence.
+					obsRef := ""
+					if obsErr == nil {
+						obsRef = fmt.Sprintf(" [观测ID %s — 在 ACTION:BLACKBOARD 结论中引用此ID即可回链证据]", obs.ID)
+					}
+					results = append(results, ChatActionResult{Kind: "observe", Summary: "HTTP 观测完成（原始观测，无判定）", Path: targetURL, Output: truncateForAI(out, 4000) + obsRef})
+				}
+			}
 		} else if strings.HasPrefix(line, "ACTION:BLACKBOARD ") {
 			statement := strings.TrimPrefix(line, "ACTION:BLACKBOARD ")
 			statement = strings.TrimSpace(statement)
@@ -742,6 +815,7 @@ func (s *Server) parseAndExecuteAIActions(text string) ([]string, []ChatActionRe
 						PromptContent  string   `json:"promptContent,omitempty"`
 						InputText      string   `json:"inputText,omitempty"`
 						HarnessCaseId  string   `json:"harnessCaseId,omitempty"`
+						Target         string   `json:"target,omitempty"`
 						Roles          []string `json:"roles,omitempty"`
 						Commands       []string `json:"commands,omitempty"`
 						Agents         []string `json:"agents,omitempty"`
@@ -909,12 +983,98 @@ type BlackboardFact struct {
 	Status        string   `json:"status,omitempty"`
 	Priority      string   `json:"priority,omitempty"`
 	DependencyIDs []string `json:"dependencyIds,omitempty"`
-	CreatedAt     int64    `json:"createdAt"`
-	UpdatedAt     int64    `json:"updatedAt,omitempty"`
+	// SourceObservations back-links the conclusion to the raw observations
+	// it was derived from (the evidence chain of the observation-reasoning
+	// loop; consumed by sisyphus.ProcessedObservationIDs to drain backlog).
+	SourceObservations []string `json:"source_observations,omitempty"`
+	CreatedAt          int64    `json:"createdAt"`
+	UpdatedAt          int64    `json:"updatedAt,omitempty"`
 }
 
 func (s *Server) blackboardPath() string {
 	return filepath.Join(s.workspace, "runtime", "blackboard.jsonl")
+}
+
+// BlackboardObservation 是一条原始观测（判定前证据）：工具回传的原始
+// 测量先落这里，模型推理后得出的结论再升级为 BlackboardFact。
+type BlackboardObservation struct {
+	ID        string `json:"id"`
+	Kind      string `json:"kind"`
+	Target    string `json:"target"`
+	Payload   string `json:"payload,omitempty"`
+	Source    string `json:"source,omitempty"`
+	CreatedAt int64  `json:"createdAt"`
+}
+
+func (s *Server) observationsPath() string {
+	return filepath.Join(s.workspace, "runtime", "observations.jsonl")
+}
+
+func (s *Server) loadBlackboardObservations() []BlackboardObservation {
+	path := s.observationsPath()
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return []BlackboardObservation{}
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return []BlackboardObservation{}
+	}
+	defer file.Close()
+	var observations []BlackboardObservation
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		var observation BlackboardObservation
+		if json.Unmarshal(scanner.Bytes(), &observation) == nil {
+			observations = append(observations, observation)
+		}
+	}
+	if observations == nil {
+		return []BlackboardObservation{}
+	}
+	return observations
+}
+
+// appendBlackboardObservation 持久化一条原始观测（无判定），返回存储后的记录。
+func (s *Server) appendBlackboardObservation(kind string, target string, payload string, source string) (BlackboardObservation, error) {
+	kind = strings.TrimSpace(kind)
+	target = strings.TrimSpace(target)
+	if kind == "" {
+		return BlackboardObservation{}, fmt.Errorf("observation kind is required")
+	}
+	if target == "" {
+		return BlackboardObservation{}, fmt.Errorf("observation target is required")
+	}
+	// stateMu also guards the obs-<UnixNano> ID mint: two concurrent
+	// observes on coarse Windows timers can collide within one nanosecond
+	// tick, and the journal dedup would then silently drop one record.
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	runtimeDir := filepath.Join(s.workspace, "runtime")
+	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
+		return BlackboardObservation{}, err
+	}
+	observation := BlackboardObservation{
+		ID:        fmt.Sprintf("obs-%d", time.Now().UnixNano()),
+		Kind:      kind,
+		Target:    target,
+		Payload:   payload,
+		Source:    strings.TrimSpace(source),
+		CreatedAt: time.Now().Unix(),
+	}
+	if observation.Source == "" {
+		observation.Source = "ai-agent"
+	}
+	file, err := os.OpenFile(s.observationsPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return BlackboardObservation{}, err
+	}
+	defer file.Close()
+	data, err := json.Marshal(observation)
+	if err != nil {
+		return BlackboardObservation{}, err
+	}
+	_, err = file.Write(append(data, '\n'))
+	return observation, err
 }
 
 func (s *Server) loadBlackboardFacts() []BlackboardFact {
@@ -948,6 +1108,10 @@ func (s *Server) appendBlackboardFact(kind string, statement string) (Blackboard
 		Statement: statement,
 		Source:    "ai-agent",
 		CreatedAt: time.Now().Unix(),
+		// Evidence back-link: every obs-<id> mentioned in the statement
+		// becomes a source observation, so concluding over evidence drains
+		// the observation backlog (sisyphus.ProcessedObservationIDs).
+		SourceObservations: observationIDsFromText(statement),
 	}
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
@@ -960,6 +1124,28 @@ func (s *Server) appendBlackboardFact(kind string, statement string) (Blackboard
 	}
 	_, err = file.Write(append(data, '\n'))
 	return fact, err
+}
+
+// observationIDsFromText extracts observation references (obs-<digits>)
+// from a conclusion statement. The OBSERVE action reports each
+// observation ID to the model, so conclusions naturally cite the
+// evidence they derive from.
+var observationIDPattern = regexp.MustCompile(`\bobs-[0-9]{6,}\b`)
+
+func observationIDsFromText(text string) []string {
+	matches := observationIDPattern.FindAllString(text, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	seen := map[string]bool{}
+	ids := make([]string, 0, len(matches))
+	for _, match := range matches {
+		if !seen[match] {
+			seen[match] = true
+			ids = append(ids, match)
+		}
+	}
+	return ids
 }
 
 type HarnessResult struct {
@@ -1186,6 +1372,9 @@ func (s *Server) completeAgentTask(match string) (AgentTaskRecord, error) {
 }
 
 func (s *Server) writeAgentTasks(tasks []AgentTaskRecord) error {
+	// stateMu: serialize against concurrent task mutations (see Server).
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
 	path := s.agentTasksPath()
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
@@ -1570,6 +1759,13 @@ func truncateForAI(value string, max int) string {
 }
 func min(a, b int) int {
 	if a < b {
+		return a
+	}
+	return b
+}
+
+func max(a, b int) int {
+	if a > b {
 		return a
 	}
 	return b

@@ -93,7 +93,8 @@ func ProjectGUIBootstrap(ctx context.Context, workspace string, store *eventlog.
 }
 
 func projectBootstrapBlackboard(workspace string) map[string]any {
-	facts := (&Server{workspace: workspace}).loadBlackboardFacts()
+	server := &Server{workspace: workspace}
+	facts := server.loadBlackboardFacts()
 	items := make([]map[string]any, 0, len(facts))
 	for _, fact := range facts {
 		items = append(items, map[string]any{
@@ -102,7 +103,13 @@ func projectBootstrapBlackboard(workspace string) map[string]any {
 			"createdAt": fact.CreatedAt, "updatedAt": fact.CreatedAt,
 		})
 	}
-	return map[string]any{"path": filepath.ToSlash(filepath.Join(workspace, "runtime", "blackboard.jsonl")), "items": items}
+	// 观测维度：原始观测与结论笔记分开投影——观测是判定前证据。
+	observations := server.loadBlackboardObservations()
+	observationItems := make([]map[string]any, 0, len(observations))
+	for _, observation := range observations {
+		observationItems = append(observationItems, blackboardObservationDTO(observation))
+	}
+	return map[string]any{"path": filepath.ToSlash(filepath.Join(workspace, "runtime", "blackboard.jsonl")), "items": items, "observations": observationItems}
 }
 
 func projectBootstrapAgentState(workspace string) map[string]any {
@@ -330,7 +337,48 @@ func resolveWorkspaceFile(workspace string, relativePath string) (string, string
 	if rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || rel == ".." {
 		return "", "", fmt.Errorf("workspace file path must stay under workspace")
 	}
-	return absPath, rel, nil
+	// Symlink escape: lexical checks stop ".." but not a link inside the
+	// workspace pointing at an outside target (ReadFile/WriteFile/RemoveAll
+	// follow links). Resolve the real path and re-verify containment. For a
+	// not-yet-existing file (create path) resolve the deepest existing
+	// ancestor — the parent chain is what a symlink attack would poison.
+	resolved := absPath
+	if _, statErr := os.Lstat(absPath); statErr == nil {
+		resolved, err = filepath.EvalSymlinks(absPath)
+		if err != nil {
+			return "", "", fmt.Errorf("workspace file path cannot be resolved: %w", err)
+		}
+	} else {
+		// Create path: walk up to the deepest existing ancestor and resolve
+		// it, then re-append the missing tail. Missing intermediate dirs are
+		// created later by the caller (MkdirAll) — what matters for the
+		// symlink guard is that every existing hop is verified.
+		existing := filepath.Dir(absPath)
+		for {
+			if _, statErr := os.Lstat(existing); statErr == nil {
+				break
+			}
+			parent := filepath.Dir(existing)
+			if parent == existing {
+				break
+			}
+			existing = parent
+		}
+
+		resolvedExisting, evalErr := filepath.EvalSymlinks(existing)
+		if evalErr != nil {
+			return "", "", fmt.Errorf("workspace file directory cannot be resolved: %w", evalErr)
+		}
+		resolved = filepath.Join(resolvedExisting, strings.TrimPrefix(absPath, existing))
+	}
+	resolvedRel, err := filepath.Rel(root, resolved)
+	if err != nil {
+		return "", "", err
+	}
+	if resolvedRel == "." || strings.HasPrefix(resolvedRel, ".."+string(filepath.Separator)) || resolvedRel == ".." {
+		return "", "", fmt.Errorf("workspace file path must stay under workspace")
+	}
+	return resolved, resolvedRel, nil
 }
 
 func ProjectWorkspace(workspace string) WorkspaceDTO {
@@ -438,6 +486,7 @@ func ProjectReplayEvents(ctx context.Context, store *eventlog.SQLiteStore) ([]Re
 				Lane:        string(eventlog.ReplayLaneForEventType(event.Type)),
 				CreatedAt:   event.CreatedAt.Unix(),
 				Detail:      replayEventDetail(event, payload),
+				PayloadJSON: string(event.Payload),
 				NodeID:      replayEventNodeID(event, payload),
 				ExecutionID: replayEventExecutionID(event, payload),
 				FilePath:    firstNonEmpty(stringField(payload, "path"), stringField(payload, "log_path")),
@@ -1202,16 +1251,6 @@ func normalizeSeverityString(severity string) string {
 	default:
 		return ""
 	}
-}
-
-func markdownTitle(content string) string {
-	for _, line := range strings.Split(content, "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "#") {
-			return strings.TrimSpace(strings.TrimLeft(line, "#"))
-		}
-	}
-	return ""
 }
 
 func mapField(payload map[string]any, key string) map[string]any {

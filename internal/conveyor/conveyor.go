@@ -8,31 +8,32 @@
 package conveyor
 
 import "strings"
+
 // Capability is a marker an entity carries (KaliMCP node semantics mapped to
 // flat strings; hypergraph-style N-to-1 combos are expressed as multi-capability
 // requires lists).
 type Capability string
 
 const (
-	CapWebEndpoint  Capability = "web_endpoint"  // reachable URL/host surface
-	CapHost         Capability = "host"          // network host with ports
-	CapDomain       Capability = "domain"        // DNS-resolvable scope item
-	CapAuthSession  Capability = "auth_session"  // live credentials mounted
+	CapWebEndpoint   Capability = "web_endpoint"  // reachable URL/host surface
+	CapHost          Capability = "host"          // network host with ports
+	CapDomain        Capability = "domain"        // DNS-resolvable scope item
+	CapAuthSession   Capability = "auth_session"  // live credentials mounted
 	CapFingerprinted Capability = "fingerprinted" // tech stack known
-	CapWAFBlocked   Capability = "waf_blocked"   // target countermeasure hit
-	CapTestedAuth   Capability = "tested_auth"   // auth attack already tried
-	CapSourceCode   Capability = "source_code"   // static artifact available
-	CapHistoryRoute Capability = "history_route" // archived route discovered
+	CapWAFBlocked    Capability = "waf_blocked"   // target countermeasure hit
+	CapTestedAuth    Capability = "tested_auth"   // auth attack already tried
+	CapSourceCode    Capability = "source_code"   // static artifact available
+	CapHistoryRoute  Capability = "history_route" // archived route discovered
 )
 
 // Phase is the KaliMCP phase vocabulary.
 type Phase string
 
 const (
-	PhaseRecon      Phase = "RECON"
+	PhaseRecon       Phase = "RECON"
 	PhaseFingerprint Phase = "FINGERPRINT"
-	PhaseVerify     Phase = "VERIFY"
-	PhaseExpand     Phase = "EXPAND"
+	PhaseVerify      Phase = "VERIFY"
+	PhaseExpand      Phase = "EXPAND"
 )
 
 // ActionSpec is one semantic action (port of KaliMCP graph_actions.ActionSpec).

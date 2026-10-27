@@ -47,16 +47,20 @@ CREATE INDEX IF NOT EXISTS idx_leases_status_heartbeat ON execution_leases(statu
 type LeaseStatus string
 
 const (
-	LeaseClaimed        LeaseStatus = "CLAIMED"
-	LeaseRunning        LeaseStatus = "RUNNING"
-	LeaseArtifactSaved  LeaseStatus = "ARTIFACT_SAVED"
-	LeaseCommitted      LeaseStatus = "COMMITTED"
-	LeaseFailed         LeaseStatus = "FAILED"
-	LeaseAborted        LeaseStatus = "ABORTED"
+	LeaseClaimed       LeaseStatus = "CLAIMED"
+	LeaseRunning       LeaseStatus = "RUNNING"
+	LeaseArtifactSaved LeaseStatus = "ARTIFACT_SAVED"
+	LeaseCommitted     LeaseStatus = "COMMITTED"
+	LeaseFailed        LeaseStatus = "FAILED"
+	LeaseAborted       LeaseStatus = "ABORTED"
 )
 
 // ErrDuplicateClaim means another worker already owns this idempotency key.
 var ErrDuplicateClaim = errors.New("execution lease: duplicate claim")
+
+// ErrLeaseRevived means the lease was refreshed (heartbeat) or re-claimed by
+// a live worker between scan and flip; recovery must skip it.
+var ErrLeaseRevived = errors.New("execution lease: revived since scan")
 
 // ErrPoisonPill means this tool×entity combination crashed twice and is
 // quarantined; the caller must pick an alternative tool.
@@ -74,14 +78,14 @@ func IdempotencyKey(target, tool, normalizedArgs string) string {
 
 // ExecutionLease is one row of the ledger.
 type ExecutionLease struct {
-	Key            string
-	EntityID       string
-	ToolName       string
-	Status         LeaseStatus
-	WorkerID       string
-	HeartbeatAt    int64 // unix milliseconds
-	TimeoutMS      int64
-	AttemptCount   int
+	Key             string
+	EntityID        string
+	ToolName        string
+	Status          LeaseStatus
+	WorkerID        string
+	HeartbeatAt     int64 // unix milliseconds
+	TimeoutMS       int64
+	AttemptCount    int
 	RawArtifactPath string
 }
 
@@ -122,15 +126,26 @@ func (l *LeaseStore) Claim(ctx context.Context, lease ExecutionLease) error {
 			status == string(LeaseArtifactSaved) || status == string(LeaseCommitted) {
 			return ErrDuplicateClaim
 		}
-		// FAILED/ABORTED under threshold → retry by replacing the row.
-		_, err = l.db.ExecContext(ctx, `
+		// FAILED/ABORTED under threshold → retry by replacing the row. The
+		// UPDATE re-checks status inside its WHERE so two workers retrying
+		// the same key concurrently cannot both flip it to CLAIMED (TOCTOU);
+		// exactly one must observe RowsAffected==1.
+		res, err := l.db.ExecContext(ctx, `
 			UPDATE execution_leases
 			SET status=?, worker_id=?, heartbeat_at=?, timeout_ms=?, attempt_count=attempt_count+1, raw_artifact_path=NULL, created_at=?
-			WHERE idempotency_key=?`,
+			WHERE idempotency_key=? AND status IN (?, ?)`,
 			string(LeaseClaimed), lease.WorkerID, now, lease.TimeoutMS,
-			time.Now().UTC().Format(time.RFC3339), lease.Key)
+			time.Now().UTC().Format(time.RFC3339), lease.Key,
+			string(LeaseFailed), string(LeaseAborted))
 		if err != nil {
 			return fmt.Errorf("lease claim retry: %w", err)
+		}
+		if n, err := res.RowsAffected(); err != nil {
+			return fmt.Errorf("lease claim retry: rows affected: %w", err)
+		} else if n == 0 {
+			// Another worker raced us past the lookup: the key is no longer
+			// FAILED/ABORTED, so it is owned again.
+			return ErrDuplicateClaim
 		}
 		return nil
 	}
@@ -177,13 +192,26 @@ func (l *LeaseStore) Transition(ctx context.Context, key string, next LeaseStatu
 	return nil
 }
 
-// Heartbeat refreshes the RUNNING lease TTL.
-func (l *LeaseStore) Heartbeat(ctx context.Context, key string) error {
-	_, err := l.db.ExecContext(ctx,
-		`UPDATE execution_leases SET heartbeat_at=? WHERE idempotency_key=? AND status=?`,
-		time.Now().UnixMilli(), key, string(LeaseRunning))
+// TransitionIfStale moves a lease to the next phase only while its
+// heartbeat still equals staleBeforeMS. It exists for orphan recovery:
+// between the expired-heartbeat scan and the status flip a live worker may
+// heartbeat (transition also updates heartbeat_at), and the unconditional
+// Transition would then kill a live run. RowsAffected==0 means someone else
+// refreshed or re-claimed the row — the caller must skip that lease.
+func (l *LeaseStore) TransitionIfStale(ctx context.Context, key string, next LeaseStatus, staleBeforeMS int64) error {
+	res, err := l.db.ExecContext(ctx, `
+		UPDATE execution_leases
+		SET status=?, heartbeat_at=?
+		WHERE idempotency_key=? AND status IN (?, ?) AND heartbeat_at=?`,
+		string(next), time.Now().UnixMilli(), key,
+		string(LeaseClaimed), string(LeaseRunning), staleBeforeMS)
 	if err != nil {
-		return fmt.Errorf("lease heartbeat: %w", err)
+		return fmt.Errorf("lease transition-if-stale to %s: %w", next, err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("lease transition-if-stale to %s: rows affected: %w", next, err)
+	} else if n == 0 {
+		return ErrLeaseRevived
 	}
 	return nil
 }
@@ -198,11 +226,15 @@ type OrphanLease struct {
 // them to FAILED. Keys at/above the poison threshold are marked ABORTED and
 // returned separately (caller must switch to an alternative tool).
 func (l *LeaseStore) RecoverOrphans(ctx context.Context, nowMS int64) (requeue []OrphanLease, quarantined []OrphanLease, err error) {
+	// CLAIMED counts too: a worker crashing between Claim and the RUNNING
+	// transition left the row CLAIMED forever (nothing else requeues it —
+	// "crashed resumes deterministically" promised by the header). Treat
+	// heartbeat-stale rows of either state as orphans.
 	rows, err := l.db.QueryContext(ctx, `
 		SELECT idempotency_key, entity_id, tool_name, worker_id, heartbeat_at, timeout_ms, attempt_count, raw_artifact_path
 		FROM execution_leases
-		WHERE status = ? AND (? - heartbeat_at) > timeout_ms`,
-		string(LeaseRunning), nowMS)
+		WHERE status IN (?, ?) AND (? - heartbeat_at) > timeout_ms`,
+		string(LeaseClaimed), string(LeaseRunning), nowMS)
 	if err != nil {
 		return nil, nil, fmt.Errorf("lease orphan scan: %w", err)
 	}
@@ -226,14 +258,23 @@ func (l *LeaseStore) RecoverOrphans(ctx context.Context, nowMS int64) (requeue [
 		return nil, nil, fmt.Errorf("lease orphan iterate: %w", err)
 	}
 
-	// Flip their statuses.
+	// Flip their statuses. TransitionIfStale re-checks heartbeat_at inside
+	// the UPDATE so a live worker that heartbeats (or re-claims) between the
+	// scan and the flip is not killed — the row no longer matches and the
+	// lease is skipped.
 	for _, o := range requeue {
-		if err := l.Transition(ctx, o.Key, LeaseFailed, ""); err != nil {
+		if err := l.TransitionIfStale(ctx, o.Key, LeaseFailed, o.HeartbeatAt); err != nil {
+			if errors.Is(err, ErrLeaseRevived) {
+				continue
+			}
 			return requeue, quarantined, err
 		}
 	}
 	for _, o := range quarantined {
-		if err := l.Transition(ctx, o.Key, LeaseAborted, ""); err != nil {
+		if err := l.TransitionIfStale(ctx, o.Key, LeaseAborted, o.HeartbeatAt); err != nil {
+			if errors.Is(err, ErrLeaseRevived) {
+				continue
+			}
 			return requeue, quarantined, err
 		}
 	}

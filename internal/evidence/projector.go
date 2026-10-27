@@ -20,6 +20,17 @@ func Project(state blackboard.ProjectState) Graph {
 		})
 	}
 
+	// Observations: raw pre-interpretation evidence becomes Artifact nodes so
+	// the graph shows what was measured before any conclusion was drawn.
+	for _, observation := range state.Observations {
+		graph.addNode(Node{
+			ID:         observation.ID,
+			Type:       NodeArtifact,
+			Label:      observation.Target,
+			SourceKind: observation.Kind,
+		})
+	}
+
 	for _, intent := range state.Intents {
 		graph.addNode(Node{
 			ID:         intent.ID,

@@ -107,11 +107,11 @@ func (s *StrategySelector) ScoreIntent(intent blackboard.Intent, state blackboar
 // AnalyzeProgress assesses overall project progress based on state.
 func (s *StrategySelector) AnalyzeProgress(state blackboard.ProjectState) ProgressMetrics {
 	metrics := ProgressMetrics{
-		TotalFacts:       len(state.Facts),
-		TotalIntents:     len(state.Intents),
-		OpenIntents:      0,
-		ClaimedIntents:   0,
-		ConcludedIntents: 0,
+		TotalFacts:        len(state.Facts),
+		TotalIntents:      len(state.Intents),
+		OpenIntents:       0,
+		ClaimedIntents:    0,
+		ConcludedIntents:  0,
 		AvgFactConfidence: 0.0,
 	}
 

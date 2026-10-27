@@ -10,6 +10,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/ouroboros/ouroboros/internal/desktop/buildmain"
 )
 
 // RunWithRunner executes the dev-desktop orchestration against a Runner so
@@ -36,7 +38,9 @@ func RunWithRunner(guiRoot string, opts Options, runner Runner) error {
 	if err != nil {
 		return err
 	}
-	defer func() { _ = os.RemoveAll(strings.TrimSuffix(viteDriverPath, string(os.PathSeparator)+"vite-driver.mjs")) }()
+	defer func() {
+		_ = os.RemoveAll(strings.TrimSuffix(viteDriverPath, string(os.PathSeparator)+"vite-driver.mjs"))
+	}()
 
 	shutdown := make(chan os.Signal, 1)
 	sigCh := make(chan os.Signal, 2)
@@ -51,19 +55,11 @@ func RunWithRunner(guiRoot string, opts Options, runner Runner) error {
 
 	ctx := context.Background()
 
-	// Step 1: build desktop main bundle.
-	build := runner.Command(ctx, node, viteBuildMainArgs(guiRoot)...)
-	attachInherit(build)
-	if err := build.Start(); err != nil {
+	// Step 1: build desktop main bundle (in-process; the historical
+	// node scripts/build-desktop-main.mjs now lives in internal/desktop/
+	// buildmain).
+	if err := buildmain.Build(guiRoot, buildmain.Options{}, os.Stdout); err != nil {
 		return &ChildError{Label: "Desktop main build", Err: err, Code: -1}
-	}
-	code, err := childResultOrShutdown(build, sigCh)
-	if sig := requestedSignal(shutdown); sig != nil {
-		_ = build.Kill(grace, forced)
-		return &SignalExitError{Signal: signalName(sig)}
-	}
-	if err := assertSuccessfulChild(code, err, "Desktop main build"); err != nil {
-		return err
 	}
 
 	// Step 2: start the vite dev-server driver, wait for the URL marker.
@@ -104,7 +100,7 @@ func RunWithRunner(guiRoot string, opts Options, runner Runner) error {
 		_ = vite.Kill(grace, forced)
 		return &ChildError{Label: "Electron development runtime", Err: err, Code: -1}
 	}
-	code, err = childResultOrShutdown(electron, sigCh)
+	code, err := childResultOrShutdown(electron, sigCh)
 	if sig := requestedSignal(shutdown); sig != nil {
 		_ = electron.Kill(grace, forced)
 		_ = vite.Kill(grace, forced)
@@ -202,11 +198,6 @@ func awaitDevServerURL(out io.Reader, sigCh chan os.Signal, shutdown chan os.Sig
 			return "", nil, &EnvError{What: "read vite dev server output", Err: err}
 		}
 	}
-}
-
-// viteBuildMainArgs mirrors spawn(process.execPath, [scripts/build-desktop-main.mjs]).
-func viteBuildMainArgs(guiRoot string) []string {
-	return []string{guiRoot + string(os.PathSeparator) + "scripts" + string(os.PathSeparator) + "build-desktop-main.mjs"}
 }
 
 // guiMainEntryPath is the Electron entry the mjs passes to the electron

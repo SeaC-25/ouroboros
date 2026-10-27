@@ -106,6 +106,119 @@ var staticCodeRules = []staticCodeRule{
 		CWE:      "CWE-295",
 		Pattern:  regexp.MustCompile(`(?i)verify\s*=\s*False|InsecureSkipVerify\s*:\s*true`),
 	},
+	// Command injection: OS shell entry points reached with runtime-built input.
+	{
+		ID:       "command-injection-exec",
+		Severity: "ERROR",
+		Message:  "OS command constructed from runtime input via exec",
+		CWE:      "CWE-78",
+		Pattern:  regexp.MustCompile(`(?:os/exec\.[A-Za-z]|exec\.Command\s*\(|child_process\.exec\s*\(|Runtime\.getRuntime\(\)\.exec\s*\(|subprocess\.(?:call|run|Popen)\s*\([^)]*shell\s*=\s*True)`),
+	},
+	{
+		ID:       "command-injection-shell-true",
+		Severity: "ERROR",
+		Message:  "Subprocess launched with shell=True on interpolated input",
+		CWE:      "CWE-78",
+		Pattern:  regexp.MustCompile(`subprocess\.(?:call|run|Popen|check_output)\s*\(\s*f?["'][^"']*(?:\{|\$\{|%\s*\w)`),
+	},
+	// XXE: XML parsers with external entity processing left enabled.
+	{
+		ID:       "xxe-document-builder",
+		Severity: "ERROR",
+		Message:  "DocumentBuilderFactory without external entity disabling",
+		CWE:      "CWE-611",
+		Pattern:  regexp.MustCompile(`DocumentBuilderFactory\.newInstance\s*\(\s*\)`),
+	},
+	{
+		ID:       "xxe-libxml-parser",
+		Severity: "ERROR",
+		Message:  "XML parser instantiated without external entity protections",
+		CWE:      "CWE-611",
+		Pattern:  regexp.MustCompile(`(?:libxml2|etree\.)\s*(?:parseString|fromstring|parse|XMLParser)\s*\(`),
+	},
+	// SSRF: HTTP fetchers called with caller-controlled URLs.
+	{
+		ID:       "ssrf-user-url-fetch",
+		Severity: "ERROR",
+		Message:  "HTTP request built from unvalidated user URL",
+		CWE:      "CWE-918",
+		Pattern:  regexp.MustCompile(`(?:requests\.(?:get|post|put|delete|head|request)|urlopen|urllib\.request\.urlopen|http\.Get)\s*\(\s*(?:url|target|user[-_]?url|input|param|request\.(?:GET|args))`),
+	},
+	// Deserialization of untrusted data.
+	{
+		ID:       "unsafe-deserialization-pickle",
+		Severity: "ERROR",
+		Message:  "Pickle deserialization of untrusted data",
+		CWE:      "CWE-502",
+		Pattern:  regexp.MustCompile(`pickle\.loads?\s*\(|cPickle\.loads?\s*\(`),
+	},
+	{
+		ID:       "unsafe-deserialization-java",
+		Severity: "ERROR",
+		Message:  "Native Java deserialization of untrusted stream",
+		CWE:      "CWE-502",
+		Pattern:  regexp.MustCompile(`new\s+ObjectInputStream\s*\(`),
+	},
+	{
+		ID:       "unsafe-yaml-load",
+		Severity: "ERROR",
+		Message:  "YAML load without explicit safe loader",
+		CWE:      "CWE-502",
+		Pattern:  regexp.MustCompile(`yaml\.load\s*\(`),
+	},
+	// User-controlled path resolution before file access.
+	{
+		ID:       "path-traversal-user-input",
+		Severity: "WARNING",
+		Message:  "File access on user-controlled path",
+		CWE:      "CWE-22",
+		Pattern:  regexp.MustCompile(`(?:open\s*\(\s*(?:request\.|user|input|params)|new\s+(?:File|FileReader|FileInputStream)\s*\(\s*(?:request\.|user|input|params))`),
+	},
+	{
+		ID:       "local-file-include",
+		Severity: "ERROR",
+		Message:  "Dynamic include of user-controlled path",
+		CWE:      "CWE-98",
+		Pattern:  regexp.MustCompile(`(?:include|require)(?:_once)?\s*\(\s*\$?[_]?(?:GET|POST|REQUEST|SERVER)?\[?\s*['"]?\$?(?:page|file|path|tpl|template|module|action|view|include)`),
+	},
+	// Hardcoded network endpoints and debug gates.
+	{
+		ID:       "hardcoded-internal-ip",
+		Severity: "WARNING",
+		Message:  "Hardcoded internal network address",
+		CWE:      "CWE-798",
+		Pattern:  regexp.MustCompile(`["'](?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|127\.0\.0\.1|169\.254\.\d{1,3}\.\d{1,3})["']`),
+	},
+	{
+		ID:       "debug-mode-enabled",
+		Severity: "WARNING",
+		Message:  "Debug mode enabled in shipped configuration",
+		CWE:      "CWE-489",
+		Pattern:  regexp.MustCompile(`(?i)DEBUG\s*=\s*True\b|app\.run\s*\([^)]*debug\s*=\s*True|debug\s*[:=]\s*true`),
+	},
+	{
+		ID:       "django-hardcoded-secret-key",
+		Severity: "ERROR",
+		Message:  "Hardcoded Django SECRET_KEY",
+		CWE:      "CWE-798",
+		Pattern:  regexp.MustCompile(`SECRET_KEY\s*=\s*["'][^"']{8,}["']`),
+	},
+	// JWT misuse.
+	{
+		ID:       "jwt-none-algorithm",
+		Severity: "ERROR",
+		Message:  "JWT accepted with none algorithm or unsigned",
+		CWE:      "CWE-347",
+		Pattern:  regexp.MustCompile(`(?i)algorithms?\s*=\s*\[\s*['"](?:none|None|NO[Ss]IG|n2one)['"]|jwt\.decode\s*\([^)]*verify\s*=\s*False`),
+	},
+	// Permissive cross-origin policy in code.
+	{
+		ID:       "cors-wildcard",
+		Severity: "WARNING",
+		Message:  "CORS wildcard origin in code",
+		CWE:      "CWE-942",
+		Pattern:  regexp.MustCompile(`(?i)Access-Control-Allow-Origin["'\s:=]+\*`),
+	},
 }
 
 // sarifLog is the SARIF 2.1.0 subset the semgrep parser consumes

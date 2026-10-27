@@ -58,6 +58,29 @@ var builtInSecretRules = []secretRule{
 	{id: "openai-api-key", pattern: regexp.MustCompile(`\b(sk-[A-Za-z0-9]{20,})\b`)},
 	{id: "private-key", pattern: regexp.MustCompile(`-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----`)},
 	{id: "generic-api-key", pattern: regexp.MustCompile(`(?i)(?:api[_-]?key|apikey|secret|passwd|password|token)["'\s:=]{1,4}([0-9A-Za-z\-_/+]{16,})`), entropyOnly: true, minEntropy: 3.0, placeholderProne: true},
+	// Cloud provider credentials.
+	{id: "aws-secret-token", pattern: regexp.MustCompile(`(?i)aws.{0,25}?([A-Za-z0-9/+=]{40})`), entropyOnly: true, minEntropy: 4.0, placeholderProne: true},
+	{id: "gitlab-pat", pattern: regexp.MustCompile(`\b(glpat-[0-9A-Za-z\-_]{20,})\b`)},
+	{id: "azure-storage-account-key", pattern: regexp.MustCompile(`(?i)AccountKey=([A-Za-z0-9+/]{60,}={0,2})`)},
+	{id: "aliyun-access-key", pattern: regexp.MustCompile(`\b(LTAI[a-zA-Z0-9]{12,32})\b`)},
+	{id: "tencent-cloud-secret-id", pattern: regexp.MustCompile(`\b(AKID[0-9A-Za-z]{32,44})\b`)},
+	// SaaS and developer-platform tokens.
+	{id: "slack-webhook-url", pattern: regexp.MustCompile(`(https://hooks\.slack\.com/services/T[A-Za-z0-9_]+/B[A-Za-z0-9_]+/[A-Za-z0-9]+)`)},
+	{id: "stripe-publishable-key", pattern: regexp.MustCompile(`\b(pk_live_[0-9A-Za-z]{16,})\b`)},
+	{id: "twilio-api-key", pattern: regexp.MustCompile(`\b(SK[0-9a-fA-F]{32})\b`)},
+	{id: "sendgrid-api-key", pattern: regexp.MustCompile(`\b(SG\.[A-Za-z0-9_\-]{16,}\.[A-Za-z0-9_\-]{16,})\b`)},
+	{id: "mailgun-api-key", pattern: regexp.MustCompile(`\b(key-[0-9A-Za-z]{32})\b`)},
+	{id: "anthropic-api-key", pattern: regexp.MustCompile(`\b(sk-ant-[0-9A-Za-z\-_]{20,})\b`)},
+	{id: "jenkins-api-token", pattern: regexp.MustCompile(`(?i)jenkins[_-]?(?:api[_-]?token|token|secret)["'\s:=]{1,4}([0-9A-Za-z\-_]{16,})`), entropyOnly: true, minEntropy: 3.0, placeholderProne: true},
+	{id: "npm-token", pattern: regexp.MustCompile(`\b(npm_[0-9A-Za-z]{36})\b`)},
+	{id: "pypi-token", pattern: regexp.MustCompile(`\b(pypi-AgEIcHlwaS5vcmc[A-Za-z0-9_\-]{20,})\b`)},
+	{id: "docker-hub-pat", pattern: regexp.MustCompile(`\b(dckr_pat_[0-9A-Za-z_\-]{20,})\b`)},
+	// Session and connection material.
+	{id: "jwt", pattern: regexp.MustCompile(`\b(eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}(?:\.[A-Za-z0-9_\-]*)?)`)},
+	{id: "database-uri", pattern: regexp.MustCompile(`(?i)\b((?:mysql|postgres(?:ql)?|mongodb(?:\+srv)?|redis|amqps?|mssql)://[A-Za-z0-9_.\-]+:[^\s'"@]{3,}@[^\s'"]+)`)},
+	// Generic high-entropy fallbacks for unlabeled material.
+	{id: "generic-base64-secret", pattern: regexp.MustCompile(`\b([A-Za-z0-9+/]{32,}={0,2})\b`), entropyOnly: true, minEntropy: 4.3, placeholderProne: true},
+	{id: "generic-hex-secret", pattern: regexp.MustCompile(`\b([0-9a-fA-F]{32,})\b`), entropyOnly: true, minEntropy: 3.6, placeholderProne: true},
 }
 
 // ScanSecrets walks the target (file or directory) and returns
@@ -194,7 +217,12 @@ func isBinaryContent(data []byte) bool {
 // isPlaceholder filters obvious documentation values.
 func isPlaceholder(secret string) bool {
 	lower := strings.ToLower(secret)
-	for _, marker := range []string{"example", "placeholder", "changeme", "your_", "xxxx", "dummy", "redacted"} {
+	for _, marker := range []string{
+		"example", "placeholder", "changeme", "your_", "your-", "xxxx", "dummy",
+		"redacted", "xxx", "demo", "sample", "test", "12345", "1234", "abcdef",
+		"012345", "fake", "todo", "todo", "fixme", "insert_", "delete_me",
+		"my_", "replace_", "<", ">", "{}",
+	} {
 		if strings.Contains(lower, marker) {
 			return true
 		}

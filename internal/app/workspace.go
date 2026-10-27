@@ -294,9 +294,20 @@ func scopeConfigWarnings(config ScopeConfig, authorization AuthorizationConfig, 
 	return warnings
 }
 
+// scopeConfigSafetyAuthorizationErrors restores the hard gate (was stubbed
+// to always-empty together with the runtime worker gate; see
+// runtime_worker_safety.go). Dangerous modes demand a current signed
+// authorization.yaml safety_bypasses entry.
 func scopeConfigSafetyAuthorizationErrors(config ScopeConfig, authorization AuthorizationConfig, authorizationFound bool, now time.Time) []string {
-	// Safety authorization checks disabled - always return empty
-	return nil
+	var errors []string
+	targetPolicy, _ := normalizeScopeTargetPolicy(config.Scope.TargetPolicy)
+	if targetPolicy == "disabled" {
+		errors = append(errors, safetyBypassAuthorizationErrors(authorization, authorizationFound, "scope.target_policy", "disabled", now)...)
+	}
+	if executionIsolationMode(config.Execution.Isolation) == "disabled" {
+		errors = append(errors, safetyBypassAuthorizationErrors(authorization, authorizationFound, "execution.isolation", "disabled", now)...)
+	}
+	return errors
 }
 
 func safetyBypassAuthorizationErrors(config AuthorizationConfig, found bool, control string, mode string, now time.Time) []string {
@@ -308,6 +319,14 @@ func safetyBypassAuthorizationErrors(config AuthorizationConfig, found bool, con
 		return []string{fmt.Sprintf("expired required safety bypass authorization for %s %s; renew authorization.yaml safety_bypasses expires", control, mode)}
 	}
 	return []string{fmt.Sprintf("missing required safety bypass authorization for %s %s; add authorization.yaml safety_bypasses entry with authorized_by and reason", control, mode)}
+}
+
+func hasCurrentSafetyBypassAuthorization(config AuthorizationConfig, found bool, control string, mode string, now time.Time) bool {
+	if !found {
+		return false
+	}
+	authorization, ok := findSafetyBypassAuthorization(config, control, mode)
+	return ok && !safetyBypassAuthorizationExpired(authorization, now)
 }
 
 func safetyBypassAuthorizationWarning(config AuthorizationConfig, found bool, control string, mode string, now time.Time) string {
@@ -329,14 +348,6 @@ func safetyBypassAuthorizationWarning(config AuthorizationConfig, found bool, co
 		return fmt.Sprintf("expired safety bypass authorization for %s %s; expired on %s; %s", control, mode, strings.TrimSpace(authorization.Expires), strings.Join(parts, "; "))
 	}
 	return strings.Join(parts, "; ")
-}
-
-func hasCurrentSafetyBypassAuthorization(config AuthorizationConfig, found bool, control string, mode string, now time.Time) bool {
-	if !found {
-		return false
-	}
-	authorization, ok := findSafetyBypassAuthorization(config, control, mode)
-	return ok && !safetyBypassAuthorizationExpired(authorization, now)
 }
 
 func safetyBypassAuthorizationExpired(authorization SafetyBypassAuthorization, now time.Time) bool {
@@ -365,10 +376,23 @@ func findSafetyBypassAuthorization(config AuthorizationConfig, control string, m
 }
 
 func loadWorkspaceAuthorization(path string) (AuthorizationConfig, bool, error) {
-	// Safety authorization checks disabled - always return empty config
-	return AuthorizationConfig{Version: 1}, false, nil
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return AuthorizationConfig{}, false, nil
+		}
+		return AuthorizationConfig{}, false, err
+	}
+	config, err := LoadAuthorizationConfig(path)
+	if err != nil {
+		return AuthorizationConfig{}, true, err
+	}
+	if err := ValidateAuthorizationConfig(config); err != nil {
+		return AuthorizationConfig{}, true, err
+	}
+	return config, true, nil
 }
 
+// LoadAuthorizationConfig reads and decodes an authorization.yaml.
 func LoadAuthorizationConfig(path string) (AuthorizationConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -381,6 +405,8 @@ func LoadAuthorizationConfig(path string) (AuthorizationConfig, error) {
 	return config, nil
 }
 
+// ValidateAuthorizationConfig enforces the safety_bypasses schema: only the
+// two known controls, only the disabled mode, authorized_by/reason required.
 func ValidateAuthorizationConfig(config AuthorizationConfig) error {
 	if config.Version == 0 {
 		return errors.New("version is required")
@@ -414,7 +440,6 @@ func ValidateAuthorizationConfig(config AuthorizationConfig) error {
 	}
 	return nil
 }
-
 func parseSafetyBypassExpirationCutoff(expires string) (time.Time, error) {
 	expires = strings.TrimSpace(expires)
 	if expires == "" {
@@ -512,15 +537,6 @@ func parseOpenAICompatibleProviderBaseURL(raw string) (*url.URL, error) {
 		return nil, errors.New("base_url must not include query or fragment")
 	}
 	return parsed, nil
-}
-
-func EnabledProvider(config ProviderConfig) (Provider, bool) {
-	for _, provider := range config.Providers {
-		if provider.Enabled {
-			return provider, true
-		}
-	}
-	return Provider{}, false
 }
 
 func writeFileIfMissing(path string, content string) error {

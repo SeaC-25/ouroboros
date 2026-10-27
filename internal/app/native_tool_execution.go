@@ -125,6 +125,7 @@ func runNativeToolGuarded(ctx context.Context, operation string, target ScopeTar
 			Timeout:    nativeToolTimeout(request),
 			MaxWorkers: nativeToolWorkers(request),
 			ParserID:   parserIDForRequest(request),
+			SpecJSON:   request.Parameters["spec"],
 		})
 		done <- runOutcome{output: out, err: err}
 	}()
@@ -189,6 +190,10 @@ func nativeGoTargetFor(request ToolExecutionRequest) (ScopeTarget, bool) {
 
 func nativeGoPreferredTargetKinds(operation string) []string {
 	switch strings.TrimSpace(operation) {
+	case nativetools.OpHTTPObserve:
+		// The observation primitive issues exact HTTP requests: it needs a
+		// URL target; hosts and domains are not requestable as-is.
+		return []string{"url"}
 	case nativetools.OpPortScan:
 		return []string{"host", "ip", "cidr"}
 	case nativetools.OpDNSProbe, nativetools.OpSubdomainDiscovery, nativetools.OpArchiveDiscovery:

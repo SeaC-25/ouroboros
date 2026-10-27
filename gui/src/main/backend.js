@@ -438,20 +438,34 @@ export class BackendManager extends EventEmitter {
     const previous = readJSONFile(this.desktopRuntimeStatePath);
     if (previous?.status === 'running' && previous.sessionId !== this.desktopRuntimeSessionId) {
       const previousProcessId = normalizeProcessID(previous.processId);
-      this.recordDesktopRuntimeIssue(
-        isSameDesktopRuntimeProcess(previous) ? 'desktop.previous_runtime_still_marked_running' : 'desktop.previous_unclean_exit',
-        {
+      // A running-marked state whose pid is dead is a stale record (e.g.
+      // left over from a crash weeks ago or a machine migration): archive
+      // it quietly instead of raising the unclean-exit alarm.
+      if (!processMayBeAlive(previousProcessId)) {
+        this.writeDiagnostic('desktop.previous_runtime_state_stale', {
           statePath: this.desktopRuntimeStatePath,
           previousSessionId: stringOrEmpty(previous.sessionId),
           previousProcessId,
-          previousProcessStartToken: stringOrEmpty(previous.processStartToken),
-          previousExecutablePath: stringOrEmpty(previous.executablePath),
           previousStartedAt: stringOrEmpty(previous.startedAt),
           previousHeartbeatAt: stringOrEmpty(previous.heartbeatAt),
           previousWorkspace: stringOrEmpty(previous.workspace),
-          previousStatus: stringOrEmpty(previous.status),
-        },
-      );
+        });
+      } else {
+        this.recordDesktopRuntimeIssue(
+          isSameDesktopRuntimeProcess(previous) ? 'desktop.previous_runtime_still_marked_running' : 'desktop.previous_unclean_exit',
+          {
+            statePath: this.desktopRuntimeStatePath,
+            previousSessionId: stringOrEmpty(previous.sessionId),
+            previousProcessId,
+            previousProcessStartToken: stringOrEmpty(previous.processStartToken),
+            previousExecutablePath: stringOrEmpty(previous.executablePath),
+            previousStartedAt: stringOrEmpty(previous.startedAt),
+            previousHeartbeatAt: stringOrEmpty(previous.heartbeatAt),
+            previousWorkspace: stringOrEmpty(previous.workspace),
+            previousStatus: stringOrEmpty(previous.status),
+          },
+        );
+      }
     }
     this.writeDesktopRuntimeState('running', { reason: 'startup' });
     this.desktopRuntimeHeartbeatTimer = setInterval(() => {

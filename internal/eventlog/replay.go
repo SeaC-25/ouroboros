@@ -16,9 +16,13 @@ import (
 type ReplayLane string
 
 const (
-	ReplayLaneMission          ReplayLane = "mission"
-	ReplayLaneAgent            ReplayLane = "agent"
-	ReplayLaneObserver         ReplayLane = "observer"
+	ReplayLaneMission  ReplayLane = "mission"
+	ReplayLaneAgent    ReplayLane = "agent"
+	ReplayLaneObserver ReplayLane = "observer"
+	// ReplayLaneBlackboard 是观测-推理循环的结论层：fact/intent/hint 事件
+	// 都落这里（lane ID 保留，回放兼容）。语义已从"黑板推理引擎"改为
+	// "结论笔记"——原始观测走 observer lane（EventVerification/
+	// EventMutation），模型推理后形成的结论以 fact 形式进入本 lane。
 	ReplayLaneBlackboard       ReplayLane = "blackboard"
 	ReplayLaneToolchain        ReplayLane = "toolchain"
 	ReplayLaneSubmissionReport ReplayLane = "submission-report"
@@ -211,7 +215,27 @@ func BuildReplaySnapshot(events []Event) (ReplaySnapshot, error) {
 				return ReplaySnapshot{}, fmt.Errorf("replay fact event %d: %w", event.ID, err)
 			}
 			if ok {
-				state.Facts = append(state.Facts, fact)
+				// Observations (raw, pre-interpretation evidence emitted by
+				// the observe parsers with kind=observation) are routed to
+				// the observation store so StepFromObservations can see
+				// unprocessed evidence; everything else stays a fact.
+				if fact.Kind == "observation" {
+					// Payload fidelity: carry the full raw observation JSON
+					// (the event payload) rather than the compressed
+					// statement, so model-side reasoning sees forms/links/
+					// json_keys/diff — the same fidelity the chat journal
+					// path stores. Kind mirrors the observe source kind.
+					state.Observations = append(state.Observations, blackboard.Observation{
+						ID:        fact.ID,
+						Kind:      "http_observe",
+						Target:    strings.TrimSpace(payload.Target),
+						Payload:   strings.TrimSpace(string(event.Payload)),
+						Source:    fact.Source,
+						CreatedAt: fact.CreatedAt,
+					})
+				} else {
+					state.Facts = append(state.Facts, fact)
+				}
 			}
 		case EventIntent:
 			intent, ok, err := payload.intent(event)
@@ -349,6 +373,7 @@ type replayPayload struct {
 	Source                      string               `json:"source"`
 	Goal                        string               `json:"goal"`
 	SourceFacts                 []string             `json:"source_facts"`
+	SourceObservations          []string             `json:"source_observations"`
 	State                       string               `json:"state"`
 	ResultFact                  string               `json:"result_fact"`
 	Message                     string               `json:"message"`
@@ -391,6 +416,7 @@ type replayPayload struct {
 	ExecutedTools               int                  `json:"executed_tools"`
 	WorkerDispatch              bool                 `json:"worker_dispatch"`
 	TargetContact               bool                 `json:"target_contact"`
+	Target                      string               `json:"target"`
 	ContextPercent              int                  `json:"context_percent"`
 	BreadthPercent              int                  `json:"breadth_percent"`
 	DepthChains                 int                  `json:"depth_chains"`
@@ -488,12 +514,13 @@ func (p replayPayload) fact(event Event) (blackboard.Fact, bool, error) {
 		return blackboard.Fact{}, false, errors.New("fact statement is required")
 	}
 	return blackboard.Fact{
-		ID:         id,
-		Kind:       strings.TrimSpace(p.Kind),
-		Statement:  strings.TrimSpace(p.Statement),
-		Confidence: p.Confidence,
-		Source:     strings.TrimSpace(p.Source),
-		CreatedAt:  event.CreatedAt,
+		ID:                 id,
+		Kind:               strings.TrimSpace(p.Kind),
+		Statement:          strings.TrimSpace(p.Statement),
+		Confidence:         p.Confidence,
+		Source:             strings.TrimSpace(p.Source),
+		SourceObservations: append([]string(nil), p.SourceObservations...),
+		CreatedAt:          event.CreatedAt,
 	}, true, nil
 }
 

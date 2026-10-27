@@ -19,6 +19,8 @@ workspace/
 workspaces/
 tmp/
 temp/
+runtime-workspace/
+gui/.devmgr-*/
 
 # root-level build artifacts
 /ouro.exe

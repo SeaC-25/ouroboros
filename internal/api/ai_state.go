@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -25,6 +26,10 @@ func (s *Server) handleAIBlackboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) == 1 && parts[0] == "observations" && r.Method == http.MethodGet {
+		s.respondBlackboardObservations(w, r)
+		return
+	}
 	if len(parts) == 2 && parts[0] == "items" && r.Method == http.MethodPatch {
 		s.updateBlackboardHTTP(w, r, parts[1])
 		return
@@ -40,6 +45,16 @@ func (s *Server) handleAIBlackboard(w http.ResponseWriter, r *http.Request) {
 	respondError(w, http.StatusNotFound, "黑板接口不存在")
 }
 
+// handleBlackboardObservations 是 GET /api/blackboard/observations 的入口
+// （前端契约端点），与 /api/ai/blackboard/observations 同一实现。
+func (s *Server) handleBlackboardObservations(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		respondError(w, http.StatusMethodNotAllowed, "仅支持读取原始观测")
+		return
+	}
+	s.respondBlackboardObservations(w, r)
+}
+
 func blackboardItemDTO(fact BlackboardFact) map[string]any {
 	status, priority := fact.Status, fact.Priority
 	if status == "" {
@@ -53,6 +68,35 @@ func blackboardItemDTO(fact BlackboardFact) map[string]any {
 		updatedAt = fact.CreatedAt
 	}
 	return map[string]any{"id": fact.ID, "kind": fact.Kind, "title": fact.Statement, "content": fact.Statement, "status": status, "priority": priority, "source": fact.Source, "dependencyIds": fact.DependencyIDs, "createdAt": fact.CreatedAt, "updatedAt": updatedAt}
+}
+
+// blackboardObservationDTO 是原始观测的对外投影：payload 原样透传给前端，
+// 不做任何解释/判定。
+func blackboardObservationDTO(observation BlackboardObservation) map[string]any {
+	return map[string]any{"id": observation.ID, "kind": observation.Kind, "target": observation.Target, "payload": observation.Payload, "source": observation.Source, "createdAt": observation.CreatedAt}
+}
+
+// respondBlackboardObservations 返回工作区中真实持久化的原始观测列表
+// （GET /api/ai/blackboard/observations），支持 kind/target/source/q 过滤与 limit。
+func (s *Server) respondBlackboardObservations(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	observations := s.loadBlackboardObservations()
+	items := make([]map[string]any, 0, len(observations))
+	for _, observation := range observations {
+		if query.Get("kind") != "" && query.Get("kind") != observation.Kind || query.Get("target") != "" && query.Get("target") != observation.Target || query.Get("source") != "" && query.Get("source") != observation.Source {
+			continue
+		}
+		if q := strings.ToLower(strings.TrimSpace(query.Get("q"))); q != "" && !strings.Contains(strings.ToLower(observation.Payload), q) {
+			continue
+		}
+		items = append(items, blackboardObservationDTO(observation))
+	}
+	if rawLimit := strings.TrimSpace(query.Get("limit")); rawLimit != "" {
+		if limit, err := strconv.Atoi(rawLimit); err == nil && limit >= 0 && limit < len(items) {
+			items = items[len(items)-limit:]
+		}
+	}
+	respondJSON(w, http.StatusOK, map[string]any{"path": filepath.ToSlash(s.observationsPath()), "observations": items, "count": len(items)})
 }
 
 func (s *Server) respondBlackboardQuery(w http.ResponseWriter, r *http.Request) {
@@ -115,6 +159,9 @@ func (s *Server) createBlackboardHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) writeBlackboardFacts(facts []BlackboardFact) error {
+	// stateMu: serialize against appends and other rewrites (see Server).
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
 	if err := os.MkdirAll(filepath.Dir(s.blackboardPath()), 0o755); err != nil {
 		return err
 	}

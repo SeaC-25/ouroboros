@@ -8,12 +8,12 @@ import (
 // RalphLoop implements the RalphLoop pattern: persistent retry with bounded mutation.
 // It maintains attempt history and generates mutations from failures.
 type RalphLoop struct {
-	pattern       Pattern
-	currentNode   string
-	attemptCount  int
-	maxAttempts   int
+	pattern        Pattern
+	currentNode    string
+	attemptCount   int
+	maxAttempts    int
 	mutationBudget int
-	mutations     []Mutation
+	mutations      []Mutation
 }
 
 // NewRalphLoop creates a RalphLoop executor from a pattern definition.
@@ -132,12 +132,12 @@ type Mutation struct {
 
 // ExecutionContext provides state for condition evaluation.
 type ExecutionContext struct {
-	ObjectiveMet     bool
+	ObjectiveMet      bool
 	LastAttemptFailed bool
-	MutationHints    []string
-	AvailableWorkers int
-	FactCount        int
-	Evidence         []string
+	MutationHints     []string
+	AvailableWorkers  int
+	FactCount         int
+	Evidence          []string
 }
 
 // Progress captures execution progress.

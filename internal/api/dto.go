@@ -214,6 +214,10 @@ type ReplayEventDTO struct {
 	Lane        string `json:"lane"`
 	CreatedAt   int64  `json:"createdAt"`
 	Detail      string `json:"detail"`
+	// PayloadJson carries the raw event payload so the replay workbench can
+	// show full evidence (the frontend reads event.payloadJson — it was
+	// always empty before this field existed).
+	PayloadJSON string `json:"payloadJson,omitempty"`
 	NodeID      string `json:"nodeId,omitempty"`
 	ExecutionID string `json:"executionId,omitempty"`
 	FilePath    string `json:"filePath,omitempty"`

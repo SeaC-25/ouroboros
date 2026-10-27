@@ -7,12 +7,12 @@ import (
 // ExplorePlanExecute implements the EPE pattern: deliberate explore, plan, execute loop.
 // It separates signal gathering, planning, and execution into distinct phases.
 type ExplorePlanExecute struct {
-	pattern       Pattern
-	currentNode   string
-	stepCount     int
-	explorations  []Exploration
-	plan          *Plan
-	executions    []Execution
+	pattern      Pattern
+	currentNode  string
+	stepCount    int
+	explorations []Exploration
+	plan         *Plan
+	executions   []Execution
 }
 
 // NewExplorePlanExecute creates an EPE executor from a pattern definition.

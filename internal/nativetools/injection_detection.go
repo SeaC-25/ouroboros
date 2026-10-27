@@ -13,6 +13,9 @@ import (
 	"time"
 )
 
+// OpInjectionTest is the sqlmap-equivalent (detection-only) operation.
+const OpInjectionTest = "injection_test"
+
 // sqlmapFinding mirrors the sqlmap parser's log finding shape
 // (internal/app/sqlmap_parser.go: url, parameter, place, techniques, vulnerable).
 type sqlmapFinding struct {

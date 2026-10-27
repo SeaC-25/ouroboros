@@ -148,6 +148,12 @@ Vite 浏览器预览仅限开发用途;产品运行时是打包后的 Electron�
 - **auth_test(hydra 等价,新 operation)**:HTTP Basic/Form 双模式、表单字段发现、
   哨兵基线差分、锁定检测,字典与阈值走 env(`OURO_AUTH_USERWORDS`/`OURO_AUTH_PASSWORDS`/
   `OURO_AUTH_LOCKOUT_THRESHOLD`)。
+- **观测原语 `http_observe`(模型推理路径)**:调用方指定任意请求形状,回传全量原始观测
+  (status/headers/时延/body 摘要/表单/链接/JSON 键/基线差分),**零判定**——检测结论由模型
+  基于观测推理,防模板固化思维;内置模板冻结在 16 个高信号,模板引擎定位为 nuclei 生态兼容层。
+- **原语深化(第二轮)**:gitleaks 31 规则/semgrep 28 规则/nmap 91 指纹+UDP 6 协议/
+  testssl Heartbleed 真实 TLS record 探测+协议降级+弱套件实测/sslscan 全套件枚举/
+  ffuf 360 词条+递归+403 bypass/arjun 三面参数/katana meta-refresh+注释+JS 路由/CDX 多域名。
 
 新增 parser:`exiftool_json`、`gitleaks_json`、`testssl_json`、`sslscan_xml`、
 `trufflehog_json`、`binwalk_text`、`semgrep_sarif`、`apktool_text`、`jadx_metadata_json`、

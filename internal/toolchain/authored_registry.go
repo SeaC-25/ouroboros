@@ -56,6 +56,13 @@ func DefaultAuthoredToolRegistry() AuthoredToolRegistry {
 					DependencyNames:  []string{"nuclei"},
 				},
 				{
+					ID:               "http_observe",
+					Description:      "Execute a caller-specified HTTP(S) request against an in-scope target and return raw observations (status, headers, timing, body digest, forms, links, baseline diff) with no verdict.",
+					RequiredInputs:   []AuthoredToolInputContract{{Name: "target_url", Types: []string{"url"}}},
+					SupportedParsers: []string{"observe_json", "generic_json"},
+					DependencyNames:  []string{"httpx"},
+				},
+				{
 					ID:               "path_fuzz",
 					Description:      "Discover paths or parameters using a managed wordlist.",
 					RequiredInputs:   []AuthoredToolInputContract{{Name: "target_url", Types: []string{"url"}}, {Name: "wordlist_path", Types: []string{"path", "file"}}},
@@ -220,6 +227,7 @@ func DefaultAuthoredToolRegistry() AuthoredToolRegistry {
 		{ID: "binwalk_text", Format: "text", Description: "binwalk text output."},
 		{ID: "exiftool_json", Format: "json", Description: "ExifTool JSON output."},
 		{ID: "auth_test_jsonl", Format: "jsonl", Description: "hydra-style credential testing JSONL output."},
+		{ID: "observe_json", Format: "json", Description: "Raw HTTP observation JSON (no verdict) for model-side reasoning."},
 	}
 	adapters = append(adapters, nativeGoAdapter(adapters[0]))
 	return newAuthoredToolRegistry(adapters, parsers)
@@ -253,6 +261,7 @@ func nativeGoAdapter(managed AuthoredToolAdapterDefinition) AuthoredToolAdapterD
 		"static_code_scan":    true,
 		"apk_decompile":       true,
 		"auth_test":           true,
+		"http_observe":        true,
 	}
 	operations := make([]AuthoredToolOperationDefinition, 0, len(implemented))
 	for _, operation := range managed.Operations {

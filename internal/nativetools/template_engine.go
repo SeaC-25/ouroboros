@@ -54,6 +54,9 @@ type templateEngine struct {
 	client  *http.Client
 	target  *url.URL
 	timeout time.Duration
+	// followClient serves requests that opt into following redirects
+	// (redirects: true); the default client preserves 3xx for matchers.
+	followClient *http.Client
 }
 
 // runTemplate executes one template's request chain against the target.
@@ -243,8 +246,7 @@ func matcherEvaluate(matcher templateMatcher, resp *http.Response, body, headers
 	case "regex":
 		result = len(matcher.Regex) > 0
 		for _, pattern := range matcher.Regex {
-			re, err := regexp.Compile(pattern)
-			if err != nil || !re.MatchString(subject) {
+			if !regexpMustMatches(pattern, subject) {
 				result = false
 				break
 			}
@@ -290,14 +292,23 @@ func evaluateDSLLite(expressions []string, status int, body, headers string) boo
 	return true
 }
 
+// DSL-lite fixed patterns, compiled once (they were recompiled on every
+// expression evaluation — see regexp_cache.go for the shared cache).
+var (
+	dslStatusRE      = regexp.MustCompile(`^status_code\s*==\s*(\d+)$`)
+	dslContainsRE    = regexp.MustCompile(`(?i)^contains\(\s*(body|header|all)\s*,\s*"((?:[^"\\]|\\.)*)"\s*\)$`)
+	dslContainsAllRE = regexp.MustCompile(`(?i)^contains_all\(\s*(body|header|all)\s*,\s*(.*)\s*\)$`)
+	dslArgsRE        = regexp.MustCompile(`"((?:[^"\\]|\\.)*)"`)
+)
+
 // evalOneDSL parses one DSL-lite expression.
 func evalOneDSL(expression string, status int, body, headers string) bool {
 	expression = strings.TrimSpace(expression)
-	scRE := regexp.MustCompile(`^status_code\s*==\s*(\d+)$`)
+	scRE := dslStatusRE
 	if m := scRE.FindStringSubmatch(expression); m != nil {
 		return fmt.Sprint(status) == m[1]
 	}
-	containsRE := regexp.MustCompile(`(?i)^contains\(\s*(body|header|all)\s*,\s*"((?:[^"\\]|\\.)*)"\s*\)$`)
+	containsRE := dslContainsRE
 	if m := containsRE.FindStringSubmatch(expression); m != nil {
 		subject := body
 		if strings.EqualFold(m[1], "header") {
@@ -308,13 +319,14 @@ func evalOneDSL(expression string, status int, body, headers string) bool {
 		literal := strings.ReplaceAll(m[2], `\"`, `"`)
 		return strings.Contains(subject, literal)
 	}
-	containsAllRE := regexp.MustCompile(`(?i)^contains_all\(\s*(body|header|all)\s*,\s*(.*)\s*\)$`)
+	containsAllRE := dslContainsAllRE
+
 	if m := containsAllRE.FindStringSubmatch(expression); m != nil {
 		subject := body
 		if strings.EqualFold(m[1], "header") {
 			subject = headers
 		}
-		argsRE := regexp.MustCompile(`"((?:[^"\\]|\\.)*)"`)
+		argsRE := dslArgsRE
 		all := true
 		for _, literal := range argsRE.FindAllStringSubmatch(m[2], -1) {
 			if !strings.Contains(subject, strings.ReplaceAll(literal[1], `\"`, `"`)) {
@@ -334,8 +346,8 @@ func runExtractors(request templateRequest, body, headers string, resp *http.Res
 		switch strings.ToLower(strings.TrimSpace(extractor.Type)) {
 		case "regex":
 			for _, pattern := range extractor.Regex {
-				re, err := regexp.Compile(pattern)
-				if err != nil {
+				re := compileRegexp(pattern)
+				if re == nil {
 					continue
 				}
 				if found := re.FindStringSubmatch(body); len(found) > 1 {
@@ -372,8 +384,8 @@ func runExtractors(request templateRequest, body, headers string, resp *http.Res
 		case "xpath":
 			// xpath-lite: tag presence extraction.
 			for _, pattern := range extractor.XPath {
-				re, err := regexp.Compile(`(?is)<` + regexp.QuoteMeta(strings.Trim(pattern, "/")) + `[^>]*>(.*?)</` + regexp.QuoteMeta(strings.Trim(pattern, "/")) + `>`)
-				if err != nil {
+				re := compileRegexp(`(?is)<` + regexp.QuoteMeta(strings.Trim(pattern, "/")) + `[^>]*>(.*?)</` + regexp.QuoteMeta(strings.Trim(pattern, "/")) + `>`)
+				if re == nil {
 					continue
 				}
 				if found := re.FindStringSubmatch(body); len(found) > 1 {
@@ -396,7 +408,7 @@ func extractorName(extractor templateExtractor) string {
 
 // kvalLookup resolves key=value / key: value pairs in a block.
 func kvalLookup(subject, key string) (string, bool) {
-	re := regexp.MustCompile(`(?im)^\s*` + regexp.QuoteMeta(key) + `\s*[:=]\s*(.+?)\s*$`)
+	re := compileRegexp(`(?im)^\s*` + regexp.QuoteMeta(key) + `\s*[:=]\s*(.+?)\s*$`)
 	if m := re.FindStringSubmatch(subject); m != nil {
 		return m[1], true
 	}

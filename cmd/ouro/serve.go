@@ -1,4 +1,4 @@
-﻿package main
+package main
 
 import (
 	"context"
@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ouroboros/ouroboros/internal/api"
+	"github.com/ouroboros/ouroboros/internal/app"
 	"github.com/spf13/cobra"
 )
 
@@ -34,6 +35,13 @@ func newServeCommand(out io.Writer) *cobra.Command {
 			// 验证工作区路径
 			if _, err := os.Stat(workspace); os.IsNotExist(err) {
 				return fmt.Errorf("工作区路径不存在: %s", workspace)
+			}
+
+			// 适配任意工作区：目录还不是有效的 Ouroboros 工作区时自动
+			// 补齐必需文件与目录（幂等；replay/events.db 等由 API 服务
+			// 依赖，缺失会让 SQLite 以 unable to open database file 失败）。
+			if err := app.InitWorkspace(workspace); err != nil {
+				return fmt.Errorf("初始化工作区失败: %w", err)
 			}
 
 			// 创建 API 服务器

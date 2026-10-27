@@ -10,14 +10,14 @@ import (
 
 // WorkerPool manages a pool of workers for concurrent task execution.
 type WorkerPool struct {
-	mu           sync.RWMutex
-	workers      map[string]*Worker
-	maxWorkers   int
-	idleWorkers  chan string
-	activeCount  int
-	taskQueue    chan WorkItem
-	shutdownCh   chan struct{}
-	wg           sync.WaitGroup
+	mu          sync.RWMutex
+	workers     map[string]*Worker
+	maxWorkers  int
+	idleWorkers chan string
+	activeCount int
+	taskQueue   chan WorkItem
+	shutdownCh  chan struct{}
+	wg          sync.WaitGroup
 }
 
 // Worker represents a single worker in the pool.

@@ -2,7 +2,10 @@
 set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
-PACKAGE_DIR="${OURO_DESKTOP_PACKAGE_DIR:-$ROOT/gui/dist/desktop/Ouroboros-$(node -p 'process.platform + "-" + process.arch')}"
+# The Go packager names the output dir Ouroboros-{GOOS}-{GOARCH}
+# (windows-amd64); translate Node's win32/x64 platform names to match.
+PLATFORM_DIR="$(node -p 'const p = process.platform === "win32" ? "windows" : process.platform; const a = process.arch === "x64" ? "amd64" : process.arch; p + "-" + a')"
+PACKAGE_DIR="${OURO_DESKTOP_PACKAGE_DIR:-$ROOT/gui/dist/desktop/Ouroboros-$PLATFORM_DIR}"
 TMPDIR_BASE="${TMPDIR:-/tmp}"
 SMOKE_ROOT="$(mktemp -d "$TMPDIR_BASE/ouro-desktop-package-runtime-smoke-XXXXXX")"
 WORKSPACE="$SMOKE_ROOT/workspace"

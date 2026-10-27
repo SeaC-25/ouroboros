@@ -2,6 +2,7 @@ package nativetools
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -36,14 +37,15 @@ const (
 
 const (
 	defaultAuthLockoutThreshold = 3
-	// authPlaceBasic and authPlaceForm are the hydra "place" values emitted in
-	// the JSONL records.
+	// authPlaceBasic, authPlaceForm and authPlaceJSON are the hydra "place"
+	// values emitted in the JSONL records.
 	authPlaceBasic = "http-basic"
 	authPlaceForm  = "form"
+	authPlaceJSON  = "json-api"
 	// authProbeBodyLimit bounds each probe response read.
 	authProbeBodyLimit = 512 * 1024
 	// authMaxWordlistLines caps each wordlist read so a runaway dictionary
-	// cannot balloon a run.
+	// cannot exhaust memory.
 	authMaxWordlistLines = 10000
 )
 
@@ -104,14 +106,21 @@ func TestAuth(ctx context.Context, target string, opts Options) (string, error) 
 	// Form mode: discover the login field names from the response HTML when
 	// possible; fall back to the standard username/password pair.
 	userField, passwordField := "username", "password"
-	// Sentinel probe establishes the baseline failure response for form mode.
+	// Sentinel probe establishes the baseline failure response for form and
+	// JSON API modes.
 	var baseline *authResponse
-	if mode == authPlaceForm {
+	switch mode {
+	case authPlaceForm:
 		page, pageErr := fetchAuthPage(ctx, client, target)
 		if pageErr == nil && page.body != "" {
 			userField, passwordField = authFormFields(page.body)
 		}
 		baseline, err = attemptFormLogin(ctx, client, target, userField, passwordField, "ouroboros-sentinel", "ouroboros-sentinel-password")
+		if err != nil {
+			return "", fmt.Errorf("auth_test baseline probe: %w", err)
+		}
+	case authPlaceJSON:
+		baseline, err = attemptJSONLogin(ctx, client, target, userField, passwordField, "ouroboros-sentinel", "ouroboros-sentinel-password")
 		if err != nil {
 			return "", fmt.Errorf("auth_test baseline probe: %w", err)
 		}
@@ -199,6 +208,12 @@ func probeAuthCredential(ctx context.Context, client *http.Client, mode string, 
 			return authProbe{place: authPlaceBasic, success: true}
 		}
 		return authProbe{place: authPlaceBasic, success: false}
+	case authPlaceJSON:
+		resp, err := attemptJSONLogin(ctx, client, target, userField, passwordField, user, password)
+		if err == nil && authJSONSuccess(resp, baseline) {
+			return authProbe{place: authPlaceJSON, success: true}
+		}
+		return authProbe{place: authPlaceJSON, success: false}
 	default:
 		resp, err := attemptFormLogin(ctx, client, target, userField, passwordField, user, password)
 		if err == nil && resp != nil && authFormSuccess(resp, baseline) {
@@ -344,8 +359,9 @@ func hasAuthFailureMarker(body string) bool {
 	return false
 }
 
-// detectAuthMode picks the login mode: HTTP Basic when the root responds 401
-// with WWW-Authenticate: Basic, otherwise form login.
+// detectAuthMode picks the login mode: HTTP Basic when the target responds
+// 401 with WWW-Authenticate: Basic; JSON API when the target answers with a
+// JSON content type and no HTML form; form login otherwise.
 func detectAuthMode(ctx context.Context, client *http.Client, target string) string {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
@@ -357,11 +373,74 @@ func detectAuthMode(ctx context.Context, client *http.Client, target string) str
 		return authPlaceForm
 	}
 	defer func() { _ = resp.Body.Close() }()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, authProbeBodyLimit))
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, authProbeBodyLimit))
 	if resp.StatusCode == http.StatusUnauthorized && strings.Contains(strings.ToLower(resp.Header.Get("WWW-Authenticate")), "basic") {
 		return authPlaceBasic
 	}
+	contentType := strings.ToLower(resp.Header.Get("Content-Type"))
+	if strings.Contains(contentType, "application/json") && !strings.Contains(strings.ToLower(string(body)), "<form") {
+		return authPlaceJSON
+	}
 	return authPlaceForm
+}
+
+// attemptJSONLogin posts one credential pair as a JSON document.
+func attemptJSONLogin(ctx context.Context, client *http.Client, target, userField, passwordField, user, password string) (*authResponse, error) {
+	payload, err := json.Marshal(map[string]string{
+		userField:     user,
+		passwordField: password,
+	})
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "ouroboros-native-hydra/1")
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, authProbeBodyLimit))
+	if err != nil {
+		return nil, err
+	}
+	return &authResponse{
+		statusCode: resp.StatusCode,
+		location:   resp.Header.Get("Location"),
+		body:       string(body),
+	}, nil
+}
+
+// authJSONSuccess decides a JSON API login outcome: 401/403 are failures,
+// 200 with a token-shaped field (token/jwt/session/api_key) is accepted,
+// other 2xx mirror the form heuristic (differ from baseline, no error field).
+func authJSONSuccess(resp *authResponse, baseline *authResponse) bool {
+	if resp == nil {
+		return false
+	}
+	if resp.statusCode == http.StatusUnauthorized || resp.statusCode == http.StatusForbidden {
+		return false
+	}
+	if resp.statusCode < 200 || resp.statusCode >= 300 {
+		return false
+	}
+	lower := strings.ToLower(resp.body)
+	for _, tokenKey := range []string{"\"token\"", "\"jwt\"", "\"session\"", "\"api_key\"", "\"access_token\""} {
+		if strings.Contains(lower, tokenKey) {
+			return true
+		}
+	}
+	if strings.Contains(lower, "\"error\"") || strings.Contains(lower, "\"message\": \"invalid") {
+		return false
+	}
+	if baseline != nil && resp.body == baseline.body {
+		return false
+	}
+	return true
 }
 
 // authWordlist reads a newline-separated wordlist file when the environment
@@ -400,14 +479,22 @@ func authWordlist(envVar string, defaults []string) ([]string, error) {
 	return words, nil
 }
 
-// authLockoutValue reads OURO_AUTH_LOCKOUT_THRESHOLD at call time. Values < 1
-// disable lockout detection (never skip a user).
+// authLockoutValue reads OURO_AUTH_LOCKOUT_THRESHOLD at call time. The value
+// is the number of consecutive failures that stop probing a user. An
+// explicit "0" disables lockout detection entirely (operators running
+// against throwaway lab targets asked for the full wordlist); unset or
+// invalid values keep the default. The disable is implemented as a sentinel
+// because the consumer compares failures >= threshold per attempt.
 func authLockoutValue() int {
 	raw, ok := os.LookupEnv(EnvAuthLockoutThreshold)
 	if !ok {
 		return defaultAuthLockoutThreshold
 	}
-	value, err := strconv.Atoi(strings.TrimSpace(raw))
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "0" {
+		return int(^uint(0) >> 1) // max int: never reached, lockout disabled
+	}
+	value, err := strconv.Atoi(trimmed)
 	if err != nil || value < 1 {
 		return defaultAuthLockoutThreshold
 	}
@@ -419,17 +506,21 @@ func authLockoutValue() int {
 // standard username/password pair.
 func authFormFields(body string) (string, string) {
 	userField, passwordField := "username", "password"
-	lower := strings.ToLower(body)
 	// <input ... name="..." ... type="password"> blocks are scanned in order;
 	// the first password field marks the form, and the nearest preceding
-	// non-password text/email input is the username field.
-	inputPattern := regexp.MustCompile(`<input\b[^>]*>`)
+	// non-password text/email input is the username field. Matching runs on
+	// the ORIGINAL body: form field names are case-sensitive server-side
+	// (userName vs username are different parameters), so lowercasing the
+	// body here would silently break credential testing against camelCase
+	// forms. Case-insensitivity is applied only to the attribute/type
+	// comparison via the (?i) pattern prefix.
+	inputPattern := regexp.MustCompile(`(?i)<input\b[^>]*>`)
 	type authInput struct {
 		name string
 		kind string
 	}
 	inputs := make([]authInput, 0, 8)
-	for _, match := range inputPattern.FindAllString(lower, 64) {
+	for _, match := range inputPattern.FindAllString(body, 64) {
 		nameMatch := regexp.MustCompile(`name\s*=\s*"([^"]*)"|name\s*=\s*'([^']*)'|name=([^\s>]+)`).FindStringSubmatch(match)
 		name := ""
 		for i := 1; i < len(nameMatch); i++ {

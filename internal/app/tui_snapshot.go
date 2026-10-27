@@ -27,20 +27,8 @@ func NewTUIModelForWorkspace(root string) tui.Model {
 	return tuiModelWithWorkspaceRuntimeRows(root, baseTUIModelForWorkspace(root))
 }
 
-func tuiModelFromSnapshot(snapshot eventlog.ReplaySnapshot) tui.Model {
-	return tui.NewModel().WithReplaySnapshot(snapshot)
-}
-
-func tuiModelFromEvents(events []eventlog.Event) tui.Model {
-	return tui.NewModel().WithReplayEvents(events)
-}
-
 func tuiModelFromEventsForWorkspace(root string, events []eventlog.Event) tui.Model {
 	return tuiModelWithWorkspaceRuntimeRows(root, baseTUIModelForWorkspace(root).WithReplayEvents(events))
-}
-
-func renderTUISnapshot(snapshot eventlog.ReplaySnapshot) string {
-	return tuiModelFromSnapshot(snapshot).View()
 }
 
 func tuiRuntimeActionRequester(root string) tui.RuntimeActionRequester {
@@ -1413,8 +1401,30 @@ func tuiAIDialogWorkspaceContext(root string) string {
 		),
 	}
 	lines = append(lines, tuiAIDialogSemanticActionContext()...)
+	lines = append(lines, tuiAIDialogNativeOperationContext()...)
 	lines = append(lines, tuiAIDialogWorkspaceOverviewContext(root)...)
 	return strings.Join(lines, "\n")
+}
+
+// tuiAIDialogNativeOperationContext lists the native_go operations the
+// model can reason over, so prompts can propose observability-driven plans
+// instead of guessing at the tool surface.
+func tuiAIDialogNativeOperationContext() []string {
+	operations := toolchain.DefaultAuthoredToolRegistry().NativeGoOperations()
+	if len(operations) == 0 {
+		return []string{
+			"native_operations.status=unavailable",
+		}
+	}
+	lines := []string{
+		"native_operations.status=available",
+		fmt.Sprintf("native_operations.count=%d", len(operations)),
+		"native_operations.list=" + strings.Join(operations, ","),
+		// The observation primitive: raw measurements, no verdicts — the
+		// model forms conclusions from the evidence it returns.
+		"native_operations.http_observe.usage=raw HTTP observation (status/headers/timing/body digest/forms/links/json_keys/baseline diff); shape via OURO_HTTP_OBSERVE_SPEC; emits kind=observation evidence for model-side reasoning",
+	}
+	return lines
 }
 
 func tuiAIDialogWorkspaceOverviewContext(root string) []string {
@@ -4032,21 +4042,6 @@ func reportProjectionDispatchExecutionRuntimeRowsWithSelection(executions []Repo
 		}
 	}
 	return rows
-}
-
-func reportProjectionDispatchExecutionRuntimeRowPrefixes() []string {
-	return []string{
-		"report projection dispatch executions:",
-		"report projection execution selection:",
-		"report projection selection compact:",
-		"report projection execution superseded:",
-		"report projection dispatch execution artifact:",
-		"report projection dispatch execution compact:",
-		"report projection execution review:",
-		"report projection review compact:",
-		"report projection dispatch execution annotation:",
-		"report projection dispatch execution path:",
-	}
 }
 
 func tuiModelWithReplayWorkbenchCollaborationRows(root string, model tui.Model) tui.Model {
@@ -6891,10 +6886,6 @@ func tuiModelWithWorkerLifecyclePolicyRows(root string, model tui.Model) tui.Mod
 	return model.AppendRuntimeRows(tui.RuntimeTabAgentRuntime, workerLifecyclePolicyArtifactRuntimeRowsWithSelection(policies, selection, selectionFound))
 }
 
-func workerLifecyclePolicyArtifactRuntimeRows(policies []WorkerLifecyclePolicy) []string {
-	return workerLifecyclePolicyArtifactRuntimeRowsWithSelection(policies, WorkerLifecyclePolicySelection{}, false)
-}
-
 func workerLifecyclePolicyArtifactRuntimeRowsWithSelection(policies []WorkerLifecyclePolicy, selection WorkerLifecyclePolicySelection, selectionFound bool) []string {
 	if len(policies) == 0 {
 		return nil
@@ -7841,27 +7832,6 @@ func workerLifecycleActionPlanArtifactRuntimeRowsWithSelection(plans []WorkerLif
 		}
 	}
 	return rows
-}
-
-func workerLifecycleActionPlanRuntimeRowPrefixes() []string {
-	return []string{
-		"worker lifecycle action plan artifacts:",
-		"worker lifecycle action plan selection:",
-		"worker lifecycle action plan superseded:",
-		"worker lifecycle action plan artifact status=",
-		"worker lifecycle action plan artifact:",
-		"worker lifecycle action plan artifact state:",
-		"worker lifecycle action plan artifact review:",
-		"worker lifecycle action plan artifact counts:",
-		"worker lifecycle action plan daemon controls:",
-		"worker lifecycle action plan retry dispatch executions:",
-		"worker lifecycle action plan review:",
-		"worker lifecycle action plan annotation:",
-		"worker lifecycle action plan artifact path:",
-		"worker lifecycle action:",
-		"daemon control action:",
-		"retry dispatch action:",
-	}
 }
 
 func tuiModelWithWorkerLeaseRows(root string, model tui.Model) tui.Model {

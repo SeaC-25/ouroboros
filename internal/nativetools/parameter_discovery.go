@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strings"
 	"sync"
 )
 
@@ -64,7 +65,14 @@ func DiscoverParameters(ctx context.Context, target string, opts Options) (strin
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			results[index] = outcome{name: name, changed: parameterChangesResponse(discoverCtx, client, parsed, name, baseline)}
+			changed := parameterChangesResponse(discoverCtx, client, parsed, name, baseline)
+			if !changed {
+				changed = parameterChangesResponseForm(discoverCtx, client, parsed, name, baseline)
+			}
+			if !changed {
+				changed = parameterChangesResponseJSON(discoverCtx, client, parsed, name, baseline)
+			}
+			results[index] = outcome{name: name, changed: changed}
 		}(index, name)
 	}
 	wg.Wait()
@@ -107,6 +115,56 @@ func parameterChangesResponse(ctx context.Context, client *http.Client, base *ur
 	if err != nil {
 		return false
 	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != baseline.Status {
+		return true
+	}
+	delta := responseBodyLength(resp) - baseline.Length
+	if delta < 0 {
+		delta = -delta
+	}
+	return delta > 16
+}
+
+// parameterChangesResponseForm probes the same parameter name as a POST form
+// body (application/x-www-form-urlencoded) and applies the same drift rule.
+func parameterChangesResponseForm(ctx context.Context, client *http.Client, base *url.URL, name string, baseline parameterBaseline) bool {
+	body := url.Values{name: {"ouroboros-param-probe"}}.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base.String(), strings.NewReader(body))
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != baseline.Status {
+		return true
+	}
+	delta := responseBodyLength(resp) - baseline.Length
+	if delta < 0 {
+		delta = -delta
+	}
+	return delta > 16
+}
+
+// parameterChangesResponseJSON probes the same parameter name as a JSON body
+// (application/json) and applies the same drift rule.
+func parameterChangesResponseJSON(ctx context.Context, client *http.Client, base *url.URL, name string, baseline parameterBaseline) bool {
+	payload := `{"` + strings.ReplaceAll(name, `"`, `\"`) + `":"ouroboros-param-probe"}`
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base.String(), strings.NewReader(payload))
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {
 		return false

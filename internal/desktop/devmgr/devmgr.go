@@ -132,8 +132,11 @@ func Run(opts Options) error {
 	return RunWithRunner(root, opts, NewExecRunner(root))
 }
 
-// isGUIRoot reports whether dir looks like the gui root the mjs script
-// resolves (has scripts/dev-desktop.mjs).
+// isGUIRoot reports whether dir looks like the gui root: the project's
+// package.json plus the vite config that drives the renderer build. (The
+// historical scripts/dev-desktop.mjs marker was removed when the dev
+// orchestration moved into this Go package.)
 func isGUIRoot(dir string) bool {
-	return fileExists(filepath.Join(dir, "scripts", "dev-desktop.mjs"))
+	return fileExists(filepath.Join(dir, "package.json")) &&
+		(fileExists(filepath.Join(dir, "vite.config.ts")) || fileExists(filepath.Join(dir, "vite.config.js")))
 }

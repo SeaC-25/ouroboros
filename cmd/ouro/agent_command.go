@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -271,7 +272,12 @@ func runAgent(ctx context.Context, out io.Writer, opts *agentRunOptions) error {
 			continue
 		}
 		done[best.Entity.ID+"\x00"+best.Spec.Action] = true
-		_ = leases.Transition(ctx, key, eventlog.LeaseRunning, "")
+		// A failed RUNNING transition leaves the lease CLAIMED; the widened
+		// RecoverOrphans (CLAIMED+RUNNING) requeues it after the heartbeat
+		// timeout, so log for diagnosis instead of wedging silently.
+		if transitionErr := leases.Transition(ctx, key, eventlog.LeaseRunning, ""); transitionErr != nil {
+			log.Printf("agent lease %s RUNNING transition failed (orphan recovery will requeue): %v", key, transitionErr)
+		}
 
 		// REAL EXECUTION: dispatch the action through nativetools with the
 		// scope-guarded HTTP client. Failures are recorded, never fatal.

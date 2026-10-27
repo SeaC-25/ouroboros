@@ -19,30 +19,60 @@ const OpArchiveDiscovery = "archive_discovery"
 
 // DiscoverArchiveURLs queries the Internet Archive CDX API and emits
 // url_list_text output: one URL per line, de-duplicated and in-scope.
+// Targets may carry several comma-separated domains; each is queried in
+// turn and the merged result is de-duplicated across domains.
 func DiscoverArchiveURLs(ctx context.Context, target string, opts Options) (string, error) {
-	domain := strings.TrimSpace(strings.TrimSuffix(target, "."))
-	if domain == "" {
+	trimmed := strings.TrimSpace(strings.TrimSuffix(target, "."))
+	if trimmed == "" {
 		return "", fmt.Errorf("archive_discovery requires a domain target")
 	}
+	domains := strings.Split(trimmed, ",")
 
 	client := opts.httpClient()
 	queryCtx, cancel := context.WithTimeout(ctx, opts.timeout())
 	defer cancel()
 
+	urls := []string{}
+	for _, domain := range domains {
+		domain = strings.TrimSpace(strings.TrimSuffix(domain, "."))
+		if domain == "" {
+			continue
+		}
+		domainURLs, err := queryArchiveCDX(queryCtx, client, domain)
+		if err != nil {
+			return "", err
+		}
+		urls = append(urls, domainURLs...)
+	}
+
+	// Merge results from every domain; de-duplicate and cap the combined list.
+	urls = dedupeArchiveURLs(urls)
+	if len(urls) > archiveLimit() {
+		urls = urls[:archiveLimit()]
+	}
+	if len(urls) == 0 {
+		return "", nil
+	}
+	return strings.Join(urls, "\n"), nil
+}
+
+// queryArchiveCDX queries the CDX API for one domain and returns its
+// de-duplicated in-scope URLs (query strings preserved verbatim).
+func queryArchiveCDX(ctx context.Context, client *http.Client, domain string) ([]string, error) {
 	endpoint := fmt.Sprintf(cdxEndpointValue(), url.QueryEscape(domain+"/*"), archiveLimit())
-	req, err := http.NewRequestWithContext(queryCtx, http.MethodGet, endpoint, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return "", fmt.Errorf("build archive request: %w", err)
+		return nil, fmt.Errorf("build archive request: %w", err)
 	}
 	req.Header.Set("User-Agent", "ouroboros-native-gau/1")
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("query archive source: %w", err)
+		return nil, fmt.Errorf("query archive source: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 {
-		return "", fmt.Errorf("archive source returned status %d", resp.StatusCode)
+		return nil, fmt.Errorf("archive source returned status %d", resp.StatusCode)
 	}
 
 	body := make([]byte, 0, 64*1024)
@@ -57,11 +87,22 @@ func DiscoverArchiveURLs(ctx context.Context, target string, opts Options) (stri
 		}
 	}
 
-	urls := archiveURLsFromCDX(body, domain)
-	if len(urls) == 0 {
-		return "", nil
+	return archiveURLsFromCDX(body, domain), nil
+}
+
+// dedupeArchiveURLs removes duplicate URLs across all queried domains.
+func dedupeArchiveURLs(urls []string) []string {
+	seen := make(map[string]bool, len(urls))
+	unique := urls[:0:0]
+	for _, value := range urls {
+		if seen[value] {
+			continue
+		}
+		seen[value] = true
+		unique = append(unique, value)
 	}
-	return strings.Join(urls, "\n"), nil
+	sort.Strings(unique)
+	return unique
 }
 
 // archiveURLsFromCDX parses the CDX JSON (array of arrays, first row is the
