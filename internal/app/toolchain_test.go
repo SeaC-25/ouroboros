@@ -1048,7 +1048,6 @@ func TestExecuteToolCompilePreviewReviewWritesFailedExecutionArtifact(t *testing
 }
 
 func TestExecuteToolCompilePreviewReviewRequiresCurrentSafetyAuthorization(t *testing.T) {
-	t.Skip("Safety authorization checks disabled")
 	root := filepath.Join(t.TempDir(), "workspace")
 	if err := InitWorkspace(root); err != nil {
 		t.Fatalf("init workspace: %v", err)
@@ -7039,64 +7038,7 @@ dependencies:
 	}
 }
 
-func TestExecuteToolchainInstallDispatchExecutesWithoutExplicitExecute(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "workspace")
-	skipIfWindows(t)
-	if err := InitWorkspace(root); err != nil {
-		t.Fatalf("init workspace: %v", err)
-	}
-	marker := filepath.Join(t.TempDir(), "installer-ran")
-	manifest := `name: web-api-pack
-version: "0.1.0"
-capabilities:
-  - web.discovery
-runner: native
-parser: web_api_parser
-healthcheck: built_in
-dependencies:
-  - name: missing-httpx
-    kind: binary
-    install_command:
-      - sh
-      - -c
-      - touch ` + marker + `
-`
-	if err := os.WriteFile(filepath.Join(root, "toolchain", "web-api-pack", "manifest.yaml"), []byte(manifest), 0o644); err != nil {
-		t.Fatalf("write manifest: %v", err)
-	}
-	request, err := CreateToolchainInstallRequest(root, "web-api-pack", "missing-httpx")
-	if err != nil {
-		t.Fatalf("create request: %v", err)
-	}
-	if _, err := UpdateToolchainInstallRequestStatus(root, request.Path, "approved"); err != nil {
-		t.Fatalf("approve request: %v", err)
-	}
-	dispatch, err := CreateToolchainInstallDispatch(root)
-	if err != nil {
-		t.Fatalf("create dispatch: %v", err)
-	}
-
-	execution, err := ExecuteToolchainInstallDispatch(root, dispatch.Path, ToolchainInstallDispatchExecutionOptions{})
-	if err != nil {
-		t.Fatalf("execute install dispatch: %v", err)
-	}
-	if execution.Status != "completed" || len(execution.Results) != 1 {
-		t.Fatalf("expected completed install execution, got %#v", execution)
-	}
-	if _, err := os.Stat(marker); err != nil {
-		t.Fatalf("expected install command without execute flag, marker stat err=%v", err)
-	}
-	paths, err := filepath.Glob(filepath.Join(root, "toolchain", "install-executions", "*.json"))
-	if err != nil {
-		t.Fatalf("glob install executions: %v", err)
-	}
-	if len(paths) != 1 {
-		t.Fatalf("expected one execution artifact without explicit execute, got %#v", paths)
-	}
-}
-
 func TestExecuteToolchainInstallDispatchRequiresSafetyAuthorizationForDisabledBoundary(t *testing.T) {
-	t.Skip("Safety authorization checks disabled")
 	root := filepath.Join(t.TempDir(), "workspace")
 	if err := InitWorkspace(root); err != nil {
 		t.Fatalf("init workspace: %v", err)
@@ -7245,7 +7187,6 @@ dependencies:
 }
 
 func TestExecuteToolchainInstallDispatchRecordsSafetyWarnings(t *testing.T) {
-	t.Skip("Safety authorization checks disabled")
 	root := filepath.Join(t.TempDir(), "workspace")
 	if err := InitWorkspace(root); err != nil {
 		t.Fatalf("init workspace: %v", err)
@@ -7320,63 +7261,6 @@ dependencies:
 	}
 	if !strings.Contains(strings.Join(decoded.Warnings, "\n"), "scope.target_policy is disabled") {
 		t.Fatalf("expected persisted safety warnings, got %#v", decoded.Warnings)
-	}
-}
-
-func TestExecuteToolchainInstallDispatchTreatsApprovalStatusAsMetadata(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "workspace")
-	skipIfWindows(t)
-	if err := InitWorkspace(root); err != nil {
-		t.Fatalf("init workspace: %v", err)
-	}
-	marker := filepath.Join(t.TempDir(), "installer-ran")
-	manifest := `name: web-api-pack
-version: "0.1.0"
-capabilities:
-  - web.discovery
-runner: native
-parser: web_api_parser
-healthcheck: built_in
-dependencies:
-  - name: missing-httpx
-    kind: binary
-    install_command:
-      - sh
-      - -c
-      - touch ` + marker + `
-`
-	if err := os.WriteFile(filepath.Join(root, "toolchain", "web-api-pack", "manifest.yaml"), []byte(manifest), 0o644); err != nil {
-		t.Fatalf("write manifest: %v", err)
-	}
-	request, err := CreateToolchainInstallRequest(root, "web-api-pack", "missing-httpx")
-	if err != nil {
-		t.Fatalf("create request: %v", err)
-	}
-	if _, err := UpdateToolchainInstallRequestStatus(root, request.Path, "approved"); err != nil {
-		t.Fatalf("approve request: %v", err)
-	}
-	dispatch, err := CreateToolchainInstallDispatch(root)
-	if err != nil {
-		t.Fatalf("create dispatch: %v", err)
-	}
-	dispatch.Ready[0].Status = "pending"
-	data, err := json.MarshalIndent(dispatch, "", "  ")
-	if err != nil {
-		t.Fatalf("encode tampered dispatch: %v", err)
-	}
-	if err := os.WriteFile(dispatch.Path, append(data, '\n'), 0o644); err != nil {
-		t.Fatalf("write tampered dispatch: %v", err)
-	}
-
-	execution, err := ExecuteToolchainInstallDispatch(root, dispatch.Path, ToolchainInstallDispatchExecutionOptions{})
-	if err != nil {
-		t.Fatalf("execute pending-status dispatch: %v", err)
-	}
-	if execution.Status != "completed" || len(execution.Results) != 1 {
-		t.Fatalf("expected pending status to remain metadata, got %#v", execution)
-	}
-	if _, err := os.Stat(marker); err != nil {
-		t.Fatalf("expected pending-status request to execute, marker stat err=%v", err)
 	}
 }
 
@@ -7680,7 +7564,6 @@ func TestExecuteToolchainInstallRetryDispatchRequiresExplicitExecute(t *testing.
 }
 
 func TestExecuteToolchainInstallRetryDispatchRequiresSafetyAuthorizationForDisabledBoundary(t *testing.T) {
-	t.Skip("Safety authorization checks disabled")
 	root := filepath.Join(t.TempDir(), "workspace")
 	if err := InitWorkspace(root); err != nil {
 		t.Fatalf("init workspace: %v", err)
@@ -7813,7 +7696,6 @@ func TestExecuteToolchainInstallRetryDispatchRunsReadyCommandsAndWritesAuditArti
 }
 
 func TestExecuteToolchainInstallRetryDispatchRecordsSafetyWarnings(t *testing.T) {
-	t.Skip("Safety authorization checks disabled")
 	root := filepath.Join(t.TempDir(), "workspace")
 	if err := InitWorkspace(root); err != nil {
 		t.Fatalf("init workspace: %v", err)
@@ -7981,66 +7863,6 @@ func TestListAndReadToolchainInstallRetryDispatchExecutionsReadsAuditArtifacts(t
 	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatalf("retry execution listing/reading must not execute command arrays, marker stat err=%v", err)
-	}
-}
-
-func TestCreateToolchainInstallOrchestrationExecutesWithZeroValueOptions(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "workspace")
-	skipIfWindows(t)
-	if err := InitWorkspace(root); err != nil {
-		t.Fatalf("init workspace: %v", err)
-	}
-	marker := filepath.Join(t.TempDir(), "orchestrate-ran")
-	writeInstallRequestFixture(t, root, ToolchainInstallRequest{
-		Status:     "approved",
-		Pack:       "web-api-pack",
-		Dependency: "missing-httpx",
-		Command:    []string{"sh", "-c", "touch " + marker},
-	})
-
-	orchestration, err := CreateToolchainInstallOrchestration(root, ToolchainInstallOrchestrationOptions{})
-	if err != nil {
-		t.Fatalf("create install orchestration: %v", err)
-	}
-	if orchestration.Status != "completed" || orchestration.Mode != "execute" {
-		t.Fatalf("unexpected orchestration mode: %#v", orchestration)
-	}
-	if orchestration.DispatchReady != 1 || orchestration.DispatchSkipped != 0 || orchestration.RetryReady != 0 {
-		t.Fatalf("unexpected orchestration counts: %#v", orchestration)
-	}
-	if orchestration.DispatchPath == "" || orchestration.ExecutionPath == "" || orchestration.RetryDispatchPath != "" {
-		t.Fatalf("production orchestration must create dispatch and execution paths: %#v", orchestration)
-	}
-	if !strings.Contains(orchestration.Path, filepath.Join("toolchain", "install-orchestrations")) {
-		t.Fatalf("expected orchestration audit path under install-orchestrations, got %s", orchestration.Path)
-	}
-	if _, err := os.Stat(marker); err != nil {
-		t.Fatalf("zero-value orchestration must execute installer command, marker stat err=%v", err)
-	}
-	dispatches, err := filepath.Glob(filepath.Join(root, "toolchain", "install-dispatches", "*.json"))
-	if err != nil {
-		t.Fatalf("glob dispatches: %v", err)
-	}
-	if len(dispatches) != 1 {
-		t.Fatalf("production orchestration must create one dispatch artifact, got %#v", dispatches)
-	}
-	executions, err := filepath.Glob(filepath.Join(root, "toolchain", "install-executions", "*.json"))
-	if err != nil {
-		t.Fatalf("glob executions: %v", err)
-	}
-	if len(executions) != 1 {
-		t.Fatalf("production orchestration must create one execution artifact, got %#v", executions)
-	}
-	data, err := os.ReadFile(orchestration.Path)
-	if err != nil {
-		t.Fatalf("read orchestration artifact: %v", err)
-	}
-	var decoded ToolchainInstallOrchestration
-	if err := json.Unmarshal(data, &decoded); err != nil {
-		t.Fatalf("decode orchestration artifact: %v", err)
-	}
-	if decoded.Status != "completed" || decoded.Mode != "execute" || decoded.DispatchReady != 1 || decoded.ExecutionResults != 1 {
-		t.Fatalf("unexpected persisted orchestration: %#v", decoded)
 	}
 }
 

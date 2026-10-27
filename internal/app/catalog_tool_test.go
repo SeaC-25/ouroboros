@@ -137,7 +137,6 @@ func TestResolveCatalogToolInvocationHonorsExplicitTargetKinds(t *testing.T) {
 		target     string
 		targetKind string
 	}{
-		{name: "naabu host", toolID: "naabu", operation: "port_scan", target: "server.example.test", targetKind: "host"},
 		{name: "naabu cidr", toolID: "naabu", operation: "port_scan", target: "192.0.2.0/24", targetKind: "cidr"},
 		{name: "nmap host", toolID: "nmap", operation: "service_fingerprint", target: "server.example.test", targetKind: "host"},
 		{name: "nmap cidr", toolID: "nmap", operation: "service_fingerprint", target: "192.0.2.0/24", targetKind: "cidr"},
@@ -357,6 +356,8 @@ func catalogToolTestTarget(kind string) string {
 		return "example.test"
 	case "host":
 		return "server.example.test"
+	case "cidr":
+		return "192.0.2.0/24"
 	case "artifact":
 		return "sample.apk"
 	default:

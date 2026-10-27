@@ -1227,6 +1227,7 @@ type doctorJSONReport struct {
 	Ready          bool                     `json:"ready"`
 	Errors         []string                 `json:"errors"`
 	Warnings       []string                 `json:"warnings"`
+	RequireSafetyAuthorization bool          `json:"require_safety_authorization"`
 	SafetyBypasses []app.DoctorSafetyBypass `json:"safety_bypasses"`
 	StrictGate     doctorJSONStrictGate     `json:"strict_gate"`
 }
@@ -1244,6 +1245,7 @@ func printDoctorJSON(out io.Writer, workspace string, report app.DoctorReport, r
 		Ready:          report.Ready,
 		Errors:         append([]string{}, report.Errors...),
 		Warnings:       append([]string{}, report.Warnings...),
+		RequireSafetyAuthorization: requireSafetyAuthorization,
 		SafetyBypasses: append([]app.DoctorSafetyBypass{}, report.SafetyBypasses...),
 		StrictGate:     doctorJSONStrictGateFor(report, requireSafetyAuthorization),
 	}
@@ -1945,18 +1947,22 @@ func newRunCommand(out io.Writer) *cobra.Command {
 	cmd.Flags().StringSliceVar(&providerGenerateRequiredCapabilities, "provider-generate-required-capability", nil, "Required provider capability for run-integrated provider generation; repeat or comma-separate")
 	cmd.Flags().BoolVar(&providerGenerateStream, "provider-generate-stream", false, "Request streamed output for run-integrated provider generation and persist only safe stream metadata")
 	cmd.Flags().BoolVar(&providerGenerateToolPlanPreview, "provider-generate-tool-plan-preview", false, "Enable read-only metadata-only tool plan preview from provider generation output; does not execute tools, dispatch workers, or touch targets")
+	cmd.Flags().Float64Var(&providerGenerateMaxEstimatedCostUSD, "provider-generate-max-estimated-cost-usd", 0, "Maximum allowed estimated cost in USD for run-integrated provider generation")
+	cmd.Flags().BoolVar(&requireSafetyAuthorization, "require-safety-authorization", false, "Fail run when disabled safety boundaries lack current authorization.yaml metadata")
 	return cmd
 }
 
 func runOptionsFromCommand(cmd *cobra.Command, action compiler.SemanticAction, deferReportProjection bool, requireSafetyAuthorization bool, providerGenerate bool, providerGeneratePrompt string, providerGenerateSystemPrompt string, providerGenerateMaxTokens int, providerGenerateMaxEstimatedCostUSD float64, providerGenerateRecordUsage bool, providerGenerateRequiredCapabilities []string, providerGenerateStream bool, providerGenerateToolPlanPreview bool) (app.RunOptions, error) {
 	options := app.RunOptions{
-		Action:                action,
-		DeferReportProjection: deferReportProjection,
+		Action:                     action,
+		DeferReportProjection:      deferReportProjection,
+		RequireSafetyAuthorization: requireSafetyAuthorization,
 	}
 	if !providerGenerate {
 		return options, nil
 	}
 	if strings.TrimSpace(providerGeneratePrompt) == "" {
+		return app.RunOptions{}, fmt.Errorf("provider generation prompt is required")
 	}
 	if providerGenerateMaxTokens < 0 {
 		return app.RunOptions{}, fmt.Errorf("provider generation max_tokens must be non-negative")

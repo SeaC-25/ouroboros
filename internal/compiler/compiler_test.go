@@ -121,7 +121,7 @@ func TestCompileEmitsToolLevelPlanNodesFromBuiltInCatalog(t *testing.T) {
 		{toolID: "httpx", manifestName: "web-api-pack", capability: "web.discovery", operation: "http_probe", parser: "httpx_jsonl", targetKind: "url", dependencyName: "httpx", dependencyKind: "binary"},
 		{toolID: "subfinder", manifestName: "web-api-pack", capability: "web.discovery", operation: "subdomain_discovery", parser: "subfinder_jsonl", targetKind: "domain", dependencyName: "subfinder", dependencyKind: "binary"},
 		{toolID: "nmap", manifestName: "infra-pack", capability: "infra.host_discovery", operation: "service_fingerprint", parser: "nmap_xml", targetKind: "host", dependencyName: "nmap", dependencyKind: "binary"},
-		{toolID: "naabu", manifestName: "infra-pack", capability: "infra.host_discovery", operation: "port_scan", parser: "naabu_jsonl", targetKind: "host", dependencyName: "naabu", dependencyKind: "binary"},
+		{toolID: "naabu", manifestName: "infra-pack", capability: "infra.host_discovery", operation: "port_scan", parser: "naabu_jsonl", targetKind: "cidr", dependencyName: "naabu", dependencyKind: "binary"},
 	} {
 		node, ok := byTool[expected.toolID]
 		if !ok {

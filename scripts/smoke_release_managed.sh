@@ -13,7 +13,11 @@ if [ -n "${OURO_TRUSTED_PATH:-}" ]; then
 	export PATH
 fi
 
-ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+case "$0" in
+	*/*) ROOT_DIR="${0%/*}" ;;
+	*) ROOT_DIR="." ;;
+esac
+ROOT="$(CDPATH= cd -- "$ROOT_DIR/.." && pwd)"
 GOPROXY="${GOPROXY:-https://goproxy.cn,direct}"
 TMPDIR_BASE="${TMPDIR:-/tmp}"
 BUNDLE_NAME="${OURO_RELEASE_MANAGED_SMOKE_BUNDLE:-nuclei-templates}"
@@ -98,13 +102,19 @@ printf 'release-managed-smoke: workspace %s\n' "$WORKSPACE"
 printf 'release-managed-smoke: release-root %s\n' "$RELEASE_ROOT"
 printf 'release-managed-smoke: logs %s\n' "$OURO_RELEASE_MANAGED_SMOKE_LOG_DIR"
 
+TRUSTED_SHELL="/bin/sh"
+if [ ! -x "$TRUSTED_SHELL" ]; then
+	TRUSTED_SHELL="/usr/bin/sh"
+fi
+[ -x "$TRUSTED_SHELL" ] || fail "trusted shell not found"
+
 run_logged "release" "$OURO_RELEASE_MANAGED_SMOKE_LOG_DIR/release.txt" \
-	env GOPROXY="$GOPROXY" VERSION="$VERSION" DIST_DIR="$DIST_DIR" GOOS="$GOOS_VALUE" GOARCH="$GOARCH_VALUE" "$ROOT/scripts/release.sh"
+	env GOPROXY="$GOPROXY" VERSION="$VERSION" DIST_DIR="$DIST_DIR" GOOS="$GOOS_VALUE" GOARCH="$GOARCH_VALUE" "$TRUSTED_SHELL" "$ROOT/scripts/release.sh"
 [ -f "$ARCHIVE" ] || fail "release archive was not written: $ARCHIVE"
 printf 'release: ok\n'
 
 run_logged "install" "$OURO_RELEASE_MANAGED_SMOKE_LOG_DIR/install.txt" \
-	env PREFIX="$PREFIX" "$ROOT/scripts/install.sh" "$ARCHIVE"
+	env PREFIX="$PREFIX" "$TRUSTED_SHELL" "$ROOT/scripts/install.sh" "$ARCHIVE"
 [ -x "$OURO" ] || fail "installed ouro binary is missing or not executable: $OURO"
 [ -d "$RELEASE_ROOT/toolchains/managed-bundles/$BUNDLE_NAME" ] || fail "installed release-managed bundle is missing: $BUNDLE_NAME"
 printf 'install: ok\n'

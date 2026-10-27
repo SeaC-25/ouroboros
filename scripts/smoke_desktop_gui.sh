@@ -15,7 +15,11 @@ set -eu
 # 进程清理：后端直接运行 go build 产出的二进制（不经 go run)，退出时经
 #   lib_smoke_common.sh 的 cleanup_tree 终止整个进程树，避免旧实例残留占端口。
 
-ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+case "$0" in
+	*/*) ROOT_DIR="${0%/*}" ;;
+	*) ROOT_DIR="." ;;
+esac
+ROOT="$(CDPATH= cd -- "$ROOT_DIR/.." && pwd)"
 TMPDIR_BASE="${TMPDIR:-/tmp}"
 SMOKE_ROOT="$(mktemp -d "$TMPDIR_BASE/ouro-desktop-gui-smoke-XXXXXX")"
 WORKSPACE="$SMOKE_ROOT/workspace"

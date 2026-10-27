@@ -61,7 +61,6 @@ func TestExecuteRuntimeWorkerQueueClaimDispatchRequiresExplicitExecute(t *testin
 }
 
 func TestExecuteRuntimeWorkerQueueClaimDispatchRequiresCurrentSafetyAuthorizationForDisabledBoundaries(t *testing.T) {
-	t.Skip("Safety authorization checks disabled")
 	for _, transportMode := range []string{"file-outbox", "http-json"} {
 		t.Run(transportMode, func(t *testing.T) {
 			root := filepath.Join(t.TempDir(), "workspace")
@@ -720,7 +719,6 @@ func TestRuntimeWorkerTransportDispatchRequestsListReadAndAck(t *testing.T) {
 }
 
 func TestAcknowledgeRuntimeWorkerTransportDispatchRequestRequiresCurrentSafetyAuthorization(t *testing.T) {
-	t.Skip("Safety authorization checks disabled")
 	root := filepath.Join(t.TempDir(), "workspace")
 	now := time.Date(2026, 6, 2, 13, 40, 0, 0, time.UTC)
 	dispatch := createFileOutboxRuntimeWorkerQueueDispatch(t, root, now)
@@ -958,7 +956,6 @@ func TestRuntimeWorkerTransportHTTPHandlerRejectsBearerTokenBeforeSafetyAuthoriz
 }
 
 func TestRuntimeWorkerTransportHTTPHandlerRequiresCurrentSafetyAuthorizationBeforePersistingRequest(t *testing.T) {
-	t.Skip("Safety authorization checks disabled")
 	root := filepath.Join(t.TempDir(), "workspace")
 	now := time.Date(2026, 6, 2, 15, 30, 0, 0, time.UTC)
 	if err := InitWorkspace(root); err != nil {
@@ -1350,7 +1347,6 @@ func TestExecuteRuntimeWorkerTransportDispatchRequestUsesRequestToolPlanCommand(
 }
 
 func TestExecuteRuntimeWorkerTransportDispatchRequestRequiresCurrentSafetyAuthorizationForRequestCommand(t *testing.T) {
-	t.Skip("Safety authorization checks disabled")
 	root := filepath.Join(t.TempDir(), "workspace")
 	now := time.Date(2026, 6, 2, 14, 10, 0, 0, time.UTC)
 	marker := filepath.Join(t.TempDir(), "request-command-ran")
@@ -1844,7 +1840,6 @@ func TestCreateRuntimeWorkerTransportDaemonControlRequestWritesPendingArtifact(t
 }
 
 func TestCreateRuntimeWorkerTransportDaemonControlRequestRequiresCurrentSafetyAuthorizationBeforeWriting(t *testing.T) {
-	t.Skip("Safety authorization checks disabled")
 	root := filepath.Join(t.TempDir(), "workspace")
 	now := time.Date(2026, 6, 2, 16, 55, 0, 0, time.UTC)
 	if err := InitWorkspace(root); err != nil {
@@ -2092,7 +2087,6 @@ func TestExecuteRuntimeWorkerTransportDispatchDaemonStopsOnPendingControlRequest
 }
 
 func TestExecuteRuntimeWorkerTransportDispatchDaemonRequiresCurrentSafetyAuthorizationBeforeApplyingControl(t *testing.T) {
-	t.Skip("Safety authorization checks disabled")
 	root := filepath.Join(t.TempDir(), "workspace")
 	now := time.Date(2026, 6, 2, 14, 34, 0, 0, time.UTC)
 	if err := InitWorkspace(root); err != nil {
@@ -2203,7 +2197,6 @@ func TestExecuteRuntimeWorkerTransportDaemonSupervisorRequiresExplicitExecute(t 
 }
 
 func TestExecuteRuntimeWorkerTransportDaemonSupervisorRequiresCurrentSafetyAuthorizationBeforeApplyingControl(t *testing.T) {
-	t.Skip("Safety authorization checks disabled")
 	root := filepath.Join(t.TempDir(), "workspace")
 	now := time.Date(2026, 6, 2, 14, 38, 0, 0, time.UTC)
 	if err := InitWorkspace(root); err != nil {
@@ -2491,7 +2484,6 @@ func TestSubmitRuntimeWorkerQueueDispatchResultWritesAuditAndClosesClaim(t *test
 }
 
 func TestSubmitRuntimeWorkerQueueDispatchResultRequiresCurrentSafetyAuthorization(t *testing.T) {
-	t.Skip("Safety authorization checks disabled")
 	root := filepath.Join(t.TempDir(), "workspace")
 	now := time.Date(2026, 6, 2, 13, 42, 0, 0, time.UTC)
 	dispatch := createDispatchedRuntimeWorkerQueueClaim(t, root, now)
@@ -2825,7 +2817,6 @@ func TestExecuteRuntimeWorkerDispatchRetryDispatchRequiresExplicitExecute(t *tes
 }
 
 func TestExecuteRuntimeWorkerDispatchRetryDispatchRequiresCurrentSafetyAuthorizationBeforeRetryMutation(t *testing.T) {
-	t.Skip("Safety authorization checks disabled")
 	root := filepath.Join(t.TempDir(), "workspace")
 	now := time.Date(2026, 6, 2, 14, 20, 0, 0, time.UTC)
 	_, retryDispatch, _ := createRuntimeWorkerDispatchRetryDispatchFixture(t, root, now, RuntimeWorkerToolPlanPayload{

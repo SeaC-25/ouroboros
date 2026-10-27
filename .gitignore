@@ -30,3 +30,4 @@ gui/.devmgr-*/
 *.db-shm
 *.db-wal
 fastsec-linux-amd64
+solve_loop.mjs

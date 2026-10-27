@@ -141,3 +141,69 @@ func TestOpenIntentPreservesMultipleSourceFacts(t *testing.T) {
 		t.Fatalf("source facts must be snapshot copies")
 	}
 }
+
+// TestIntentClaimIntentExpiredLeaseTakeover proves an intent wedged in
+// Claimed by a dead worker (lease TTL lapsed) can be taken over by another
+// agent with a fresh lease ID. Live-lease refusal uses its own intent with
+// a long TTL so the 1ms expiry cannot race the refusal check.
+func TestIntentClaimIntentExpiredLeaseTakeover(t *testing.T) {
+	store := NewMemoryStore()
+
+	// Live lease refuses a second claimer (separate intent, long TTL).
+	live, err := store.OpenIntent(Intent{Kind: "probe", Goal: "live lease refusal"})
+	if err != nil {
+		t.Fatalf("open live intent: %v", err)
+	}
+	if _, err := store.ClaimIntent(live.ID, "agent-a", time.Minute); err != nil {
+		t.Fatalf("claim live intent: %v", err)
+	}
+	if _, err := store.ClaimIntent(live.ID, "agent-b", time.Minute); err == nil {
+		t.Fatalf("claim on live lease must fail")
+	}
+
+	// Dead worker's expired lease can be taken over with a fresh lease ID.
+	intent, err := store.OpenIntent(Intent{Kind: "probe", Goal: "scan target"})
+	if err != nil {
+		t.Fatalf("open intent: %v", err)
+	}
+	stale, err := store.ClaimIntent(intent.ID, "agent-dead", time.Millisecond)
+	if err != nil {
+		t.Fatalf("claim stale: %v", err)
+	}
+	time.Sleep(5 * time.Millisecond) // let the 1ms lease lapse
+
+	fresh, err := store.ClaimIntent(intent.ID, "agent-b", time.Minute)
+	if err != nil {
+		t.Fatalf("takeover claim after expiry: %v", err)
+	}
+	if fresh.ID == stale.ID {
+		t.Fatalf("takeover must generate a fresh lease id, got %s", fresh.ID)
+	}
+	if fresh.AgentID != "agent-b" {
+		t.Fatalf("takeover lease must belong to new agent, got %s", fresh.AgentID)
+	}
+	claimed, ok := store.Intent(intent.ID)
+	if !ok || claimed.State != IntentClaimed || claimed.Lease == nil || claimed.Lease.ID != fresh.ID {
+		t.Fatalf("intent must carry the fresh lease, got %+v", claimed)
+	}
+}
+
+// TestIntentHeartbeatExpiredLeaseRejected proves Heartbeat must not
+// resurrect an already-expired lease: the worker is presumed dead and
+// another agent may have taken over.
+func TestIntentHeartbeatExpiredLeaseRejected(t *testing.T) {
+	store := NewMemoryStore()
+	intent, err := store.OpenIntent(Intent{Kind: "probe", Goal: "scan target"})
+	if err != nil {
+		t.Fatalf("open intent: %v", err)
+	}
+	lease, err := store.ClaimIntent(intent.ID, "agent-dead", time.Millisecond)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	time.Sleep(5 * time.Millisecond) // lease now expired
+
+	if _, err := store.Heartbeat(intent.ID, lease.ID, time.Minute); err == nil {
+		t.Fatalf("heartbeat on expired lease must fail")
+	}
+}

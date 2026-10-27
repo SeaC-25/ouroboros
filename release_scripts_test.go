@@ -817,6 +817,14 @@ chat)
 		printf 'dialog: ai operator chat\n'
 		printf 'AI setup: status=needs-provider\n'
 		printf 'You > |\n'
+	elif [ "${3:-}" = "--prompt" ]; then
+		workspace="$2"
+		preview_dir="$workspace/runtime/model-tool-plan-previews"
+		mkdir -p "$preview_dir"
+		printf '{"schema":"ouroboros.model_tool_plan_preview.v1","status":"created","action":"enumerate_paths","stored":false}\n' > "$preview_dir/preview-chat-fake.json"
+		printf 'chat: status=completed provider=smoke-openai model=gpt-smoke tokens=12 stored=false\n'
+		printf 'chat-text: semantic_action: enumerate_paths\n'
+		printf 'chat-preview: status=created action=enumerate_paths marker=semantic_action: enumerate_paths artifact_created=true stored=false\n'
 	else
 		printf 'Launch the workspace AI chat IDE\n\n'
 		printf 'Usage:\n'
@@ -969,6 +977,14 @@ chat)
 		printf 'dialog: ai operator chat\n'
 		printf 'AI setup: status=needs-provider\n'
 		printf 'You > |\n'
+	elif [ "${3:-}" = "--prompt" ]; then
+		workspace="$2"
+		preview_dir="$workspace/runtime/model-tool-plan-previews"
+		mkdir -p "$preview_dir"
+		printf '{"schema":"ouroboros.model_tool_plan_preview.v1","status":"created","action":"enumerate_paths","stored":false}\n' > "$preview_dir/preview-chat-fake.json"
+		printf 'chat: status=completed provider=smoke-openai model=gpt-smoke tokens=12 stored=false\n'
+		printf 'chat-text: semantic_action: enumerate_paths\n'
+		printf 'chat-preview: status=created action=enumerate_paths marker=semantic_action: enumerate_paths artifact_created=true stored=false\n'
 	else
 		printf 'Launch the workspace AI chat IDE\n\n'
 		printf 'Usage:\n'
@@ -1085,6 +1101,7 @@ func TestIDESmokeScriptExercisesDirectUseAndAIProviderPath(t *testing.T) {
 		"OURO_IDE_SMOKE_BIN="+fakeOuro,
 		"OURO_IDE_SMOKE_LOG_DIR="+logDir,
 		"OURO_AI_PROVIDER_SMOKE_SKIP_FAKE_SERVER=1",
+		"OURO_SMOKE_SKIP_BUILD=1",
 	)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -6006,6 +6023,13 @@ func TestSmokeWorkflowClosureBindsReviewArtifactFromWorkflowStatusLinks(t *testi
 	fakeScript := filepath.Join(scriptDir, "smoke_workflow_closure.sh")
 	if err := os.WriteFile(fakeScript, scriptBytes, 0o755); err != nil {
 		t.Fatalf("write fake workflow closure script: %v", err)
+	}
+	freshBinBytes, err := os.ReadFile("./scripts/smoke_fresh_bin.sh")
+	if err != nil {
+		t.Fatalf("read fresh bin script: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(scriptDir, "smoke_fresh_bin.sh"), freshBinBytes, 0o755); err != nil {
+		t.Fatalf("write fake fresh bin script: %v", err)
 	}
 	writeTextFile(t, filepath.Join(fakeRoot, "go.mod"), "module fakeouro\n\ngo 1.22\n")
 	fakeCmdDir := filepath.Join(fakeRoot, "cmd", "ouro")

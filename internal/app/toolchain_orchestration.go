@@ -36,7 +36,7 @@ type ToolchainInstallOrchestration struct {
 }
 
 func CreateToolchainInstallOrchestration(root string, options ToolchainInstallOrchestrationOptions) (ToolchainInstallOrchestration, error) {
-	dispatchPlan, err := planToolchainInstallsForExecution(root)
+	dispatchPlan, err := PlanApprovedToolchainInstalls(root)
 	if err != nil {
 		return ToolchainInstallOrchestration{}, err
 	}
@@ -45,14 +45,23 @@ func CreateToolchainInstallOrchestration(root string, options ToolchainInstallOr
 		return ToolchainInstallOrchestration{}, err
 	}
 	orchestration := ToolchainInstallOrchestration{
-		Status:          "completed",
-		Mode:            "execute",
+		Status:          "dry-run",
+		Mode:            "metadata-only",
 		RequestSummary:  dispatchPlan.Summary,
 		DispatchReady:   len(dispatchPlan.Ready),
 		DispatchSkipped: len(dispatchPlan.Skipped),
 		RetryReady:      retryPlan.Summary.Ready,
 		RetrySkipped:    retryPlan.Summary.Skipped,
 	}
+	if !options.Execute {
+		if err := writeToolchainInstallOrchestration(root, &orchestration); err != nil {
+			return orchestration, err
+		}
+		return orchestration, nil
+	}
+
+	orchestration.Status = "completed"
+	orchestration.Mode = "execute"
 	dispatch, err := createToolchainInstallDispatch(root, dispatchPlan)
 	if err != nil {
 		orchestration.Status = "failed"
@@ -67,7 +76,7 @@ func CreateToolchainInstallOrchestration(root string, options ToolchainInstallOr
 	orchestration.DispatchReady = len(dispatch.Ready)
 	orchestration.DispatchSkipped = len(dispatch.Skipped)
 
-	execution, execErr := ExecuteToolchainInstallDispatch(root, dispatch.Path, ToolchainInstallDispatchExecutionOptions{})
+	execution, execErr := ExecuteToolchainInstallDispatch(root, dispatch.Path, ToolchainInstallDispatchExecutionOptions{Execute: true})
 	orchestration.ExecutionPath = execution.Path
 	orchestration.ExecutionStatus = execution.Status
 	orchestration.ExecutionResults = len(execution.Results)

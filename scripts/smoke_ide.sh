@@ -22,7 +22,11 @@ fi
 	exit 1
 }
 
-ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+case "$0" in
+	*/*) ROOT_DIR="${0%/*}" ;;
+	*) ROOT_DIR="." ;;
+esac
+ROOT="$(CDPATH= cd -- "$ROOT_DIR/.." && pwd)"
 TMPDIR_BASE="${TMPDIR:-/tmp}"
 OURO_IDE_SMOKE_BIN="${OURO_IDE_SMOKE_BIN:-$ROOT/bin/ouro}"
 
@@ -157,6 +161,7 @@ run_stage_logged "direct-use smoke" "$DIRECT_STAGE_LOG" env \
 	OURO_DIRECT_USE_SMOKE_BIN="$OURO_IDE_SMOKE_BIN" \
 	OURO_DIRECT_USE_SMOKE_LOG_DIR="$DIRECT_LOG_DIR" \
 	OURO_DIRECT_USE_SMOKE_ALLOW_EXISTING_WORKSPACE="${OURO_IDE_SMOKE_ALLOW_EXISTING_WORKSPACE:-}" \
+	OURO_SMOKE_SKIP_BUILD="${OURO_SMOKE_SKIP_BUILD:-}" \
 	"$TRUSTED_SHELL" "$ROOT/scripts/smoke_direct_use.sh"
 grep -q 'direct-use-smoke: ok' "$DIRECT_STAGE_LOG" || fail "direct-use smoke did not report ok"
 printf 'direct-use: ok\n'
@@ -167,6 +172,7 @@ run_stage_logged "AI provider smoke" "$AI_STAGE_LOG" env \
 	OURO_AI_PROVIDER_SMOKE_LOG_DIR="$AI_LOG_DIR" \
 	OURO_AI_PROVIDER_SMOKE_ALLOW_EXISTING_WORKSPACE="${OURO_IDE_SMOKE_ALLOW_EXISTING_WORKSPACE:-}" \
 	OURO_AI_PROVIDER_SMOKE_SKIP_FAKE_SERVER="${OURO_AI_PROVIDER_SMOKE_SKIP_FAKE_SERVER:-}" \
+	OURO_SMOKE_SKIP_BUILD="${OURO_SMOKE_SKIP_BUILD:-}" \
 	"$TRUSTED_SHELL" "$ROOT/scripts/smoke_ai_provider.sh"
 grep -q 'ai-provider-smoke: ok' "$AI_STAGE_LOG" || fail "AI provider smoke did not report ok"
 grep -F -q 'smoke-secret-value' "$AI_STAGE_LOG" && fail "AI provider smoke output leaked API key value"

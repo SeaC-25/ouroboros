@@ -4,6 +4,7 @@ providers:
     type: openai_compatible
     model: claude-opus-4-7
     base_url: https://niuwa88.vip/v1
+    # base_url_env: OURO_PROVIDER_BASE_URL  # 可选：设置后运行时优先读取该环境变量作为 base_url（不落盘），未设置或为空时回落上方 base_url
     api_key_env: OURO_WEB_AI_MEDIA_EDITOR_KEY
     timeout_ms: 30000
     context_window_tokens: 32768

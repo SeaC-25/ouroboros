@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -57,16 +58,12 @@ func DiscoverSubdomains(ctx context.Context, target string, opts Options) (strin
 		return "", fmt.Errorf("passive source returned status %d", resp.StatusCode)
 	}
 
-	body := make([]byte, 0, 64*1024)
-	buffer := make([]byte, 32*1024)
-	for {
-		n, err := resp.Body.Read(buffer)
-		if n > 0 {
-			body = append(body, buffer[:n]...)
-		}
-		if err != nil || len(body) > 32*1024*1024 {
-			break
-		}
+	// Read at most 1MiB, matching amass_discovery.go:78, which consumes the
+	// same certificate-transparency source (OURO_CT_ENDPOINT). One shared
+	// ceiling keeps the two passive-subdomain readers consistent.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
+	if err != nil {
+		return "", fmt.Errorf("read passive source response: %w", err)
 	}
 
 	hosts := subdomainsFromCertificateTransparency(body, domain)

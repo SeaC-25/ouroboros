@@ -1,7 +1,11 @@
 #!/usr/bin/env sh
 set -eu
 
-ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+case "$0" in
+	*/*) ROOT_DIR="${0%/*}" ;;
+	*) ROOT_DIR="." ;;
+esac
+ROOT="$(CDPATH= cd -- "$ROOT_DIR/.." && pwd)"
 GOPROXY="${GOPROXY:-https://goproxy.cn,direct}"
 VERSION="${VERSION:-0.1.0-dev}"
 DIST_DIR="${DIST_DIR:-"$ROOT/dist"}"

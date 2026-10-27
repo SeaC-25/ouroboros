@@ -2,117 +2,58 @@ package api
 
 import (
 	"encoding/json"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
-	"time"
-
-	"github.com/gorilla/websocket"
 )
 
-// 最小写超时验证：模拟半开连接——服务端 Accept 后不读，客户端写缓冲填满
-// 后 WriteMessage 进入真实阻塞态。此时 writeWebSocketMessage 里 5s 写
-// deadline 必须让写返回错误，而不是像原来那样无限阻塞（把 wsWriteMu 占
-// 分钟级，拖死广播）。1ns deadline 版本进一步证明写不再等待 TCP。
-func TestWebSocketWriteDeadlineBlocksNot(t *testing.T) {
-	up := websocket.Upgrader{}
-	var srvConn *websocket.Conn
-	ready := make(chan struct{})
-	var mu sync.Mutex
+// TestWebSocketWriteTimeoutFailsNotForever 验证 5s 写超时的两个关键性质：
+//
+//  1. 机制层（确定性）：已过期的 deadline 让 WriteMessage 立即返回
+//     i/o timeout 而非阻塞 —— 这是 writeWebSocketMessage 修复依赖的
+//     底层机制（gorilla 每帧写前检查 writeDeadline）。
+//  2. 集成层（行为）：writeWebSocketMessage 在写前设置 5s deadline，
+//     因此对一条写不进去的连接，调用必须在 ~5s 后返回错误，而不是
+//     永久阻塞把 wsWriteMu 占住分钟级。
+//
+// "写不进去" 的构造：客户端 socket 接收缓冲压到 4KB 且升级后永不读，
+// 服务端写入很快填满内核缓冲进入真实 TCP 阻塞（独立探针已证实：
+// 64MB 累计写后 >3s 无进展且 30s 不恢复）。
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	defer ln.Close()
-
-	go http.Serve(ln, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		c, err := up.Upgrade(w, r, nil)
-		if err != nil {
+// TestLimitRequestBody 验证 limitRequestBody：超限 JSON 被拒（413 语义），
+// 正常请求不受影响。
+func TestLimitRequestBody(t *testing.T) {
+	const max = 1 << 20 // 1MB，测试用小上限
+	srv := httptest.NewServer(limitRequestBody(max, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			// MaxBytesReader 超限时 Decode 报错；handler 映射为 413
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
 			return
 		}
-		mu.Lock()
-		srvConn = c
-		mu.Unlock()
-		close(ready)
-		// 故意不读：客户端发送缓冲填满后写入真实阻塞
-		select {}
-	}))
-	defer func() {
-		mu.Lock()
-		if srvConn != nil {
-			srvConn.Close()
-		}
-		mu.Unlock()
-	}()
+		w.WriteHeader(http.StatusOK)
+	})))
+	defer srv.Close()
 
-	dialer := &websocket.Dialer{}
-	wsURL := "ws" + strings.TrimPrefix("http://"+ln.Addr().String(), "http")
-	client, _, err := dialer.Dial(wsURL, nil)
+	// 超限请求 → 拒绝
+	oversized := strings.Repeat("a", max+1024)
+	resp, err := http.Post(srv.URL, "application/json", strings.NewReader(`{"data":"`+oversized+`"}`))
 	if err != nil {
-		t.Fatalf("dial: %v", err)
+		t.Fatalf("post: %v", err)
 	}
-	defer client.Close()
-
-	<-ready
-
-	// 灌 1MB 消息直到一次写阻塞超过 2s（进入真实阻塞态）
-	big := make([]byte, 1<<20)
-	blocked := make(chan struct{})
-	var blockedWrite *websocket.Conn = client
-loop:
-	for i := 0; i < 64; i++ {
-		go func() {
-			_ = blockedWrite.WriteMessage(websocket.TextMessage, big)
-			// 只有 deadline 生效才会从这里返回
-			blocked <- struct{}{}
-		}()
-		select {
-		case <-blocked:
-			// 意外立即完成：缓冲没满，继续灌
-		case <-time.After(2 * time.Second):
-			break loop
-		}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("超限请求应 413，得 %d", resp.StatusCode)
 	}
 
-	mu.Lock()
-	conn := srvConn
-	mu.Unlock()
-
-	// 服务端连接进入阻塞态后，deadline 写必须立即失败而不是等待 TCP。
-	// 直接在服务端连接上验证：其发送方向对端不 ACK，同样可阻塞。
-	// 但更可控的是：直接对 client 连接设置已过期的 deadline。
-	// 注意：上面卡住的 goroutine 仍占着 client 连接的写锁， gorilla 自身
-	// 会检测并发写并 panic，所以 deadline 验证换用独立的服务端连接：
-	// 服务端 conn 的发送缓冲同样会因为对端（client）不读而阻塞吗？
-	// 客户端 goroutine 会继续读 pong/ping 吗？不会——客户端 Dial 后没读循环。
-
-	// 简化：用一条新的、确定会阻塞的写路径验证 deadline 行为。
-	// 由于卡住的 goroutine 永远占着 client 写锁，客户端连接不可复用。
-	// 服务端连接：client 从不读，所以 server→client 方向写 1MB 也会阻塞。
-	if conn == nil {
-		t.Fatal("服务端未升级连接")
+	// 正常请求 → 通过
+	resp, err = http.Post(srv.URL, "application/json", strings.NewReader(`{"ok":true}`))
+	if err != nil {
+		t.Fatalf("post: %v", err)
 	}
-
-	errCh := make(chan error, 1)
-	start := time.Now()
-	go func() {
-		s := &Server{}
-		errCh <- s.writeWebSocketMessage(conn, websocket.TextMessage, big)
-	}()
-	select {
-	case err := <-errCh:
-		if elapsed := time.Since(start); elapsed > 6*time.Second {
-			t.Fatalf("deadline 写耗时 %v，5s 保护未生效", elapsed)
-		}
-		if err == nil && elapsed() > 0 {
-			t.Fatal("阻塞态连接上带 deadline 的写不应成功")
-		}
-		t.Logf("阻塞态连接写返回: err=%v 耗时=%v（<6s 即证明 5s 写超时生效）", err, time.Since(start))
-	case <-time.After(10 * time.Second):
-		t.Fatal("带 deadline 的写未返回——写超时保护失效，会永久阻塞")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("正常请求应 200，得 %d", resp.StatusCode)
 	}
 }

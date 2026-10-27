@@ -56,8 +56,8 @@ func TestConfigureOpenAICompatibleProviderWritesMetadataOnlyProviderConfig(t *te
 	if config.Routing.Strategy != "enabled_order_failover" {
 		t.Fatalf("unexpected routing strategy: %#v", config.Routing)
 	}
-	if len(config.Providers) != 3 {
-		t.Fatalf("expected configured provider plus default real provider and disabled offline provider, got %#v", config.Providers)
+	if len(config.Providers) != 2 {
+		t.Fatalf("expected configured provider plus default offline provider, got %#v", config.Providers)
 	}
 	provider := config.Providers[0]
 	if provider.Name != "local-openai" || provider.Type != "openai_compatible" || provider.Model != "gpt-test" || provider.BaseURL != "https://api.example.test/v1" || provider.APIKeyEnv != "OURO_TEST_OPENAI_KEY" || !provider.Enabled {
@@ -69,11 +69,8 @@ func TestConfigureOpenAICompatibleProviderWritesMetadataOnlyProviderConfig(t *te
 	if !reflect.DeepEqual(provider.Capabilities, []string{"chat", "tool_planning"}) {
 		t.Fatalf("unexpected provider capabilities: %#v", provider.Capabilities)
 	}
-	if config.Providers[1].Name != "web-ai-media-editor" || !config.Providers[1].Enabled {
-		t.Fatalf("default real provider should remain enabled after config save, got %#v", config.Providers[1])
-	}
-	if config.Providers[2].Name != "offline" || config.Providers[2].Enabled {
-		t.Fatalf("default offline provider should stay disabled after config save, got %#v", config.Providers[2])
+	if config.Providers[1].Name != "offline" || config.Providers[1].Enabled {
+		t.Fatalf("default offline provider should be disabled once a real provider is enabled, got %#v", config.Providers[1])
 	}
 }
 

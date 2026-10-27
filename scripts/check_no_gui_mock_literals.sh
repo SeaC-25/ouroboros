@@ -11,7 +11,11 @@
 #   断言样本(它们本就用于验证真实输出,不是生产代码里的 mock)。
 set -eu
 
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+case "$0" in
+	*/*) ROOT_DIR="${0%/*}" ;;
+	*) ROOT_DIR="." ;;
+esac
+ROOT="$(CDPATH= cd -- "$ROOT_DIR/.." && pwd)"
 PATTERN='SQL Injection|Port 80|192\.168\.1\.|10\.0\.0\.1|toolsReady[[:space:]]*[:=][[:space:]]*(42|37|29)|mock数据|fake fixture'
 
 CHECK_DIRS="$ROOT/internal/api $ROOT/gui/src/app"

@@ -2032,7 +2032,6 @@ execution:
 }
 
 func TestNewTUIModelForWorkspaceAIDialogSafetyCommandDoesNotRequireProvider(t *testing.T) {
-	t.Skip("Safety authorization checks disabled")
 	root := filepath.Join(t.TempDir(), "workspace")
 	if err := InitWorkspace(root); err != nil {
 		t.Fatalf("init workspace: %v", err)
@@ -4213,7 +4212,6 @@ func TestNewTUIModelForWorkspaceShowsWorkflowStatusNextGate(t *testing.T) {
 }
 
 func TestNewTUIModelForWorkspaceShowsWorkflowStatusSafetyAuthorizationGate(t *testing.T) {
-	t.Skip("Safety authorization checks disabled")
 	root := filepath.Join(t.TempDir(), "workspace")
 	if err := InitWorkspace(root); err != nil {
 		t.Fatalf("init workspace: %v", err)
@@ -16003,7 +16001,6 @@ func TestRuntimeWorkerLeaseReclaimProjectionIncludesEncodedReferenceFields(t *te
 }
 
 func TestNewTUIModelForWorkspaceShowsSafetyBypassWarnings(t *testing.T) {
-	t.Skip("Safety authorization checks disabled")
 	root := filepath.Join(t.TempDir(), "workspace")
 	if err := InitWorkspace(root); err != nil {
 		t.Fatalf("init workspace: %v", err)
@@ -16051,7 +16048,6 @@ safety_bypasses:
 }
 
 func TestNewTUIModelForWorkspaceShowsStrictSafetyGateBlocked(t *testing.T) {
-	t.Skip("Safety authorization checks disabled")
 	root := filepath.Join(t.TempDir(), "workspace")
 	if err := InitWorkspace(root); err != nil {
 		t.Fatalf("init workspace: %v", err)
@@ -16087,7 +16083,6 @@ execution:
 }
 
 func TestNewTUIModelForWorkspaceShowsExpiredSafetyAuthorization(t *testing.T) {
-	t.Skip("Safety authorization checks disabled")
 	root := filepath.Join(t.TempDir(), "workspace")
 	if err := InitWorkspace(root); err != nil {
 		t.Fatalf("init workspace: %v", err)
@@ -16136,7 +16131,6 @@ safety_bypasses:
 }
 
 func TestNewTUIModelForWorkspaceClearsSafetyRowsWhenBoundariesRestored(t *testing.T) {
-	t.Skip("Safety authorization checks disabled")
 	root := filepath.Join(t.TempDir(), "workspace")
 	if err := InitWorkspace(root); err != nil {
 		t.Fatalf("init workspace: %v", err)
@@ -16193,7 +16187,6 @@ execution:
 }
 
 func TestNewTUIModelForWorkspaceShowsStrictSafetyGateDetails(t *testing.T) {
-	t.Skip("Safety authorization checks disabled")
 	root := filepath.Join(t.TempDir(), "workspace")
 	if err := InitWorkspace(root); err != nil {
 		t.Fatalf("init workspace: %v", err)
@@ -16234,7 +16227,6 @@ execution:
 }
 
 func TestNewTUIModelForWorkspaceShowsSafetyWarningDetails(t *testing.T) {
-	t.Skip("Safety authorization checks disabled")
 	root := filepath.Join(t.TempDir(), "workspace")
 	if err := InitWorkspace(root); err != nil {
 		t.Fatalf("init workspace: %v", err)
@@ -16285,7 +16277,6 @@ safety_bypasses:
 }
 
 func TestNewTUIModelForWorkspaceShowsSafetyErrorDetails(t *testing.T) {
-	t.Skip("Safety authorization checks disabled")
 	root := filepath.Join(t.TempDir(), "workspace")
 	if err := InitWorkspace(root); err != nil {
 		t.Fatalf("init workspace: %v", err)
@@ -16644,14 +16635,14 @@ func TestNewTUIModelForWorkspaceShowsInstallOrchestrationArtifacts(t *testing.T)
 	for _, want := range []string{
 		"install orchestration artifacts: total=1",
 		"install orchestration artifact:",
-		"orchestration summary: completed execute d_ready=1 r_ready=0 results=1",
+		"orchestration summary: dry-run metadata-only d_ready=1 r_ready=0 results=0",
 	} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("expected TUI orchestration artifact row %q:\n%s", want, view)
 		}
 	}
-	if _, err := os.Stat(marker); err != nil {
-		t.Fatalf("production orchestration must execute installer command, marker stat err=%v", err)
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("dry-run orchestration must not execute installer command, marker stat err=%v", err)
 	}
 }
 
@@ -16677,8 +16668,8 @@ func TestNewTUIModelForWorkspaceShowsInstallOrchestrationArtifactDetails(t *test
 		"[Node Inspector]",
 		"runtime action: install-orchestration-artifact",
 		"artifact path: " + orchestration.Path,
-		"state: completed",
-		"execution mode: execute",
+		"state: dry-run",
+		"execution mode: metadata-only",
 		"ready: 0",
 		"mode: read-only",
 	} {

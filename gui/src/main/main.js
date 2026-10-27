@@ -5,6 +5,7 @@ import path from 'node:path';
 import { BackendManager } from './backend.js';
 import { DesktopStateManager } from './desktop-state.js';
 import { WorkspaceManager } from './workspace.js';
+import { loadOuroEnv } from './env.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -21,6 +22,16 @@ const singleInstanceLock = app.requestSingleInstanceLock();
 if (!singleInstanceLock) {
   app.quit();
 } else {
+  // .env is convenience configuration only (backend URL/keys via OURO_*);
+  // load it before anything reads process.env and never let it block startup.
+  try {
+    const loaded = loadOuroEnv({ app });
+    if (loaded.length > 0) {
+      console.log(`已加载环境配置文件: ${loaded.join(', ')}`);
+    }
+  } catch (error) {
+    console.error('加载环境配置文件失败:', error);
+  }
   configureElectronRuntime();
   registerProcessDiagnostics();
   backend.startDesktopRuntimeSession();
@@ -96,6 +107,7 @@ async function createWindow() {
   }
   mainWindow = window;
   wireDesktopProcessDiagnostics(window);
+  wireWindowNavigationGuards(window);
   if (windowState.maximized) {
     window.maximize();
   }
@@ -424,6 +436,72 @@ function wireRendererStartupSync(window) {
   window.webContents.once('did-finish-load', () => {
     sendBackendSnapshotToWindow(window, 'did-finish-load');
     sendMenuAction(window, 'refresh');
+  });
+}
+
+// Allow only the two origins this desktop app actually uses: the packaged
+// file:// renderer and the Vite dev server. Anything else is a renderer
+// compromise attempt (e.g. injected Markdown links): new windows are denied
+// outright, same-window navigation is blocked, and external http(s) URLs are
+// handed to the system browser instead.
+function wireWindowNavigationGuards(window) {
+  const devServerOrigin = (() => {
+    const value = String(process.env.VITE_DEV_SERVER_URL || '').trim();
+    if (!value) {
+      return '';
+    }
+    try {
+      return new URL(value).origin;
+    } catch {
+      return '';
+    }
+  })();
+
+  const isAllowedNavigationURL = url => {
+    if (!url || typeof url !== 'string') {
+      return false;
+    }
+    if (url.startsWith('file:')) {
+      // Only the packaged renderer document; URLs are percent-encoded, so the
+      // drive-letter form on Windows ('/F:/...') is covered by the /F:/
+      // branch. devtools or other file paths are rejected.
+      return /^file:\/\/\/[A-Za-z]:\/.*\/renderer\/index\.html$/i.test(url);
+    }
+    try {
+      const parsed = new URL(url);
+      return Boolean(devServerOrigin) && parsed.origin === devServerOrigin;
+    } catch {
+      return false;
+    }
+  };
+
+  window.webContents.setWindowOpenHandler(details => {
+    const url = details.url || '';
+    if (/^https?:/i.test(url)) {
+      void shell.openExternal(url).catch(error => {
+        backend.writeDiagnostic('desktop.open_external_failed', diagnosticError(error));
+      });
+    }
+    backend.writeDiagnostic('desktop.window_open_denied', {
+      url: String(url).slice(-2000),
+      disposition: details.disposition || '',
+    });
+    return { action: 'deny' };
+  });
+
+  window.webContents.on('will-navigate', (event, url) => {
+    if (isAllowedNavigationURL(url)) {
+      return;
+    }
+    event.preventDefault();
+    if (/^https?:/i.test(url)) {
+      void shell.openExternal(url).catch(error => {
+        backend.writeDiagnostic('desktop.open_external_failed', diagnosticError(error));
+      });
+    }
+    backend.writeDiagnostic('desktop.will_navigate_blocked', {
+      url: String(url).slice(-2000),
+    });
   });
 }
 

@@ -3,6 +3,7 @@ package app
 import (
 	"bufio"
 	"encoding/json"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -56,6 +57,11 @@ func loadWorkspaceObservations(root string) []blackboard.Observation {
 			Source:    record.Source,
 			CreatedAt: createdAt,
 		})
+	}
+	if err := scanner.Err(); err != nil {
+		// Degrade gracefully: partial journal still feeds the backlog, but
+		// the IO failure must not vanish silently.
+		log.Printf("observation journal read failed (partial): %v: %s", err, path)
 	}
 	return observations
 }
@@ -126,6 +132,11 @@ func loadWorkspaceJournalFacts(root string) []blackboard.Fact {
 			SourceObservations: record.SourceObservations,
 			CreatedAt:          time.Unix(record.CreatedAt, 0).UTC(),
 		})
+	}
+	if err := scanner.Err(); err != nil {
+		// Degrade gracefully: partial fact journal still drains backlinks,
+		// but the IO failure must not vanish silently.
+		log.Printf("fact journal read failed (partial): %v: %s", err, path)
 	}
 	return facts
 }

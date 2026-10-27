@@ -497,6 +497,39 @@ func TestBuildReplaySnapshotProjectsToolchainDependencyHealth(t *testing.T) {
 	}
 }
 
+func TestBuildReplaySnapshotDeduplicatesObservationEventsByID(t *testing.T) {
+	base := time.Date(2026, 5, 29, 10, 0, 0, 0, time.UTC)
+	// Same plan node retried: the observe parser re-emits the same fact_id,
+	// so replay must keep a single observation instead of injecting both.
+	factPayload := func(executionID string) json.RawMessage {
+		return mustFixtureJSON(map[string]any{
+			"fact_id":      "fact-observe-node-1-observation",
+			"kind":         "observation",
+			"statement":    "observe | GET https://app.example status=200",
+			"source":       "parser.observe_json",
+			"target":       "https://app.example",
+			"execution_id": executionID,
+		})
+	}
+	events := []Event{
+		{ID: 1, RunID: "run-replay", Type: EventFact, Payload: factPayload("exec-1"), CreatedAt: base},
+		{ID: 2, RunID: "run-replay", Type: EventFact, Payload: factPayload("exec-2"), CreatedAt: base.Add(time.Second)},
+	}
+
+	snapshot, err := BuildReplaySnapshot(events)
+	if err != nil {
+		t.Fatalf("build replay snapshot: %v", err)
+	}
+
+	if len(snapshot.Blackboard.Observations) != 1 {
+		t.Fatalf("expected one deduplicated observation, got %#v", snapshot.Blackboard.Observations)
+	}
+	observation := snapshot.Blackboard.Observations[0]
+	if observation.ID != "fact-observe-node-1-observation" {
+		t.Fatalf("expected first-seen observation kept, got %#v", observation)
+	}
+}
+
 func replayFixtureEvents() []Event {
 	base := time.Date(2026, 5, 29, 10, 0, 0, 0, time.UTC)
 	return []Event{

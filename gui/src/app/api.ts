@@ -135,6 +135,8 @@ const blackboardPath = '/api/ai/blackboard';
 const agentTasksPath = '/api/agents/tasks';
 const agentProfilesPath = '/api/agents/profiles';
 
+const REQUEST_TIMEOUT_MS = 30_000;
+
 class AgentProfileContractError extends Error {}
 
 declare global {
@@ -2636,6 +2638,7 @@ export async function saveWorkspaceFile(path: string, content: string): Promise<
     method: 'PUT',
     headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
     body: JSON.stringify({ content }),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) {
     throw new Error(`${path}: ${response.status}`);
@@ -2661,6 +2664,7 @@ export async function saveReportFile(path: string, content: string): Promise<Rep
     method: 'PUT',
     headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
     body: JSON.stringify({ content }),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) {
     throw new Error(`${path}: ${response.status}`);
@@ -2677,6 +2681,7 @@ export async function renameWorkspaceFile(path: string, targetPath: string): Pro
     method: 'PATCH',
     headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
     body: JSON.stringify({ targetPath }),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) {
     throw new Error(`${path}: ${response.status}`);
@@ -2692,6 +2697,7 @@ export async function deleteWorkspaceFile(path: string): Promise<WorkspaceFile> 
   const response = await fetch(`${baseURL}/api/workspace/file?path=${encodeURIComponent(path)}`, {
     method: 'DELETE',
     headers: { Accept: 'application/json' },
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) {
     throw new Error(`${path}: ${response.status}`);
@@ -2737,6 +2743,7 @@ export async function startNewAIConversationSession(): Promise<AIConversationSes
   const response = await fetch(`${baseURL}${aiConversationSessionNewPath}`, {
     method: 'POST',
     headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) {
     throw new Error(await responseErrorMessage(response, zhCN.ai.sessionOperationFailed));
@@ -2757,6 +2764,7 @@ export async function restoreAIConversationSession(sessionId: string): Promise<A
     method: 'POST',
     headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
     body: JSON.stringify({ sessionId: normalized }),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) {
     throw new Error(await responseErrorMessage(response, zhCN.ai.sessionOperationFailed));
@@ -2799,6 +2807,7 @@ export async function exportAIConversationSession(request: AIConversationExportR
     method: 'POST',
     headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) {
     throw new Error(await responseErrorMessage(response, zhCN.ai.sessionExportFailed));
@@ -2818,6 +2827,7 @@ export async function sendAIChatMessage(message: AIChatRequest['message'], conte
     method: 'POST',
     headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
     body: JSON.stringify({ message, contextReferences }),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) {
     const fallback = [409, 412, 424, 428].includes(response.status) ? zhCN.ai.providerMissing : zhCN.ai.sendFailed;
@@ -2993,6 +3003,7 @@ export async function runAIAction(request: AIActionRunRequest): Promise<AIAction
     method: 'POST',
     headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
     body: JSON.stringify(request),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) {
     throw new Error(await responseErrorMessage(response, zhCN.aiActions.runFailed));
@@ -3010,6 +3021,7 @@ export async function createBlackboardItem(request: BlackboardItemCreateRequest)
     method: 'POST',
     headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
     body: JSON.stringify(request),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) {
     throw new Error(await responseErrorMessage(response, zhCN.ai.collaborationDispatchFailed));
@@ -3029,6 +3041,7 @@ export async function fetchBlackboard(query: BlackboardQuery = {}): Promise<Blac
   const queryString = blackboardQueryString(query);
   const response = await fetch(`${baseURL}${blackboardPath}${queryString}`, {
     headers: { Accept: 'application/json' },
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) {
     throw new Error(await responseErrorMessage(response, zhCN.blackboard.filterFailed));
@@ -3049,6 +3062,7 @@ export async function fetchBlackboardObservations(query: BlackboardObservationQu
   }
   const response = await fetch(`${baseURL}${blackboardPath}/observations${blackboardObservationQueryString(query)}`, {
     headers: { Accept: 'application/json' },
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) {
     throw new Error(await responseErrorMessage(response, zhCN.blackboard.observationLoadFailed));
@@ -3074,6 +3088,7 @@ export async function updateBlackboardItem(id: string, request: BlackboardItemUp
     method: 'PATCH',
     headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
     body: JSON.stringify(request),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) {
     throw new Error(await responseErrorMessage(response, zhCN.blackboard.updateFailed));
@@ -3094,6 +3109,7 @@ export async function batchUpdateBlackboardItems(request: BlackboardBatchUpdateR
     method: 'POST',
     headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
     body: JSON.stringify(request),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) {
     throw new Error(await responseErrorMessage(response, zhCN.blackboard.batchUpdateFailed));
@@ -3110,6 +3126,7 @@ export async function linkBlackboardItemDependencies(id: string, request: Blackb
     method: 'POST',
     headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
     body: JSON.stringify(request),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) {
     throw new Error(await responseErrorMessage(response, zhCN.blackboard.dependencyLinkFailed));
@@ -3129,6 +3146,7 @@ export async function fetchAgentProfiles(): Promise<AgentProfile[]> {
   const response = await fetch(`${baseURL}${agentProfilesPath}`, {
     method: 'GET',
     headers: { Accept: 'application/json' },
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) {
     throw new Error(await responseErrorMessage(response, zhCN.agents.profileLoadFailed));
@@ -3146,6 +3164,7 @@ export async function createAgentProfile(request: AgentProfileCreateRequest): Pr
     method: 'POST',
     headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
     body: JSON.stringify(request),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) {
     throw new Error(await responseErrorMessage(response, zhCN.agents.profileCreateFailed));
@@ -3166,6 +3185,7 @@ export async function updateAgentProfile(id: string, request: AgentProfileUpdate
     method: 'PATCH',
     headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
     body: JSON.stringify(request),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) {
     throw new Error(await responseErrorMessage(response, zhCN.agents.profileUpdateFailed));
@@ -3185,6 +3205,7 @@ export async function deleteAgentProfile(id: string): Promise<void> {
   const response = await fetch(`${baseURL}${agentProfilesPath}/${encodeURIComponent(id)}`, {
     method: 'DELETE',
     headers: { Accept: 'application/json' },
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) {
     throw new Error(await responseErrorMessage(response, zhCN.agents.profileDeleteFailed));
@@ -3200,6 +3221,7 @@ export async function createAgentTask(request: AgentTaskCreateRequest): Promise<
     method: 'POST',
     headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
     body: JSON.stringify(request),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) {
     throw new Error(await responseErrorMessage(response, zhCN.ai.collaborationDispatchFailed));
@@ -3220,6 +3242,7 @@ export async function updateAgentTask(id: string, request: AgentTaskUpdateReques
     method: 'PATCH',
     headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
     body: JSON.stringify(request),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) {
     throw new Error(await responseErrorMessage(response, zhCN.ai.agentTaskLifecycleFailed));
@@ -3240,6 +3263,7 @@ export async function createAgentTaskEvent(taskId: string, request: AgentTaskEve
     method: 'POST',
     headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
     body: JSON.stringify(request),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) {
     throw new Error(await responseErrorMessage(response, zhCN.agents.eventCreateFailed));
@@ -3260,6 +3284,7 @@ export async function runAgentTaskWithProvider(taskId: string, request: AgentPro
     method: 'POST',
     headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
     body: JSON.stringify(request),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) {
     throw new Error(await responseErrorMessage(response, zhCN.agents.providerRunFailed));
@@ -3280,6 +3305,7 @@ export async function runAgentTasksWithProviderBatch(request: AgentProviderBatch
     method: 'POST',
     headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
     body: JSON.stringify(request),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) {
     throw new Error(await responseErrorMessage(response, zhCN.agents.providerBatchRunFailed));
@@ -3309,6 +3335,7 @@ export async function savePromptRegistry(registry: PromptRegistry): Promise<Prom
     method: 'PUT',
     headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
     body: JSON.stringify(registry),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) {
     throw new Error(await responseErrorMessage(response, zhCN.settings.actions.savePromptsFailed));
@@ -3325,6 +3352,7 @@ export async function exportEvidenceGraph(): Promise<GraphExportResult> {
   const response = await fetch(`${baseURL}/api/evidence/graph/export`, {
     method: 'POST',
     headers: { Accept: 'application/json' },
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) {
     throw new Error(`${zhCN.graph.exportFailed}: ${response.status}`);
@@ -3341,6 +3369,7 @@ export async function exportReport(): Promise<ReportExportResult> {
   const response = await fetch(`${baseURL}/api/reports/export`, {
     method: 'POST',
     headers: { Accept: 'application/json' },
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) {
     throw new Error(`${zhCN.report.exportFailed}: ${response.status}`);
@@ -3382,6 +3411,7 @@ export async function saveMission(mission: Pick<MissionState, 'name' | 'goal' | 
     method: 'PUT',
     headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
     body: JSON.stringify(mission),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) {
     throw new Error(`${zhCN.missionFlow.saveFailed}: ${response.status}`);
@@ -3398,6 +3428,7 @@ export async function startMission(mission: Pick<MissionState, 'name' | 'goal' |
     method: 'POST',
     headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
     body: JSON.stringify(mission),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) {
     throw new Error(`${zhCN.missionFlow.startFailed}: ${response.status}`);
@@ -3417,6 +3448,7 @@ export async function saveProviderConfig(provider: ProviderSettings): Promise<Pr
   const response = await fetch(`${baseURL}/api/provider`, {
     method: 'PUT',
     headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     body: JSON.stringify({
       name: provider.name,
       type: provider.type,
@@ -3446,6 +3478,7 @@ export async function deleteProviderConfig(providerName: string): Promise<Provid
   const response = await fetch(`${baseURL}/api/provider/${encodeURIComponent(providerName)}`, {
     method: 'DELETE',
     headers: { Accept: 'application/json' },
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) {
     throw new Error(`${zhCN.settings.actions.deleteProviderFailed}: ${response.status}`);
@@ -3463,6 +3496,7 @@ export async function testProviderConfig(providerName: string, model?: string): 
     method: 'POST',
     headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
     body: JSON.stringify({ providerName, model }),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) {
     throw new Error(`${zhCN.settings.actions.testProviderFailed}: ${response.status}`);
@@ -3477,8 +3511,8 @@ export async function loadToolchainPacks(): Promise<ToolchainPackSettings[]> {
     throw new Error(zhCN.shell.statusOffline);
   }
   const [metadataResponse, healthResponse] = await Promise.all([
-    fetch(`${baseURL}/api/toolchain`, { headers: { Accept: 'application/json' } }),
-    fetch(`${baseURL}/api/toolchain/health`, { headers: { Accept: 'application/json' } }),
+    fetch(`${baseURL}/api/toolchain`, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) }),
+    fetch(`${baseURL}/api/toolchain/health`, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) }),
   ]);
   if (!metadataResponse.ok) {
     throw new Error(`${zhCN.settings.actions.loadToolchainFailed}: ${metadataResponse.status}`);
@@ -3504,6 +3538,7 @@ export async function loadToolchainActions(): Promise<ToolAction[]> {
   }
   const response = await fetch(`${baseURL}/api/toolchain/actions`, {
     headers: { Accept: 'application/json' },
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) {
     throw new Error(`${zhCN.settings.actions.loadToolchainActionsFailed}: ${response.status}`);
@@ -3520,6 +3555,7 @@ export async function saveToolchainPack(pack: ToolchainPackSettings): Promise<To
   const response = await fetch(`${baseURL}/api/toolchain/packs/${encodeURIComponent(pack.id)}`, {
     method: 'PUT',
     headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     body: JSON.stringify({
       name: pack.name,
       version: pack.version,
@@ -3554,6 +3590,7 @@ export async function runToolchainAction(actionID: string, request: ToolActionRu
     method: 'POST',
     headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) {
     throw new Error(`${zhCN.toolLaunch.failed}: ${response.status}`);
@@ -3573,6 +3610,7 @@ export async function saveWorkspaceSettings(settings: WorkspaceSettings): Promis
   const response = await fetch(`${baseURL}/api/workspace/settings`, {
     method: 'PUT',
     headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     body: JSON.stringify({
       name: settings.name,
       description: settings.description,
@@ -3603,6 +3641,7 @@ export async function createHarnessCase(testCase: HarnessCaseCreateRequest): Pro
     method: 'POST',
     headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
     body: JSON.stringify(testCase),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) {
     throw new Error(await responseErrorMessage(response, zhCN.harness.createFailed));
@@ -3622,6 +3661,7 @@ export async function runHarnessCase(id: string): Promise<HarnessResult> {
   const response = await fetch(`${baseURL}/api/harness/cases/${encodeURIComponent(id)}/run?wait=1&timeoutMs=5000`, {
     method: 'POST',
     headers: { Accept: 'application/json' },
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) {
     throw new Error(await responseErrorMessage(response, zhCN.harness.runFailed));
@@ -3643,6 +3683,7 @@ export async function startExecution(command: string): Promise<ExecutionStep> {
     method: 'POST',
     headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
     body: JSON.stringify({ command }),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) {
     throw new Error(`${zhCN.execution.startFailed}: ${response.status}`);
@@ -3685,6 +3726,7 @@ async function postExecutionAction(id: string, action: 'stop' | 'retry'): Promis
   const response = await fetch(`${baseURL}/api/executions/${encodeURIComponent(id)}/${action}`, {
     method: 'POST',
     headers: { Accept: 'application/json' },
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) {
     throw new Error(`${id}: ${response.status}`);
@@ -5441,6 +5483,7 @@ async function requestJSON<T>(baseURL: string, path: string): Promise<T> {
   const response = await fetch(`${baseURL}${path}`, {
     headers: { Accept: 'application/json' },
     cache: 'no-store',
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) {
     throw new Error(`${path}: ${response.status}`);

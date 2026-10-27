@@ -1,7 +1,11 @@
 #!/bin/sh
 set -eu
 
-ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+case "$0" in
+	*/*) ROOT_DIR="${0%/*}" ;;
+	*) ROOT_DIR="." ;;
+esac
+ROOT="$(CDPATH= cd -- "$ROOT_DIR/.." && pwd)"
 # The Go packager names the output dir Ouroboros-{GOOS}-{GOARCH}
 # (windows-amd64); translate Node's win32/x64 platform names to match.
 PLATFORM_DIR="$(node -p 'const p = process.platform === "win32" ? "windows" : process.platform; const a = process.arch === "x64" ? "amd64" : process.arch; p + "-" + a')"

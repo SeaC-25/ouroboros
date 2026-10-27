@@ -45,7 +45,12 @@ type RunOptions struct {
 	// it every appended event rebuilds the full replay snapshot (O(n²)
 	// JSON decoding over the run). Pointer: RunOptions travels by value and
 	// the throttle state must be shared across those copies.
-	snapshotThrottle               *snapshotThrottle
+	snapshotThrottle *snapshotThrottle
+	// toolchainManifests carries the manifests loaded once at run entry so
+	// downstream stages reuse them instead of re-reading the toolchain
+	// directory. Internal: set by RunWorkspaceWithOptions, callers leave
+	// it unset.
+	toolchainManifests             []toolchain.Manifest
 	OnEvent                        func(eventlog.Event) error
 	OnSnapshot                     func(eventlog.ReplaySnapshot) error
 	ToolRunner                     ToolExecutionRunner
@@ -332,6 +337,7 @@ func RunWorkspaceWithOptions(ctx context.Context, root string, options RunOption
 	if err != nil {
 		return RunResult{}, fmt.Errorf("load scope config: %w", err)
 	}
+	options.toolchainManifests = manifests
 	if err := ValidateScopeConfig(scopeConfig); err != nil {
 		return RunResult{}, fmt.Errorf("invalid scope config: %w", err)
 	}
@@ -375,10 +381,9 @@ func RunWorkspaceWithOptions(ctx context.Context, root string, options RunOption
 		if err := appendRunEvent(ctx, store, stageEventWithReason(runID, "report-projection", "Project evidence graph into Markdown report", "skipped", "deferred"), options, &persistedEvents); err != nil {
 			return RunResult{}, err
 		}
-		replayedEvents, err := store.Replay(ctx, runID)
-		if err != nil {
-			return RunResult{}, err
-		}
+		// Same lockstep invariant as the non-deferred path: the in-memory
+		// mirror equals the replayed event list, so skip the SQLite read.
+		replayedEvents := persistedEvents
 		snapshot, err := eventlog.BuildReplaySnapshot(replayedEvents)
 		if err != nil {
 			return RunResult{}, err
@@ -401,10 +406,9 @@ func RunWorkspaceWithOptions(ctx context.Context, root string, options RunOption
 		return RunResult{}, err
 	}
 
-	replayedEvents, err := store.Replay(ctx, runID)
-	if err != nil {
-		return RunResult{}, err
-	}
+	// The mirror is in lockstep with the store, so build the projection
+	// snapshot from it instead of re-reading every event from SQLite.
+	replayedEvents := persistedEvents
 	snapshot, err := eventlog.BuildReplaySnapshot(replayedEvents)
 	if err != nil {
 		return RunResult{}, err
@@ -429,10 +433,10 @@ func RunWorkspaceWithOptions(ctx context.Context, root string, options RunOption
 	if err := appendRunEvent(ctx, store, stageEvent(runID, "report-projection", "Project evidence graph into Markdown report", "completed"), options, &persistedEvents); err != nil {
 		return RunResult{}, err
 	}
-	replayedEvents, err = store.Replay(ctx, runID)
-	if err != nil {
-		return RunResult{}, err
-	}
+	// persistedEvents is kept in lockstep with the store by appendRunEvent
+	// (Append returns the fully stamped event), so the final projection
+	// reuses it instead of re-reading every event from SQLite.
+	replayedEvents = persistedEvents
 	snapshot, err = eventlog.BuildReplaySnapshot(replayedEvents)
 	if err != nil {
 		return RunResult{}, err
@@ -515,7 +519,11 @@ func validateProviderMetadataOnly(ctx context.Context, provider Provider) error 
 	case "offline":
 		return nil
 	case providerTypeOpenAICompatible:
-		baseURL, err := parseOpenAICompatibleProviderBaseURL(provider.BaseURL)
+		baseURLValue, err := effectiveProviderBaseURL(provider)
+		if err != nil {
+			return fmt.Errorf("provider %s base_url is invalid: %w", provider.Name, err)
+		}
+		baseURL, err := parseOpenAICompatibleProviderBaseURL(baseURLValue)
 		if err != nil {
 			return fmt.Errorf("provider %s base_url is invalid: %w", provider.Name, err)
 		}
@@ -1718,7 +1726,11 @@ func (openAICompatibleProviderAdapter) Prepare(ctx context.Context, provider Pro
 	if err := ctx.Err(); err != nil {
 		return ProviderRuntime{}, err
 	}
-	baseURL, err := parseOpenAICompatibleProviderBaseURL(provider.BaseURL)
+	baseURLValue, err := effectiveProviderBaseURL(provider)
+	if err != nil {
+		return ProviderRuntime{}, fmt.Errorf("provider %s base_url is invalid: %w", provider.Name, err)
+	}
+	baseURL, err := parseOpenAICompatibleProviderBaseURL(baseURLValue)
 	if err != nil {
 		return ProviderRuntime{}, fmt.Errorf("provider %s base_url is invalid: %w", provider.Name, err)
 	}
@@ -2098,7 +2110,9 @@ func managedBinaryTargetKinds(binary string, operation string, node compiler.Pla
 		}
 	case "port_scan":
 		if binary == "naabu" {
-			return managedBinaryNetworkTargetKinds()
+			// Port scanning accepts only explicit CIDR scope: a lone host scope
+			// keeps naabu offline, and host+CIDR resolves to the CIDR.
+			return []string{string(domain.TargetCIDR)}
 		}
 	case "dns_probe":
 		if binary == "dnsx" {
@@ -2309,8 +2323,11 @@ func managedBinaryCommandFor(request ToolExecutionRequest, binary string, operat
 		}
 	case "port_scan":
 		if binary == "naabu" {
-			if !managedBinaryNetworkTargetKind(target.Kind) {
+			if target.Kind != string(domain.TargetCIDR) {
 				return nil, false, nil
+			}
+			if !targetPolicyDisabled(request.ScopeTargetPolicy) && scopeTargetExcludedForRequest(request, target) {
+				return nil, true, fmt.Errorf("scope target %s is excluded for capability %s", target.Value, request.Node.Capability)
 			}
 			return []string{binary, "-json", "-host", target.Value}, true, nil
 		}

@@ -12,6 +12,7 @@ const BACKEND_FORCE_TERMINATION_MS = 20000;
 const BACKEND_TERMINATION_POLL_MS = 50;
 const BACKEND_PROCESS_GROUP = Symbol('ouroborosBackendProcessGroup');
 const BACKEND_EXPECTED_STOP = Symbol('ouroborosBackendExpectedStop');
+const BACKEND_WINDOWS_TREE_KILL = Symbol('ouroborosBackendWindowsTreeKill');
 
 class BackendStartupExitError extends Error {
   constructor(code, signal, cause) {
@@ -117,11 +118,18 @@ export class BackendManager extends EventEmitter {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: process.env,
       detached: useProcessGroup,
+      windowsHide: true,
     });
 
     const child = this.process;
     if (useProcessGroup && Number.isSafeInteger(child.pid) && child.pid > 1) {
       child[BACKEND_PROCESS_GROUP] = child.pid;
+    }
+    if (process.platform === 'win32' && Number.isSafeInteger(child.pid) && child.pid > 1) {
+      // child.kill() on Windows only terminates the direct child; the Go
+      // backend can leave grandchildren behind. taskkill /T /F tears down the
+      // whole tree, so remember that this pid must be tree-killed.
+      child[BACKEND_WINDOWS_TREE_KILL] = true;
     }
     child.stdout.on('data', chunk => {
       const message = chunk.toString().trim();
@@ -268,7 +276,7 @@ export class BackendManager extends EventEmitter {
     }
 
     this.stoppingProcess = child;
-    const stoppingPromise = terminateProcess(child);
+    const stoppingPromise = terminateProcess(child, { apiBaseURL: this.apiBaseURL });
     this.stoppingPromise = stoppingPromise;
     try {
       const result = await stoppingPromise;
@@ -277,6 +285,7 @@ export class BackendManager extends EventEmitter {
           pid: child?.pid ?? 0,
           processGroupId: result.processGroupId,
           forced: result.forced,
+          portOccupied: Boolean(result.portOccupied),
         });
       }
       return result;
@@ -494,30 +503,33 @@ export class BackendManager extends EventEmitter {
   }
 
   writeDesktopRuntimeState(status, details = {}) {
-    try {
-      fs.mkdirSync(path.dirname(this.desktopRuntimeStatePath), { recursive: true });
-      fs.writeFileSync(this.desktopRuntimeStateTempPath, JSON.stringify({
-        status,
-        sessionId: this.desktopRuntimeSessionId,
-        processId: process.pid,
-        processStartToken: this.desktopRuntimeProcessStartToken,
-        executablePath: process.execPath,
-        startedAt: this.desktopRuntimeStartedAt,
-        heartbeatAt: new Date().toISOString(),
-        workspace: this.workspace,
-        apiBaseURL: this.apiBaseURL,
-        backendStatus: this.status,
-        ...details,
-      }, null, 2) + '\n');
-      fs.renameSync(this.desktopRuntimeStateTempPath, this.desktopRuntimeStatePath);
-    } catch {
-      try {
-        fs.rmSync(this.desktopRuntimeStateTempPath, { force: true });
-      } catch {
-        // Runtime state is diagnostic data only.
-      }
-      // Runtime state is diagnostic data only.
-    }
+    const payload = JSON.stringify({
+      status,
+      sessionId: this.desktopRuntimeSessionId,
+      processId: process.pid,
+      processStartToken: this.desktopRuntimeProcessStartToken,
+      executablePath: process.execPath,
+      startedAt: this.desktopRuntimeStartedAt,
+      heartbeatAt: new Date().toISOString(),
+      workspace: this.workspace,
+      apiBaseURL: this.apiBaseURL,
+      backendStatus: this.status,
+      ...details,
+    }, null, 2) + '\n';
+    // Heartbeats fire every 10s on the main process; a synchronous
+    // mkdir+write+rename here stalls the UI thread on slow disks, so the
+    // write goes through fs.promises and failures are swallowed exactly like
+    // before (runtime state is diagnostic data only).
+    void fs.promises.mkdir(path.dirname(this.desktopRuntimeStatePath), { recursive: true })
+      .then(() => fs.promises.writeFile(this.desktopRuntimeStateTempPath, payload))
+      .then(() => fs.promises.rename(this.desktopRuntimeStateTempPath, this.desktopRuntimeStatePath))
+      .catch(() => {
+        try {
+          fs.rmSync(this.desktopRuntimeStateTempPath, { force: true });
+        } catch {
+          // Runtime state is diagnostic data only.
+        }
+      });
   }
 
   recordProcessExit(child, code, signal, details = {}) {
@@ -611,11 +623,11 @@ function describeHealthError(error) {
   return `后端健康检查请求失败：${message}`;
 }
 
-function terminateProcess(child) {
+function terminateProcess(child, { apiBaseURL = '' } = {}) {
   return new Promise(resolve => {
     const processGroupId = backendProcessGroupId(child);
     if (!backendProcessTreeMayBeAlive(child)) {
-      resolve({ terminated: true, forced: false, processGroupId });
+      resolve({ terminated: true, forced: false, processGroupId, portOccupied: false });
       return;
     }
     let resolved = false;
@@ -632,7 +644,7 @@ function terminateProcess(child) {
       clearTimeout(forceTimer);
       clearInterval(pollTimer);
       child?.removeListener('exit', checkFinished);
-      resolve({ terminated, forced, processGroupId });
+      resolve({ terminated, forced, processGroupId, portOccupied: false });
     };
     const checkFinished = () => {
       if (!backendProcessTreeMayBeAlive(child)) {
@@ -649,6 +661,18 @@ function terminateProcess(child) {
     child?.once('exit', checkFinished);
     signalBackendProcessTree(child, 'SIGTERM');
     checkFinished();
+    // Windows-only follow-up: taskkill may have missed a descendant, so after
+    // the wait window closes, re-check the API port and report it.
+    void (async () => {
+      if (process.platform !== 'win32') {
+        return;
+      }
+      const portOccupied = await windowsBackendPortMayBeOccupied(apiBaseURL);
+      if (resolved) {
+        return;
+      }
+      finish(!portOccupied);
+    })();
   });
 }
 
@@ -662,6 +686,29 @@ function signalBackendProcessTree(child, signal) {
       if (error?.code !== 'ESRCH') {
         // Fall back to the direct child when process-group signaling is unavailable.
       }
+    }
+  }
+  if (process.platform === 'win32' && child?.[BACKEND_WINDOWS_TREE_KILL] && Number.isSafeInteger(child.pid)) {
+    // child.kill() only hits the direct process on Windows and leaves the Go
+    // backend's descendants running. taskkill /T /F tears down the entire
+    // tree; child.kill() stays as the fallback when taskkill is unavailable.
+    try {
+      const killer = spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], {
+        stdio: 'ignore',
+        windowsHide: true,
+      });
+      killer.once('error', () => {
+        try {
+          if (child.exitCode === null && child.signalCode === null) {
+            child.kill(signal);
+          }
+        } catch {
+          // The polling loop resolves once the process tree is gone.
+        }
+      });
+      return;
+    } catch {
+      // taskkill spawn threw synchronously; fall through to child.kill().
     }
   }
   try {
@@ -679,6 +726,41 @@ function backendProcessTreeMayBeAlive(child) {
     && child.signalCode === null
     && processMayBeAlive(child.pid);
   return Boolean(directChildMayBeAlive || backendProcessGroupMayBeAlive(child));
+}
+
+// On Windows the process-group machinery is unavailable, so after a taskkill
+// pass the only tree-membership signal left is the backend's API port: a
+// leftover tree (or any other process) still answering the old apiBaseURL
+// means the port is not yet free for the next backend instance.
+function windowsBackendPortMayBeOccupied(apiBaseURL) {
+  if (process.platform !== 'win32' || !apiBaseURL) {
+    return false;
+  }
+  try {
+    const url = new URL(apiBaseURL);
+    if (url.protocol !== 'http:' || !['127.0.0.1', 'localhost'].includes(url.hostname)) {
+      return false;
+    }
+    const port = Number(url.port);
+    if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+      return false;
+    }
+  } catch {
+    return false;
+  }
+  const socket = net.connect({
+    host: '127.0.0.1',
+    port: Number(new URL(apiBaseURL).port),
+  });
+  return new Promise(resolve => {
+    const finish = occupied => {
+      socket.destroy();
+      resolve(occupied);
+    };
+    socket.once('connect', () => finish(true));
+    socket.once('error', () => finish(false));
+    socket.setTimeout(500, () => finish(false));
+  });
 }
 
 function backendProcessGroupId(child) {

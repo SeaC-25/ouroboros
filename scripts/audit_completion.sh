@@ -13,7 +13,11 @@ if [ -n "${OURO_TRUSTED_PATH:-}" ]; then
 	export PATH
 fi
 
-ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+case "$0" in
+	*/*) ROOT_DIR="${0%/*}" ;;
+	*) ROOT_DIR="." ;;
+esac
+ROOT="$(CDPATH= cd -- "$ROOT_DIR/.." && pwd)"
 TMPDIR_BASE="${TMPDIR:-/tmp}"
 COMPLETION_AUDIT_SCRIPT="$ROOT/scripts/audit_completion.sh"
 
@@ -276,6 +280,18 @@ assert_timestamp_not_after() {
 
 file_sha256() {
 	path="$1"
+	# Audit digests must not be forgeable through a caller-controlled PATH:
+	# resolve the digest tool from fixed system locations first and only fall
+	# back to PATH lookup when none of them exists.
+	for _sha_tool in /usr/bin/sha256sum /bin/sha256sum /usr/bin/shasum /bin/shasum; do
+		if [ -x "$_sha_tool" ]; then
+			case "$_sha_tool" in
+				*shasum) "$_sha_tool" -a 256 "$path" | awk '{ print $1 }' ;;
+				*) "$_sha_tool" "$path" | awk '{ print $1 }' ;;
+			esac
+			return 0
+		fi
+	done
 	if command -v sha256sum >/dev/null 2>&1; then
 		sha256sum "$path" | awk '{ print $1 }'
 	elif command -v shasum >/dev/null 2>&1; then

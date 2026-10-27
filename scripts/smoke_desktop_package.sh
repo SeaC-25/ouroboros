@@ -1,7 +1,11 @@
 #!/bin/sh
 set -eu
 
-ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+case "$0" in
+	*/*) ROOT_DIR="${0%/*}" ;;
+	*) ROOT_DIR="." ;;
+esac
+ROOT="$(CDPATH= cd -- "$ROOT_DIR/.." && pwd)"
 PACKAGE_DIR="${OURO_DESKTOP_PACKAGE_DIR:-$ROOT/gui/dist/desktop/Ouroboros-$(node -p 'process.platform + "-" + process.arch')}"
 TMPDIR_BASE="${TMPDIR:-/tmp}"
 SMOKE_ROOT="$(mktemp -d "$TMPDIR_BASE/ouro-desktop-package-smoke-XXXXXX")"

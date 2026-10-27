@@ -13,7 +13,11 @@ if [ -n "${OURO_TRUSTED_PATH:-}" ]; then
 	export PATH
 fi
 
-ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+case "$0" in
+	*/*) ROOT_DIR="${0%/*}" ;;
+	*) ROOT_DIR="." ;;
+esac
+ROOT="$(CDPATH= cd -- "$ROOT_DIR/.." && pwd)"
 GOPROXY="${GOPROXY:-https://goproxy.cn,direct}"
 TMPDIR_BASE="${TMPDIR:-/tmp}"
 

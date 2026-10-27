@@ -3,6 +3,8 @@ package api
 import (
 	"bufio"
 	"context"
+	crand "crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -145,6 +147,8 @@ func (s *Server) handleAIChatPost(w http.ResponseWriter, r *http.Request) {
 - 记录结论笔记：使用 ACTION:BLACKBOARD <已验证的结论> 格式（持久化你的推理成果，不是推理本身）
 - 保存 prompt：使用 ACTION:PROMPT-SAVE <名称> <内容> 格式
 - 运行 harness：使用 ACTION:HARNESS <prompt名称> <输入> 格式
+- 启动并行子循环：使用 ACTION:SPAWN <名字> : <独立目标> 格式——为相互独立的调查目标各开一条后台观测-推理循环（自主运行，有自己的上下文与轮次预算；上限受 OURO_MAX_SUB_LOOPS 控制，默认 2）
+- 收集子循环结果：使用 ACTION:COLLECT [<名字>] 格式——查看全部或指定子循环的状态与最后回复；子循环的 BLACKBOARD 结论会自动进入共享黑板
 - 启动多智能体调度：使用 ACTION:SWARM <目标> 格式，可带 ;角色:命令，例如 ACTION:SWARM 目标;Planner:echo plan;Operator:echo run
 - 失败恢复：使用 ACTION:RETRY <执行ID> <可选原因> 格式
 - 保存 markdown 报告：使用 ACTION:REPORT <文件相对路径> <Markdown正文> 格式（单行）
@@ -709,8 +713,9 @@ func (s *Server) parseAndExecuteAIActions(text string) ([]string, []ChatActionRe
 						log.Printf("Failed to persist ACTION:OBSERVE observation: %v", obsErr)
 					}
 					// Report the observation ID: conclusions citing it
-					// (ACTION:BLACKBOARD ... obs-123...) back-link automatically,
-					// draining the reasoning backlog for this evidence.
+					// (ACTION:BLACKBOARD ... obs-<nano>-<hex4>...) back-link
+					// automatically, draining the reasoning backlog for this
+					// evidence.
 					obsRef := ""
 					if obsErr == nil {
 						obsRef = fmt.Sprintf(" [观测ID %s — 在 ACTION:BLACKBOARD 结论中引用此ID即可回链证据]", obs.ID)
@@ -855,6 +860,30 @@ func (s *Server) parseAndExecuteAIActions(text string) ([]string, []ChatActionRe
 					refs = append(refs, fmt.Sprintf("harness:%s", result.ID))
 					results = append(results, ChatActionResult{Kind: "harness", Summary: "Harness 已运行", Path: result.ID, Output: truncateForAI(result.Output, 3000)})
 				}
+			}
+		} else if strings.HasPrefix(line, "ACTION:SPAWN ") {
+			spec := strings.TrimPrefix(line, "ACTION:SPAWN ")
+			if name, goal, ok := splitSpawnSpec(spec); ok {
+				summary, err := s.spawnSubLoop(name, goal)
+				if err != nil {
+					results = append(results, ChatActionResult{Kind: "spawn", Summary: "启动子循环失败: " + err.Error()})
+				} else {
+					refs = append(refs, fmt.Sprintf("subloop:%s", name))
+					results = append(results, ChatActionResult{Kind: "spawn", Summary: summary, Path: name})
+				}
+			} else {
+				results = append(results, ChatActionResult{Kind: "spawn", Summary: "格式: ACTION:SPAWN <名字> : <目标>"})
+			}
+		} else if strings.HasPrefix(line, "ACTION:COLLECT ") || line == "ACTION:COLLECT" {
+			name := ""
+			if strings.HasPrefix(line, "ACTION:COLLECT ") {
+				name = strings.TrimSpace(strings.TrimPrefix(line, "ACTION:COLLECT "))
+			}
+			digest, err := s.collectSubLoops(name)
+			if err != nil {
+				results = append(results, ChatActionResult{Kind: "collect", Summary: "收集失败: " + err.Error()})
+			} else {
+				results = append(results, ChatActionResult{Kind: "collect", Summary: "子循环状态", Output: digest})
 			}
 		} else if strings.HasPrefix(line, "ACTION:AGENT ") {
 			spec := strings.TrimPrefix(line, "ACTION:AGENT ")
@@ -1022,6 +1051,9 @@ func (s *Server) loadBlackboardObservations() []BlackboardObservation {
 	defer file.Close()
 	var observations []BlackboardObservation
 	scanner := bufio.NewScanner(file)
+	// 4MB max line, aligned with the journal readers in internal/app —
+	// oversized observations must not be silently truncated at the API side.
+	scanner.Buffer(make([]byte, 0, 64*1024), 4<<20)
 	for scanner.Scan() {
 		var observation BlackboardObservation
 		if json.Unmarshal(scanner.Bytes(), &observation) == nil {
@@ -1034,6 +1066,20 @@ func (s *Server) loadBlackboardObservations() []BlackboardObservation {
 	return observations
 }
 
+// randomHex4 returns a cryptographically random 4-hex-digit suffix for
+// journal record IDs. UnixNano alone can collide on coarse Windows timers
+// (two IDs minted within one tick); the 16-bit suffix drops that odds to
+// ~1/65536 even within a single nanosecond tick.
+func randomHex4() string {
+	var buf [2]byte
+	if _, err := crand.Read(buf[:]); err != nil {
+		// crypto/rand never fails on supported platforms; fall back to
+		// a lower-quality source rather than refusing the observation.
+		binary.BigEndian.PutUint16(buf[:], uint16(time.Now().UnixNano()))
+	}
+	return fmt.Sprintf("%04x", binary.BigEndian.Uint16(buf[:]))
+}
+
 // appendBlackboardObservation 持久化一条原始观测（无判定），返回存储后的记录。
 func (s *Server) appendBlackboardObservation(kind string, target string, payload string, source string) (BlackboardObservation, error) {
 	kind = strings.TrimSpace(kind)
@@ -1044,9 +1090,10 @@ func (s *Server) appendBlackboardObservation(kind string, target string, payload
 	if target == "" {
 		return BlackboardObservation{}, fmt.Errorf("observation target is required")
 	}
-	// stateMu also guards the obs-<UnixNano> ID mint: two concurrent
-	// observes on coarse Windows timers can collide within one nanosecond
-	// tick, and the journal dedup would then silently drop one record.
+	// stateMu serializes journal appends so two concurrent observes cannot
+	// interleave partial JSONL lines; the randomHex4 suffix additionally
+	// keeps IDs distinct when coarse Windows timers mint both within one
+	// nanosecond tick (the journal dedup would otherwise drop a record).
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
 	runtimeDir := filepath.Join(s.workspace, "runtime")
@@ -1054,7 +1101,7 @@ func (s *Server) appendBlackboardObservation(kind string, target string, payload
 		return BlackboardObservation{}, err
 	}
 	observation := BlackboardObservation{
-		ID:        fmt.Sprintf("obs-%d", time.Now().UnixNano()),
+		ID:        fmt.Sprintf("obs-%d-%s", time.Now().UnixNano(), randomHex4()),
 		Kind:      kind,
 		Target:    target,
 		Payload:   payload,
@@ -1089,6 +1136,8 @@ func (s *Server) loadBlackboardFacts() []BlackboardFact {
 	defer file.Close()
 	var facts []BlackboardFact
 	scanner := bufio.NewScanner(file)
+	// 4MB max line, aligned with the journal readers in internal/app.
+	scanner.Buffer(make([]byte, 0, 64*1024), 4<<20)
 	for scanner.Scan() {
 		var fact BlackboardFact
 		if json.Unmarshal(scanner.Bytes(), &fact) == nil {
@@ -1103,7 +1152,7 @@ func (s *Server) appendBlackboardFact(kind string, statement string) (Blackboard
 	os.MkdirAll(runtimeDir, 0o755)
 	path := s.blackboardPath()
 	fact := BlackboardFact{
-		ID:        fmt.Sprintf("fact-%d", time.Now().UnixNano()),
+		ID:        fmt.Sprintf("fact-%d-%s", time.Now().UnixNano(), randomHex4()),
 		Kind:      kind,
 		Statement: statement,
 		Source:    "ai-agent",
@@ -1126,11 +1175,12 @@ func (s *Server) appendBlackboardFact(kind string, statement string) (Blackboard
 	return fact, err
 }
 
-// observationIDsFromText extracts observation references (obs-<digits>)
-// from a conclusion statement. The OBSERVE action reports each
-// observation ID to the model, so conclusions naturally cite the
-// evidence they derive from.
-var observationIDPattern = regexp.MustCompile(`\bobs-[0-9]{6,}\b`)
+// observationIDPattern extracts observation references (obs-<nano>-<hex4>)
+// from conclusion statements. The OBSERVE action reports each observation ID
+// to the model, so conclusions naturally cite the evidence they derive from.
+// The random suffix is optional in the pattern so legacy obs-<nano> IDs in
+// older journals still back-link.
+var observationIDPattern = regexp.MustCompile(`\bobs-[0-9]{6,}(?:-[0-9a-f]{4})?\b`)
 
 func observationIDsFromText(text string) []string {
 	matches := observationIDPattern.FindAllString(text, -1)

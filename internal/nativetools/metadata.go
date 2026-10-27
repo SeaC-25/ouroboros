@@ -35,6 +35,11 @@ func (m MetadataFile) MarshalJSON() ([]byte, error) {
 	return json.Marshal(object)
 }
 
+// maxMetadataScanFileSize aligns metadata extraction with the artifact ceiling
+// used by secret_scan.go (maxScanFileSize, 2MiB): larger files are skipped and
+// reported rather than read whole.
+const maxMetadataScanFileSize = maxScanFileSize
+
 // ExtractMetadata inspects each path and returns exiftool-compatible JSON.
 // Unsupported formats degrade to File:* tags instead of failing, mirroring
 // exiftool's tolerance of unknown containers.
@@ -43,7 +48,7 @@ func ExtractMetadata(ctx context.Context, target string, _ Options) (string, err
 	if target == "" {
 		return "", errors.New("metadata_extract requires a file or directory path")
 	}
-	paths, err := collectMetadataPaths(target)
+	paths, skipped, err := collectMetadataPaths(target)
 	if err != nil {
 		return "", err
 	}
@@ -51,7 +56,12 @@ func ExtractMetadata(ctx context.Context, target string, _ Options) (string, err
 		return "", fmt.Errorf("metadata_extract found no regular files under %s", target)
 	}
 
-	records := make([]MetadataFile, 0, len(paths))
+	records := make([]MetadataFile, 0, len(paths)+len(skipped))
+	// Skipped oversized files still surface as exiftool-style records so the
+	// report shows why a file carries only File:* tags.
+	for _, path := range skipped {
+		records = append(records, skippedMetadataRecord(path))
+	}
 	for _, path := range paths {
 		if err := ctx.Err(); err != nil {
 			return "", err
@@ -71,15 +81,19 @@ func ExtractMetadata(ctx context.Context, target string, _ Options) (string, err
 	return string(encoded), nil
 }
 
-func collectMetadataPaths(target string) ([]string, error) {
-	info, err := os.Stat(target)
-	if err != nil {
-		return nil, fmt.Errorf("stat metadata target: %w", err)
+func collectMetadataPaths(target string) (paths []string, skipped []string, err error) {
+	info, statErr := os.Stat(target)
+	if statErr != nil {
+		return nil, nil, fmt.Errorf("stat metadata target: %w", statErr)
 	}
 	if !info.IsDir() {
-		return []string{target}, nil
+		// Single-file target: an oversized file is skipped, not an error.
+		if info.Size() > maxMetadataScanFileSize {
+			return nil, []string{target}, nil
+		}
+		return []string{target}, nil, nil
 	}
-	paths := []string{}
+	paths = []string{}
 	err = filepath.WalkDir(target, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -87,17 +101,31 @@ func collectMetadataPaths(target string) ([]string, error) {
 		if entry.IsDir() {
 			return nil
 		}
+		// Same ceiling as secret_scan.go: skip oversized files and report them.
+		if entryInfo, infoErr := entry.Info(); infoErr == nil && entryInfo.Size() > maxMetadataScanFileSize {
+			skipped = append(skipped, path)
+			return nil
+		}
 		paths = append(paths, path)
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("walk metadata target: %w", err)
+		return nil, nil, fmt.Errorf("walk metadata target: %w", err)
 	}
 	sort.Strings(paths)
 	if len(paths) > 256 {
 		paths = paths[:256]
 	}
-	return paths, nil
+	return paths, skipped, nil
+}
+
+// skippedMetadataRecord builds the exiftool-style record for a file excluded by
+// the maxMetadataScanFileSize ceiling: SourceFile plus the skip reason, so the
+// JSON report states why the file carries no content tags.
+func skippedMetadataRecord(path string) MetadataFile {
+	record := fallbackMetadata(path)
+	record.Tags["File:Skipped"] = fmt.Sprintf("file exceeds maxScanFileSize (%d bytes)", maxScanFileSize)
+	return record
 }
 
 func fallbackMetadata(path string) MetadataFile {
@@ -111,6 +139,13 @@ func fallbackMetadata(path string) MetadataFile {
 }
 
 func metadataForFile(path string) (MetadataFile, error) {
+	// Defense in depth: collectMetadataPaths filters by maxMetadataScanFileSize,
+	// but direct calls (single-file targets routed through here after the
+	// ceiling changed, future callers) still get a stat guard aligned with
+	// secret_scan.go's maxScanFileSize. Oversized reads are skipped, not read.
+	if info, err := os.Stat(path); err == nil && info.Size() > maxMetadataScanFileSize {
+		return skippedMetadataRecord(path), nil
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return MetadataFile{}, err

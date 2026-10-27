@@ -1,0 +1,10 @@
+version: 1
+providers:
+    - name: envtest
+      type: openai_compatible
+      model: m
+      base_url_env: OURO_TEST_BASE
+      api_key_env: OURO_TEST_KEY
+      timeout_ms: 5000
+      capabilities: [chat]
+      enabled: true

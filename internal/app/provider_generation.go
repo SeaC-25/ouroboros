@@ -234,7 +234,7 @@ func generateOpenAICompatibleMessage(ctx context.Context, provider Provider, req
 	if err := ctx.Err(); err != nil {
 		return ProviderGenerationResult{}, err
 	}
-	baseURL, err := parseOpenAICompatibleProviderBaseURL(provider.BaseURL)
+	baseURL, err := parseOpenAICompatibleProviderBaseURL(providerEffectiveBaseURL(provider))
 	if err != nil {
 		return ProviderGenerationResult{}, fmt.Errorf("provider %s base_url is invalid: %w", provider.Name, err)
 	}
@@ -579,6 +579,21 @@ func firstOpenAICompatibleChoiceText(response openAICompatibleChatCompletionResp
 		}
 	}
 	return ""
+}
+
+// effectiveProviderBaseURL resolves the provider's base URL: base_url_env
+// takes precedence (read at call time — AGENTS.md env-first rule), falling
+// back to the yaml base_url value.
+func effectiveProviderBaseURL(provider Provider) (string, error) {
+	if envName := strings.TrimSpace(provider.BaseURLEnv); envName != "" {
+		if value := strings.TrimSpace(os.Getenv(envName)); value != "" {
+			return value, nil
+		}
+	}
+	if value := strings.TrimSpace(provider.BaseURL); value != "" {
+		return value, nil
+	}
+	return "", fmt.Errorf("provider %s base_url is required (neither base_url_env %q nor base_url is set)", provider.Name, strings.TrimSpace(provider.BaseURLEnv))
 }
 
 func applyOpenAICompatibleBearer(request *http.Request, provider Provider) error {

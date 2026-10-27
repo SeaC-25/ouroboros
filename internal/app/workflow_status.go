@@ -153,6 +153,15 @@ func workflowCurrentReviewStatus(root string, status WorkspaceWorkflowStatus, di
 	status.DispatchPath = dispatch.Path
 	execution, hasExecution := latestWorkflowExecutionForDispatch(executions, dispatch.Path)
 	if !hasExecution {
+		if safetyErrors := workflowSafetyAuthorizationErrors(root); len(safetyErrors) > 0 {
+			status.Status = "blocked"
+			status.NextGate = "safety-authorization"
+			status.Reason = "compile-execution-requires-current-safety-authorization"
+			status.Command = fmt.Sprintf("ouro doctor %s --require-safety-authorization", root)
+			status.SafetyErrors = safetyErrors
+			status.SafetyErrorCount = len(safetyErrors)
+			return status, true
+		}
 		status.NextGate = "execute-compile-preview-review-execution-dispatch"
 		status.Reason = "dispatch-awaits-execution"
 		status.Command = fmt.Sprintf("ouro toolchain execute-compile-preview-review-execution-dispatch %s %s --execute", root, dispatch.Path)
@@ -493,4 +502,24 @@ func sameWorkflowPath(left, right string) bool {
 		return false
 	}
 	return filepath.Clean(left) == filepath.Clean(right) || filepath.Base(left) == filepath.Base(right)
+}
+
+// workflowSafetyAuthorizationErrors returns strict-mode safety bypass errors
+// for the workspace scope, mirroring doctor --require-safety-authorization.
+func workflowSafetyAuthorizationErrors(root string) []string {
+	config, err := LoadScopeConfig(filepath.Join(root, "scope.yaml"))
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return []string{fmt.Sprintf("load scope config for workflow safety gate: %v", err)}
+		}
+		config = defaultRuntimeWorkerSafetyScopeConfig()
+	}
+	if err := ValidateScopeConfig(config); err != nil {
+		return []string{fmt.Sprintf("invalid scope config for workflow safety gate: %v", err)}
+	}
+	authorization, authorizationFound, err := loadWorkspaceAuthorization(filepath.Join(root, "authorization.yaml"))
+	if err != nil {
+		return []string{fmt.Sprintf("invalid authorization.yaml for workflow safety gate: %v", err)}
+	}
+	return scopeConfigSafetyAuthorizationErrors(config, authorization, authorizationFound, time.Now().UTC())
 }

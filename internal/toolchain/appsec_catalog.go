@@ -33,7 +33,7 @@ func BuiltInAppSecTools() []BuiltInTool {
 		builtInBinaryTool("arjun", "web-api-pack", "parameter-discovery", []string{"web.route_enumeration"}, "url", "parameter_discovery", "arjun_json"),
 		builtInBinaryTool("sqlmap", "web-api-pack", "injection-testing", []string{"web.candidate_generation", "evidence.collection"}, "url", "injection_test", "sqlmap_json"),
 		builtInBinaryTool("nmap", "infra-pack", "service-enumeration", []string{"infra.host_discovery", "infra.service_enumeration"}, "host", "service_fingerprint", "nmap_xml"),
-		builtInBinaryTool("naabu", "infra-pack", "port-discovery", []string{"infra.host_discovery", "infra.service_enumeration"}, "host", "port_scan", "naabu_jsonl"),
+		builtInBinaryTool("naabu", "infra-pack", "port-discovery", []string{"infra.host_discovery", "infra.service_enumeration"}, "cidr", "port_scan", "naabu_jsonl"),
 		builtInBinaryTool("dnsx", "infra-pack", "dns-enumeration", []string{"infra.host_discovery", "infra.service_enumeration"}, "domain", "dns_probe", "dnsx_jsonl"),
 		builtInBinaryTool("amass", "infra-pack", "asset-discovery", []string{"infra.host_discovery", "infra.identity_graph"}, "domain", "subdomain_discovery", "amass_json"),
 		builtInBinaryTool("dnsrecon", "infra-pack", "dns-enumeration", []string{"infra.host_discovery", "infra.service_enumeration"}, "domain", "dns_probe", "dnsrecon_json"),

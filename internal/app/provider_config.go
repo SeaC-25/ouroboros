@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 type OpenAICompatibleProviderConfiguration struct {
 	Name                string
 	BaseURL             string
+	BaseURLEnv          string
 	Model               string
 	APIKeyEnv           string
 	Enabled             bool
@@ -73,9 +75,20 @@ func openAICompatibleProviderFromConfiguration(options OpenAICompatibleProviderC
 	if model == "" {
 		return Provider{}, fmt.Errorf("provider model is required")
 	}
-	baseURL, err := parseOpenAICompatibleProviderBaseURL(options.BaseURL)
-	if err != nil {
-		return Provider{}, fmt.Errorf("provider %s base_url is invalid: %w", name, err)
+	baseURL := ""
+	if trimmedBaseURL := strings.TrimSpace(options.BaseURL); trimmedBaseURL != "" {
+		parsed, err := parseOpenAICompatibleProviderBaseURL(trimmedBaseURL)
+		if err != nil {
+			return Provider{}, fmt.Errorf("provider %s base_url is invalid: %w", name, err)
+		}
+		baseURL = parsed.String()
+	}
+	baseURLEnv := strings.TrimSpace(options.BaseURLEnv)
+	if baseURL == "" && baseURLEnv == "" {
+		return Provider{}, fmt.Errorf("provider %s base_url is invalid: %w", name, errors.New("base_url is required"))
+	}
+	if baseURLEnv != "" && !validProviderAPIKeyEnvName(baseURLEnv) {
+		return Provider{}, fmt.Errorf("provider %s base_url_env must be an environment variable name", name)
 	}
 	apiKeyEnv := strings.TrimSpace(options.APIKeyEnv)
 	if !validProviderAPIKeyEnvName(apiKeyEnv) {
@@ -95,7 +108,8 @@ func openAICompatibleProviderFromConfiguration(options OpenAICompatibleProviderC
 		Name:                name,
 		Type:                providerTypeOpenAICompatible,
 		Model:               model,
-		BaseURL:             baseURL.String(),
+		BaseURL:             baseURL,
+		BaseURLEnv:          baseURLEnv,
 		APIKeyEnv:           apiKeyEnv,
 		TimeoutMS:           options.TimeoutMS,
 		ContextWindowTokens: options.ContextWindowTokens,

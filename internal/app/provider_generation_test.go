@@ -505,7 +505,6 @@ providers:
 }
 
 func TestValidateProviderConfigChecksRoutingStrategy(t *testing.T) {
-	t.Skip("Safety authorization checks disabled")
 	base := ProviderConfig{
 		Version: 1,
 		Providers: []Provider{{
@@ -612,5 +611,94 @@ providers:
 		if strings.Contains(err.Error(), secret) {
 			t.Fatalf("provider generation error leaked secret material: %v", err)
 		}
+	}
+}
+
+func TestProviderBaseURLEnvOverridesConfiguredURL(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	var servedBy string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		servedBy = "env-server"
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("unexpected provider request %s %s", r.Method, r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer secret-value" {
+			t.Fatalf("expected bearer header, got %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"via env base url"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer server.Close()
+	t.Setenv("OURO_TEST_PROVIDER_KEY", "secret-value")
+	t.Setenv("OURO_TEST_PROVIDER_BASE_URL", server.URL+"/v1")
+	providers := `version: 1
+providers:
+  - name: local-openai
+    type: openai_compatible
+    model: gpt-test
+    base_url: https://configured-fallback.invalid/v1
+    base_url_env: OURO_TEST_PROVIDER_BASE_URL
+    api_key_env: OURO_TEST_PROVIDER_KEY
+    enabled: true
+`
+	if err := os.WriteFile(filepath.Join(root, "providers.yaml"), []byte(providers), 0o644); err != nil {
+		t.Fatalf("write providers: %v", err)
+	}
+
+	result, err := GenerateProviderMessage(context.Background(), root, ProviderGenerationRequest{UserPrompt: "hello"})
+	if err != nil {
+		t.Fatalf("generate with base_url_env: %v", err)
+	}
+	if result.Text != "via env base url" {
+		t.Fatalf("unexpected generation result text: %q", result.Text)
+	}
+	if servedBy != "env-server" {
+		t.Fatalf("expected request to hit env-provided base URL, servedBy=%q", servedBy)
+	}
+}
+
+func TestProviderBaseURLEnvUnsetFallsBackToConfiguredURL(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	var servedBy string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		servedBy = "configured-server"
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("unexpected provider request %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"via configured base url"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer server.Close()
+	t.Setenv("OURO_TEST_PROVIDER_KEY", "secret-value")
+	t.Setenv("OURO_TEST_PROVIDER_BASE_URL", "")
+	providers := fmt.Sprintf(`version: 1
+providers:
+  - name: local-openai
+    type: openai_compatible
+    model: gpt-test
+    base_url: %s/v1
+    base_url_env: OURO_TEST_PROVIDER_BASE_URL
+    api_key_env: OURO_TEST_PROVIDER_KEY
+    enabled: true
+`, server.URL)
+	if err := os.WriteFile(filepath.Join(root, "providers.yaml"), []byte(providers), 0o644); err != nil {
+		t.Fatalf("write providers: %v", err)
+	}
+
+	result, err := GenerateProviderMessage(context.Background(), root, ProviderGenerationRequest{UserPrompt: "hello"})
+	if err != nil {
+		t.Fatalf("generate with unset base_url_env: %v", err)
+	}
+	if result.Text != "via configured base url" {
+		t.Fatalf("unexpected generation result text: %q", result.Text)
+	}
+	if servedBy != "configured-server" {
+		t.Fatalf("expected request to hit configured base URL, servedBy=%q", servedBy)
 	}
 }

@@ -40,7 +40,6 @@ func TestSummarizeWorkspaceWorkflowRecommendsAcceptingValidModelToolPlanPreview(
 }
 
 func TestSummarizeWorkspaceWorkflowSurfacesSafetyAuthorizationBeforePreviewAcceptance(t *testing.T) {
-	t.Skip("Safety authorization checks disabled")
 }
 
 func TestSummarizeWorkspaceWorkflowRecommendsDispatchAfterAcceptedPreview(t *testing.T) {
@@ -98,7 +97,6 @@ func TestSummarizeWorkspaceWorkflowRecommendsExecutingDispatch(t *testing.T) {
 }
 
 func TestSummarizeWorkspaceWorkflowSurfacesSafetyAuthorizationBeforeCompileExecution(t *testing.T) {
-	t.Skip("Safety authorization checks disabled")
 }
 
 func TestSummarizeWorkspaceWorkflowRecommendsReportProjectionDispatchAfterCompileExecution(t *testing.T) {

@@ -3,7 +3,9 @@ package nativetools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"sort"
@@ -29,20 +31,28 @@ func DiscoverArchiveURLs(ctx context.Context, target string, opts Options) (stri
 	domains := strings.Split(trimmed, ",")
 
 	client := opts.httpClient()
-	queryCtx, cancel := context.WithTimeout(ctx, opts.timeout())
-	defer cancel()
 
+	// Best-effort across comma-separated domains: one failing source must not
+	// sink results already collected for the others. Each domain gets its own
+	// timeout window; the run only fails when every domain failed.
 	urls := []string{}
+	var errs []error
 	for _, domain := range domains {
 		domain = strings.TrimSpace(strings.TrimSuffix(domain, "."))
 		if domain == "" {
 			continue
 		}
+		queryCtx, cancel := context.WithTimeout(ctx, opts.timeout())
 		domainURLs, err := queryArchiveCDX(queryCtx, client, domain)
+		cancel()
 		if err != nil {
-			return "", err
+			errs = append(errs, fmt.Errorf("domain %s: %w", domain, err))
+			continue
 		}
 		urls = append(urls, domainURLs...)
+	}
+	if len(urls) == 0 && len(errs) > 0 {
+		return "", errors.Join(errs...)
 	}
 
 	// Merge results from every domain; de-duplicate and cap the combined list.
@@ -75,16 +85,12 @@ func queryArchiveCDX(ctx context.Context, client *http.Client, domain string) ([
 		return nil, fmt.Errorf("archive source returned status %d", resp.StatusCode)
 	}
 
-	body := make([]byte, 0, 64*1024)
-	buffer := make([]byte, 32*1024)
-	for {
-		n, err := resp.Body.Read(buffer)
-		if n > 0 {
-			body = append(body, buffer[:n]...)
-		}
-		if err != nil || len(body) > 32*1024*1024 {
-			break
-		}
+	// Read at most 1MiB, matching amass_discovery.go:78, which reads the
+	// certificate-transparency passive source with the same shared ceiling so
+	// every passive-lookup response is bounded identically.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
+	if err != nil {
+		return nil, fmt.Errorf("read archive response: %w", err)
 	}
 
 	return archiveURLsFromCDX(body, domain), nil

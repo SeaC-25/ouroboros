@@ -302,7 +302,6 @@ func TestExecuteWorkerLeaseResultReconciliationDispatchRevalidatesAndReleasesAct
 }
 
 func TestExecuteWorkerLeaseResultReconciliationDispatchRequiresCurrentSafetyAuthorizationBeforeLeaseMutation(t *testing.T) {
-	t.Skip("Safety authorization checks disabled")
 	root := filepath.Join(t.TempDir(), "workspace")
 	now := time.Date(2026, 5, 30, 20, 5, 0, 0, time.UTC)
 	dispatch, review := createWorkerLeaseResultReconciliationReviewFixture(t, root, now, "completed")

@@ -640,6 +640,9 @@ type ToolCompilePreviewOptions struct {
 	DomainPriorities []compiler.DomainPriority
 	FrontierScores   []compiler.CandidateFrontierScore
 	HistoricalStats  []compiler.CandidateHistory
+	// Manifests optionally supplies workspace toolchain manifests already
+	// loaded by the caller; when nil, PreviewToolCompilePlan loads them.
+	Manifests []toolchain.Manifest
 }
 
 type ToolCompilePreview struct {
@@ -1159,9 +1162,13 @@ func PreviewToolCompilePlan(root string, options ToolCompilePreviewOptions) (Too
 	if strings.TrimSpace(string(action)) == "" {
 		action = compiler.ActionDiscoverAssets
 	}
-	manifests, err := toolchain.LoadManifests(filepath.Join(root, "toolchain"))
-	if err != nil {
-		return ToolCompilePreview{}, fmt.Errorf("load toolchain manifests: %w", err)
+	manifests := options.Manifests
+	if manifests == nil {
+		loaded, err := toolchain.LoadManifests(filepath.Join(root, "toolchain"))
+		if err != nil {
+			return ToolCompilePreview{}, fmt.Errorf("load toolchain manifests: %w", err)
+		}
+		manifests = loaded
 	}
 	plan, err := compiler.NewCompiler().Compile(compiler.CompileRequest{
 		Action: action,
@@ -2952,7 +2959,10 @@ func readToolchainInstallDispatchFile(path string) (ToolchainInstallDispatch, er
 }
 
 func ExecuteToolchainInstallDispatch(root, dispatchPath string, options ToolchainInstallDispatchExecutionOptions) (ToolchainInstallDispatchExecution, error) {
-	doctor, err := doctorToolchainInstallRuntime(root)
+	if !options.Execute {
+		return ToolchainInstallDispatchExecution{}, fmt.Errorf("install dispatch execution requires explicit execute")
+	}
+	doctor, err := DoctorWorkspaceWithOptions(root, DoctorOptions{RequireSafetyAuthorization: true})
 	if err != nil {
 		return ToolchainInstallDispatchExecution{}, err
 	}
@@ -2974,6 +2984,9 @@ func ExecuteToolchainInstallDispatch(root, dispatchPath string, options Toolchai
 		Skipped:      append([]ToolchainInstallDispatchSkip(nil), dispatch.Skipped...),
 	}
 	for _, request := range dispatch.Ready {
+		if installRequestDisplayStatus(request.Status) != "approved" {
+			return execution, fmt.Errorf("install dispatch ready request must be approved: %s/%s status=%s", request.Pack, request.Dependency, installRequestDisplayStatus(request.Status))
+		}
 		result := ToolchainInstallDispatchExecutionResult{
 			RequestPath: request.Path,
 			Pack:        request.Pack,

@@ -80,6 +80,7 @@ type Provider struct {
 	Type                        string   `yaml:"type"`
 	Model                       string   `yaml:"model"`
 	BaseURL                     string   `yaml:"base_url,omitempty"`
+	BaseURLEnv                  string   `yaml:"base_url_env,omitempty"`
 	APIKeyEnv                   string   `yaml:"api_key_env,omitempty"`
 	TimeoutMS                   int      `yaml:"timeout_ms,omitempty"`
 	ContextWindowTokens         int      `yaml:"context_window_tokens,omitempty"`
@@ -487,7 +488,15 @@ func ValidateProviderConfig(config ProviderConfig) error {
 			return fmt.Errorf("provider %s model is required", provider.Name)
 		}
 		if strings.TrimSpace(provider.Type) == providerTypeOpenAICompatible {
-			if _, err := parseOpenAICompatibleProviderBaseURL(provider.BaseURL); err != nil {
+			baseURLEnv := strings.TrimSpace(provider.BaseURLEnv)
+			if baseURLEnv != "" && !validProviderAPIKeyEnvName(baseURLEnv) {
+				return fmt.Errorf("provider %s base_url_env must be an environment variable name", provider.Name)
+			}
+			if strings.TrimSpace(provider.BaseURL) == "" {
+				if baseURLEnv == "" {
+					return fmt.Errorf("provider %s base_url is invalid: %w", provider.Name, errors.New("base_url is required"))
+				}
+			} else if _, err := parseOpenAICompatibleProviderBaseURL(provider.BaseURL); err != nil {
 				return fmt.Errorf("provider %s base_url is invalid: %w", provider.Name, err)
 			}
 			if provider.TimeoutMS < 0 {
@@ -509,6 +518,9 @@ func ValidateProviderConfig(config ProviderConfig) error {
 	}
 	if enabled == 0 {
 		return errors.New("at least one provider must be enabled")
+	}
+	if _, err := providerRoutingStrategy(config); err != nil {
+		return fmt.Errorf("provider routing strategy is not supported: %s", strings.TrimSpace(config.Routing.Strategy))
 	}
 	return nil
 }
@@ -537,6 +549,19 @@ func parseOpenAICompatibleProviderBaseURL(raw string) (*url.URL, error) {
 		return nil, errors.New("base_url must not include query or fragment")
 	}
 	return parsed, nil
+}
+
+// providerEffectiveBaseURL resolves the base URL in effect at call time:
+// when base_url_env names an environment variable that is set to a
+// non-empty value, that value wins; otherwise the configured base_url is
+// used. The environment is read on every call per the env-first rule.
+func providerEffectiveBaseURL(provider Provider) string {
+	if envName := strings.TrimSpace(provider.BaseURLEnv); envName != "" {
+		if value, ok := os.LookupEnv(envName); ok && strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return provider.BaseURL
 }
 
 func writeFileIfMissing(path string, content string) error {
@@ -599,22 +624,10 @@ func validateYAMLFile(path string) error {
 
 const defaultProviderConfigYAML = `version: 1
 providers:
-  - name: web-ai-media-editor
-    type: openai_compatible
-    model: claude-opus-4-7
-    base_url: https://niuwa88.vip/v1
-    api_key_env: OURO_WEB_AI_MEDIA_EDITOR_KEY
-    timeout_ms: 30000
-    context_window_tokens: 32768
-    capabilities:
-      - chat
-      - code
-      - reasoning
-    enabled: true
   - name: offline
     type: offline
     model: offline-model
-    enabled: false
+    enabled: true
 `
 
 var workspaceToolchainManifestYAML = map[string]string{

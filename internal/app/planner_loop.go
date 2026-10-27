@@ -14,6 +14,7 @@ import (
 	"github.com/ouroboros/ouroboros/internal/compiler"
 	"github.com/ouroboros/ouroboros/internal/eventlog"
 	"github.com/ouroboros/ouroboros/internal/sisyphus"
+	"github.com/ouroboros/ouroboros/internal/toolchain"
 )
 
 const (
@@ -63,7 +64,13 @@ func runClosedLoopPlannerPreviewStage(ctx context.Context, root string, runID st
 	// model side. Falls back to the legacy intent loop only when no
 	// observation backlog exists.
 	task := sisyphus.Engine{}.StepFromObservations(snapshot.Blackboard)
-	compilePreview, err := createClosedLoopPlannerCompilePreview(root, task, *persistedEvents)
+	// Index intent→action once per stage; the compile preview lookup reads
+	// the map instead of rescanning every intent event.
+	intentActions, err := closedLoopPlannerIntentActionIndex(*persistedEvents)
+	if err != nil {
+		return err
+	}
+	compilePreview, err := createClosedLoopPlannerCompilePreview(root, task, *persistedEvents, intentActions, options.toolchainManifests)
 	if err != nil {
 		return err
 	}
@@ -229,7 +236,7 @@ func runClosedLoopPlannerModelToolPlanPreview(ctx context.Context, root string, 
 	if !extraction.Valid {
 		return appendRunEvent(ctx, store, closedLoopPlannerModelToolPlanPreviewEvent(runID, result, extraction, ModelToolPlanPreviewArtifact{}), options, persistedEvents)
 	}
-	review, err := CreateToolCompilePreviewReview(root, ToolCompilePreviewOptions{Action: extraction.Action})
+	review, err := CreateToolCompilePreviewReview(root, ToolCompilePreviewOptions{Action: extraction.Action, Manifests: options.toolchainManifests})
 	if err != nil {
 		return fmt.Errorf("create model tool-plan compile preview review: %w", err)
 	}
@@ -445,15 +452,18 @@ type closedLoopPlannerIntentPayload struct {
 	Action   string `json:"action"`
 }
 
-func createClosedLoopPlannerCompilePreview(root string, task sisyphus.Task, events []eventlog.Event) (closedLoopPlannerCompilePreview, error) {
-	action, found, err := closedLoopPlannerSelectedAction(task, events)
+// createClosedLoopPlannerCompilePreview resolves the planner-selected
+// action for task via the prebuilt intent→action index (nil falls back to
+// a direct event scan).
+func createClosedLoopPlannerCompilePreview(root string, task sisyphus.Task, events []eventlog.Event, intentActions map[string]compiler.SemanticAction, manifests []toolchain.Manifest) (closedLoopPlannerCompilePreview, error) {
+	action, found, err := closedLoopPlannerSelectedActionIndexed(task, intentActions, events)
 	if err != nil {
 		return closedLoopPlannerCompilePreview{}, err
 	}
 	if !found {
 		return closedLoopPlannerCompilePreview{}, nil
 	}
-	review, err := CreateToolCompilePreviewReview(root, ToolCompilePreviewOptions{Action: action})
+	review, err := CreateToolCompilePreviewReview(root, ToolCompilePreviewOptions{Action: action, Manifests: manifests})
 	if err != nil {
 		return closedLoopPlannerCompilePreview{}, fmt.Errorf("create closed-loop planner compile preview review: %w", err)
 	}
@@ -499,6 +509,50 @@ func selectClosedLoopPlannerCompilePreviewReview(root string, review ToolCompile
 		return ToolCompilePreviewReviewSelection{}, err
 	}
 	return selection, nil
+}
+
+// closedLoopPlannerSelectedActionIndexed resolves the latest action for the
+// task's intent: O(1) via the prebuilt index when available, otherwise a
+// direct scan of events with identical semantics.
+func closedLoopPlannerSelectedActionIndexed(task sisyphus.Task, intentActions map[string]compiler.SemanticAction, events []eventlog.Event) (compiler.SemanticAction, bool, error) {
+	if intentActions == nil {
+		return closedLoopPlannerSelectedAction(task, events)
+	}
+	intentID := strings.TrimSpace(task.IntentID)
+	if intentID == "" {
+		return "", false, nil
+	}
+	action, found := intentActions[intentID]
+	return action, found, nil
+}
+
+// closedLoopPlannerIntentActionIndex scans the event mirror once and maps
+// each intent ID to its latest non-empty action, so per-task lookups are
+// O(1) instead of rescanning and re-decoding every intent event.
+func closedLoopPlannerIntentActionIndex(events []eventlog.Event) (map[string]compiler.SemanticAction, error) {
+	index := map[string]compiler.SemanticAction{}
+	for _, event := range events {
+		if event.Type != eventlog.EventIntent {
+			continue
+		}
+		var payload closedLoopPlannerIntentPayload
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			return nil, fmt.Errorf("decode closed-loop planner intent payload: %w", err)
+		}
+		id := strings.TrimSpace(payload.IntentID)
+		if id == "" {
+			id = strings.TrimSpace(payload.ID)
+		}
+		if id == "" {
+			continue
+		}
+		action := compiler.SemanticAction(strings.TrimSpace(payload.Action))
+		if strings.TrimSpace(string(action)) == "" {
+			continue
+		}
+		index[id] = action
+	}
+	return index, nil
 }
 
 func closedLoopPlannerSelectedAction(task sisyphus.Task, events []eventlog.Event) (compiler.SemanticAction, bool, error) {

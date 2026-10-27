@@ -1513,7 +1513,6 @@ execution:
 }
 
 func TestRunWorkspaceRequireSafetyAuthorizationBlocksMissingSafetyBypassAndPersistsAudit(t *testing.T) {
-	t.Skip("Safety authorization checks disabled")
 	ctx := context.Background()
 	root := filepath.Join(t.TempDir(), "workspace")
 	if err := InitWorkspace(root); err != nil {
@@ -3270,7 +3269,6 @@ execution:
 }
 
 func TestRunWorkspaceRequireSafetyAuthorizationRechecksBeforeWorkerLeaseAcquire(t *testing.T) {
-	t.Skip("Safety authorization checks disabled")
 	ctx := context.Background()
 	root := filepath.Join(t.TempDir(), "workspace")
 	if err := InitWorkspace(root); err != nil {
@@ -3312,7 +3310,6 @@ func TestRunWorkspaceRequireSafetyAuthorizationRechecksBeforeWorkerLeaseAcquire(
 }
 
 func TestRunWorkspaceRequireSafetyAuthorizationRechecksBeforeWorkerLeaseComplete(t *testing.T) {
-	t.Skip("Safety authorization checks disabled")
 	ctx := context.Background()
 	root := filepath.Join(t.TempDir(), "workspace")
 	if err := InitWorkspace(root); err != nil {
@@ -3569,7 +3566,6 @@ func TestUpdateWorkerLeaseHeartbeatRefreshesActiveLeaseAndPreventsReclaim(t *tes
 }
 
 func TestUpdateWorkerLeaseHeartbeatRequiresCurrentSafetyAuthorizationForDisabledBoundaries(t *testing.T) {
-	t.Skip("Safety authorization checks disabled")
 	root := filepath.Join(t.TempDir(), "workspace")
 	now := time.Date(2026, 5, 30, 12, 22, 0, 0, time.UTC)
 	if err := InitWorkspace(root); err != nil {
@@ -3716,7 +3712,6 @@ func TestReleaseWorkerLeaseCompletesActiveLeaseAndPreventsReclaim(t *testing.T) 
 }
 
 func TestReleaseWorkerLeaseRequiresCurrentSafetyAuthorizationForDisabledBoundaries(t *testing.T) {
-	t.Skip("Safety authorization checks disabled")
 	root := filepath.Join(t.TempDir(), "workspace")
 	now := time.Date(2026, 5, 30, 12, 27, 30, 0, time.UTC)
 	if err := InitWorkspace(root); err != nil {
@@ -4113,7 +4108,6 @@ func TestExecuteWorkerLeaseReclaimDispatchRevalidatesAndReclaimsStaleLease(t *te
 }
 
 func TestExecuteWorkerLeaseReclaimDispatchRequiresCurrentSafetyAuthorizationBeforeLeaseMutation(t *testing.T) {
-	t.Skip("Safety authorization checks disabled")
 	root := filepath.Join(t.TempDir(), "workspace")
 	now := time.Date(2026, 5, 30, 14, 35, 0, 0, time.UTC)
 	staleAfter := 5 * time.Minute
@@ -6604,7 +6598,7 @@ execution:
 			"operation=port_scan",
 			"parser=naabu_jsonl",
 			"dep=naabu",
-			"target_kind=host",
+			"target_kind=cidr",
 			"scope_target_kind=cidr",
 		} {
 			if !strings.Contains(payload.Transcript, want) {
@@ -13015,7 +13009,7 @@ func expectedBuiltInDiscoverPlanNodes() []expectedBuiltInDiscoverPlanNode {
 			AdapterID:      "managed_binary",
 			Operation:      "port_scan",
 			ParserID:       "naabu_jsonl",
-			TargetKind:     "host",
+			TargetKind:     "cidr",
 			DependencyName: "naabu",
 			DependencyKind: "binary",
 		},
@@ -13112,4 +13106,106 @@ func firstNonEmptyTestValue(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func TestRunWorkspaceUsesBaseURLEnvOverConfiguredURL(t *testing.T) {
+	t.Setenv(ProviderPreflightEnvVar, "on")
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	preflightHits := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/models/gpt-test":
+			preflightHits++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"gpt-test"}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/chat/completions":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"run via env base url"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+		default:
+			t.Fatalf("unexpected provider request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("OURO_TEST_PROVIDER_KEY", "secret-value")
+	t.Setenv("OURO_TEST_PROVIDER_BASE_URL", server.URL+"/v1")
+	providers := `version: 1
+providers:
+  - name: local-openai
+    type: openai_compatible
+    model: gpt-test
+    base_url: https://configured-fallback.invalid/v1
+    base_url_env: OURO_TEST_PROVIDER_BASE_URL
+    api_key_env: OURO_TEST_PROVIDER_KEY
+    timeout_ms: 5000
+    enabled: true
+`
+	if err := os.WriteFile(filepath.Join(root, "providers.yaml"), []byte(providers), 0o644); err != nil {
+		t.Fatalf("write providers: %v", err)
+	}
+
+	result, err := RunWorkspaceWithOptions(ctx, root, RunOptions{DeferReportProjection: true})
+	if err != nil {
+		t.Fatalf("run workspace with base_url_env: %v", err)
+	}
+	if preflightHits != 1 {
+		t.Fatalf("expected exactly one preflight hit on env-provided base URL, got %d", preflightHits)
+	}
+	if preflightHits != 1 || len(result.RunID) == 0 {
+		t.Fatalf("unexpected run result: hits=%d runID=%q", preflightHits, result.RunID)
+	}
+}
+
+func TestRunWorkspaceBaseURLEnvUnsetUsesConfiguredURL(t *testing.T) {
+	t.Setenv(ProviderPreflightEnvVar, "on")
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := InitWorkspace(root); err != nil {
+		t.Fatalf("init workspace: %v", err)
+	}
+	preflightHits := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/models/gpt-test":
+			preflightHits++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"gpt-test"}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/chat/completions":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"run via configured base url"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+		default:
+			t.Fatalf("unexpected provider request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("OURO_TEST_PROVIDER_KEY", "secret-value")
+	t.Setenv("OURO_TEST_PROVIDER_BASE_URL", "")
+	providers := fmt.Sprintf(`version: 1
+providers:
+  - name: local-openai
+    type: openai_compatible
+    model: gpt-test
+    base_url: %s/v1
+    base_url_env: OURO_TEST_PROVIDER_BASE_URL
+    api_key_env: OURO_TEST_PROVIDER_KEY
+    timeout_ms: 5000
+    enabled: true
+`, server.URL)
+	if err := os.WriteFile(filepath.Join(root, "providers.yaml"), []byte(providers), 0o644); err != nil {
+		t.Fatalf("write providers: %v", err)
+	}
+
+	result, err := RunWorkspaceWithOptions(ctx, root, RunOptions{DeferReportProjection: true})
+	if err != nil {
+		t.Fatalf("run workspace with unset base_url_env: %v", err)
+	}
+	if preflightHits != 1 {
+		t.Fatalf("expected exactly one preflight hit on configured base URL, got %d", preflightHits)
+	}
+	if preflightHits != 1 || len(result.RunID) == 0 {
+		t.Fatalf("unexpected run result: hits=%d runID=%q", preflightHits, result.RunID)
+	}
 }

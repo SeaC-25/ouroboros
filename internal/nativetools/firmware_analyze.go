@@ -51,6 +51,8 @@ type FirmwareFinding struct {
 
 // AnalyzeFirmware scans the target for embedded file signatures and returns the
 // binwalk-style text report (decimal offset, description, extraction hint).
+// Files larger than maxScanFileSize (2MiB, the same ceiling as secret_scan.go)
+// are skipped with a reported reason instead of being read whole.
 func AnalyzeFirmware(ctx context.Context, target string, _ Options) (string, error) {
 	target = strings.TrimSpace(target)
 	if target == "" {
@@ -62,6 +64,14 @@ func AnalyzeFirmware(ctx context.Context, target string, _ Options) (string, err
 	}
 	if info.IsDir() {
 		return "", fmt.Errorf("firmware_analyze requires a file, got directory %s", target)
+	}
+	if info.Size() > maxScanFileSize {
+		// Oversized artifact: skip rather than read it whole, but keep the
+		// report machine-consumable (empty findings, not an error).
+		fmt.Fprintf(os.Stderr, "firmware_analyze: skipped %s: %d bytes exceeds maxScanFileSize (%d)\n",
+			target, info.Size(), maxScanFileSize)
+		return fmt.Sprintf("DECIMAL       HEXADECIMAL     DESCRIPTION\nskipped %s: %d bytes exceeds maxScanFileSize (%d)\n",
+			filepath.Base(target), info.Size(), maxScanFileSize), nil
 	}
 	data, err := os.ReadFile(target)
 	if err != nil {

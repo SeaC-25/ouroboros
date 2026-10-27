@@ -190,6 +190,7 @@ func BuildReplaySnapshot(events []Event) (ReplaySnapshot, error) {
 	toolchainByName := map[string]ReplayToolchainStatus{}
 	toolExecutionsByID := map[string]ReplayToolExecution{}
 	toolAdmissionsByID := map[string]ReplayToolAdmission{}
+	replayObservedIDs := map[string]struct{}{}
 	modelUsagePreviews := []ReplayModelUsagePreview{}
 	timeline := make([]ReplayTimelineEvent, 0, len(sortedEvents))
 
@@ -220,6 +221,13 @@ func BuildReplaySnapshot(events []Event) (ReplaySnapshot, error) {
 				// the observation store so StepFromObservations can see
 				// unprocessed evidence; everything else stays a fact.
 				if fact.Kind == "observation" {
+					// Retry of the same plan node re-emits the same fact_id;
+					// keep the first observation only so duplicates are not
+					// re-injected into the backlog.
+					if _, seen := replayObservedIDs[fact.ID]; seen {
+						continue
+					}
+					replayObservedIDs[fact.ID] = struct{}{}
 					// Payload fidelity: carry the full raw observation JSON
 					// (the event payload) rather than the compressed
 					// statement, so model-side reasoning sees forms/links/
