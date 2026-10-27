@@ -3,13 +3,13 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/ouroboros/ouroboros/internal/app"
+	"github.com/ouroboros/ouroboros/internal/toolchain"
+	"gopkg.in/yaml.v3"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
-
-	"github.com/ouroboros/ouroboros/internal/toolchain"
-	"gopkg.in/yaml.v3"
 )
 
 func (s *Server) handleToolchain(w http.ResponseWriter, r *http.Request) {
@@ -93,6 +93,37 @@ func (s *Server) handleToolchainActionByID(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) StartToolchainAction(actionID string, request ToolchainActionRunRequestDTO) (ToolchainActionRunResponseDTO, error) {
+	// Catalog tool actions carry target/targetKind/args from the frontend
+	// instead of a raw command; dispatch them through the native catalog
+	// invocation (scope-gated) rather than the manifest run_command.
+	if strings.HasPrefix(actionID, "catalog.") && strings.TrimSpace(request.Target) != "" {
+		args := make([]string, 0, len(request.Args))
+		for key, value := range request.Args {
+			args = append(args, key+"="+value)
+		}
+		resolved, err := app.ResolveCatalogToolInvocation(app.CatalogToolInvocation{
+			WorkspaceRoot: s.workspace,
+			ToolID:        strings.TrimPrefix(actionID, "catalog."),
+			Target:        strings.TrimSpace(request.Target),
+			TargetKind:    strings.TrimSpace(request.TargetKind),
+			Args:          args,
+		})
+		if err != nil {
+			return ToolchainActionRunResponseDTO{}, err
+		}
+		execution, execErr := s.StartExecution(ExecutionCreateRequestDTO{
+			Command: resolved.Executable,
+			Args:    resolved.Argv[1:],
+		})
+		if execErr != nil {
+			return ToolchainActionRunResponseDTO{}, execErr
+		}
+		action, actionErr := findToolchainAction(s.workspace, actionID)
+		if actionErr != nil {
+			return ToolchainActionRunResponseDTO{Execution: execution}, nil
+		}
+		return ToolchainActionRunResponseDTO{Action: action, Execution: execution}, nil
+	}
 	action, err := findToolchainAction(s.workspace, actionID)
 	if err != nil {
 		return ToolchainActionRunResponseDTO{}, err

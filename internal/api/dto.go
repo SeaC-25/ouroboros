@@ -150,6 +150,12 @@ type ToolchainActionRunRequestDTO struct {
 	Arguments string            `json:"arguments,omitempty"`
 	CWD       string            `json:"cwd,omitempty"`
 	Env       map[string]string `json:"env,omitempty"`
+	// Catalog tool invocation surface: the frontend sends target/targetKind/
+	// args for catalog.* actions (api.ts runToolchainAction); the backend
+	// ignored them — decode and dispatch to the native catalog path.
+	Target     string            `json:"target,omitempty"`
+	TargetKind string            `json:"targetKind,omitempty"`
+	Args       map[string]string `json:"args,omitempty"`
 }
 
 type ToolchainActionRunResponseDTO struct {
@@ -208,12 +214,12 @@ type RunDTO struct {
 }
 
 type ReplayEventDTO struct {
-	ID          string `json:"id"`
-	RunID       string `json:"runId"`
-	Type        string `json:"type"`
-	Lane        string `json:"lane"`
-	CreatedAt   int64  `json:"createdAt"`
-	Detail      string `json:"detail"`
+	ID        string `json:"id"`
+	RunID     string `json:"runId"`
+	Type      string `json:"type"`
+	Lane      string `json:"lane"`
+	CreatedAt int64  `json:"createdAt"`
+	Detail    string `json:"detail"`
 	// PayloadJson carries the raw event payload so the replay workbench can
 	// show full evidence (the frontend reads event.payloadJson — it was
 	// always empty before this field existed).

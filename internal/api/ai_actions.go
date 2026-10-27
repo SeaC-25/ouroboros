@@ -66,6 +66,7 @@ type AIActionRunRequestDTO struct {
 	} `json:"input,omitempty"`
 	Arguments string `json:"arguments,omitempty"`
 }
+
 // AIActionFileDiffDTO matches the frontend HarnessFileDiffResponse shape
 // (path/operation/summary/diff) — the old scalar fileDiff had no consumer.
 type AIActionFileDiffDTO struct {
@@ -77,9 +78,9 @@ type AIActionFileDiffDTO struct {
 
 // AIActionResultDTO 匹配前端 AIActionResult
 type AIActionResultDTO struct {
-	Kind            string `json:"kind"`
-	Operation       string `json:"operation,omitempty"`
-	Summary         string `json:"summary,omitempty"`
+	Kind            string                `json:"kind"`
+	Operation       string                `json:"operation,omitempty"`
+	Summary         string                `json:"summary,omitempty"`
 	FileDiffs       []AIActionFileDiffDTO `json:"fileDiffs,omitempty"`
 	OrchestratorRun *struct {
 		ID             string `json:"id"`
@@ -512,7 +513,7 @@ func (s *Server) runFileWrite(w http.ResponseWriter, actionID string, input *str
 		Kind:      "file",
 		Operation: "file_write",
 		Summary:   "已写入工作区文件",
-		FileDiff:  unifiedLineDiff(filePath, oldContent, content),
+		FileDiffs: []AIActionFileDiffDTO{{Path: filePath, Operation: "write", Diff: unifiedLineDiff(filePath, oldContent, content)}},
 	})
 }
 
@@ -749,7 +750,7 @@ func (s *Server) runReportGenerate(w http.ResponseWriter, actionID string, input
 		Kind:      "report",
 		Operation: "report_generate",
 		Summary:   fmt.Sprintf("已生成报告 %s（模型: %s）", report.RelativePath, report.Model),
-		FileDiff:  report.Diff,
+		FileDiffs: []AIActionFileDiffDTO{{Path: report.RelativePath, Operation: "report", Diff: report.Diff}},
 	})
 }
 
