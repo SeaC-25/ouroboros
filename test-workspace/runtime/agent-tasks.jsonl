@@ -1,0 +1,8 @@
+{"id":"agent-1785916761","role":"Planner","goal":"对测试目标执行一次真实多智能体调度","status":"queued","createdAt":1785916761,"updatedAt":1785916761}
+{"id":"agent-1785916761","role":"Operator","goal":"对测试目标执行一次真实多智能体调度","status":"queued","createdAt":1785916761,"updatedAt":1785916761}
+{"id":"agent-1785916962379206357","role":"Planner","goal":"验证多智能体真实调度","status":"running","command":"echo planner-done","executionId":"exec-1785916962379277440","createdAt":1785916962,"updatedAt":1785916962}
+{"id":"agent-1785916962381024447","role":"Operator","goal":"验证多智能体真实调度","status":"running","command":"echo operator-done","executionId":"exec-1785916962381048943","createdAt":1785916962,"updatedAt":1785916962}
+{"id":"agent-1785917552903879798","role":"Planner","goal":"验证多智能体真实调度状态同步","status":"running","command":"echo planner-done","executionId":"exec-1785917552903946583","createdAt":1785917552,"updatedAt":1785917552}
+{"id":"agent-1785917552906283270","role":"Operator","goal":"验证多智能体真实调度状态同步","status":"running","command":"echo operator-done","executionId":"exec-1785917552906312815","createdAt":1785917552,"updatedAt":1785917552}
+{"id":"agent-1785918712939971044","role":"Planner","goal":"验证 AI 能自动调度","status":"running","command":"echo plan","executionId":"exec-1785918712940047902","createdAt":1785918712,"updatedAt":1785918712}
+{"id":"agent-1785918712942765073","role":"Operator","goal":"验证 AI 能自动调度","status":"running","command":"echo run","executionId":"exec-1785918712942787967","createdAt":1785918712,"updatedAt":1785918712}

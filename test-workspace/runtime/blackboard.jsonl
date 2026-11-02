@@ -1,0 +1,7 @@
+{"id":"fact-1785901753435971713","kind":"ai","statement":"目标 127.0.0.1 可能开放 8080 端口","source":"ai-agent","createdAt":1785901753}
+{"id":"fact-1785916761669985818","kind":"swarm","statement":"多智能体调度已启动: 多智能体验证 (对测试目标执行一次真实多智能体调度)","source":"ai-agent","createdAt":1785916761}
+{"id":"fact-1785916962381927360","kind":"swarm","statement":"多智能体调度已启动: 多智能体验证2 (验证多智能体真实调度)","source":"ai-agent","createdAt":1785916962}
+{"id":"fact-1785917552909453876","kind":"swarm","statement":"多智能体调度已启动: 多智能体验证3 (验证多智能体真实调度状态同步)","source":"ai-agent","createdAt":1785917552}
+{"id":"fact-1785918712944503296","kind":"swarm","statement":"多智能体调度已启动: 验证 AI 能自动调度 (验证 AI 能自动调度)","source":"ai-agent","createdAt":1785918712}
+{"id":"fact-1785920346884602866","kind":"failure","statement":"失败恢复: exec-1785919344856568285 -\u003e exec-1785920346883511379 (原因: 路径不存在，改为重试原命令)","source":"ai-agent","createdAt":1785920346}
+{"id":"fact-1785920818091041263","kind":"failure","statement":"失败恢复: exec-1785920817986621081 -\u003e exec-1785920818088171915 (原因: 已执行命令，执行记录 exec-1785920817986621081（状态: failed）)","source":"ai-agent","createdAt":1785920818}

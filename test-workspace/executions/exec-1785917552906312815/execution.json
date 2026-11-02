@@ -1,0 +1,20 @@
+{
+  "id": "exec-1785917552906312815",
+  "command": "bash",
+  "args": [
+    "-c",
+    "echo operator-done"
+  ],
+  "env": {
+    "OURO_AGENT_GOAL": "验证多智能体真实调度状态同步",
+    "OURO_AGENT_ROLE": "Operator",
+    "OURO_AGENT_TASK_ID": "agent-1785917552906283270",
+    "OURO_SWARM_RUN_ID": "swarm-1785917552903862625"
+  },
+  "status": "completed",
+  "startedAt": 1785917552,
+  "completedAt": 1785917552,
+  "exitCode": 0,
+  "logPath": "executions/exec-1785917552906312815/output.log",
+  "artifactDir": "executions/exec-1785917552906312815/artifacts"
+}
