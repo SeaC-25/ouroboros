@@ -33,3 +33,13 @@ fastsec-linux-amd64
 solve_loop.mjs
 test-workspace/
 *.exe
+*.exe
+*.dll
+*.zip
+*.tar
+*.gz
+*.7z
+native-ws/
+docker-build/
+ctfy*.jsonl
+*.jsonl.bak
