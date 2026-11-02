@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -101,6 +102,43 @@ var (
 // observations. It never classifies anything — no severity, no verdict, no
 // signature matching beyond structural extraction (forms/links/JSON keys).
 func ObserveHTTP(ctx context.Context, target string, spec ObserveSpec, opts Options) (string, error) {
+	// Env placeholder expansion: {{env:VAR}} resolves at call time in the
+	// target URL, headers, body, query values, and path — the model can
+	// call authenticated APIs through the same observation primitive it
+	// uses for targets, without shell-escaping gymnastics. Unset variables
+	// fail closed with a clear error.
+	var err error
+	if target, err = expandSpecEnv(target); err != nil {
+		return "", err
+	}
+	if spec.Body, err = expandSpecEnv(spec.Body); err != nil {
+		return "", err
+	}
+	if spec.Path, err = expandSpecEnv(spec.Path); err != nil {
+		return "", err
+	}
+	if len(spec.Headers) > 0 {
+		headers := make(map[string]string, len(spec.Headers))
+		for key, value := range spec.Headers {
+			expanded, expErr := expandSpecEnv(value)
+			if expErr != nil {
+				return "", expErr
+			}
+			headers[key] = expanded
+		}
+		spec.Headers = headers
+	}
+	if len(spec.Query) > 0 {
+		query := make(map[string]string, len(spec.Query))
+		for key, value := range spec.Query {
+			expanded, expErr := expandSpecEnv(value)
+			if expErr != nil {
+				return "", expErr
+			}
+			query[key] = expanded
+		}
+		spec.Query = query
+	}
 	base := normalizeURL(target)
 	if base == "" {
 		return "", fmt.Errorf("http_observe requires a target url")
@@ -358,6 +396,41 @@ func diffObservations(probe, control *ObserveResult) *ObserveDiff {
 	sort.Strings(diff.HeaderAdded)
 	sort.Strings(diff.HeaderRemoved)
 	return diff
+}
+
+// envPlaceholderPattern matches {{env:VAR_NAME}} occurrences.
+var envPlaceholderPattern = regexp.MustCompile(`\{\{env:([A-Za-z_][A-Za-z0-9_]*)\}\}`)
+
+// expandEnvPlaceholders resolves {{env:VAR}} at call time (AGENTS.md
+// env-first rule). Unset variables are an error: observations must never
+// silently send empty credentials.
+func expandEnvPlaceholders(text string) (string, bool, error) {
+	if !strings.Contains(text, "{{env:") {
+		return text, false, nil
+	}
+	var missing []string
+	expanded := envPlaceholderPattern.ReplaceAllStringFunc(text, func(match string) string {
+		sub := envPlaceholderPattern.FindStringSubmatch(match)
+		if len(sub) != 2 {
+			return match
+		}
+		value, ok := os.LookupEnv(sub[1])
+		if !ok || strings.TrimSpace(value) == "" {
+			missing = append(missing, sub[1])
+			return match
+		}
+		return value
+	})
+	if len(missing) > 0 {
+		return text, true, fmt.Errorf("env placeholder {{env:%s}} is not set", missing[0])
+	}
+	return expanded, true, nil
+}
+
+// expandSpecEnv is the (text, error) form used by ObserveHTTP call sites.
+func expandSpecEnv(text string) (string, error) {
+	expanded, _, err := expandEnvPlaceholders(text)
+	return expanded, err
 }
 
 // sha256Hex hashes data for the body digest.

@@ -17,6 +17,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -267,8 +268,17 @@ func runAgent(ctx context.Context, out io.Writer, opts *agentRunOptions) error {
 		}); err != nil {
 			done[best.Entity.ID+"\x00"+best.Spec.Action] = true
 			stepsTaken++
-			_ = budget.Step() // duplicate rejections consume budget too
-			steps = append(steps, agentStepLog{stepsTaken, best.Entity.ID, best.Spec.Action, "duplicate-or-quarantined", best.Spec.Tool, ""})
+			_ = budget.Step() // duplicate/quarantine rejections consume budget too
+			// Poison-pill quarantine is treated like a duplicate claim — the
+			// action is skipped — but the quarantine is surfaced so the next
+			// run picks an alternative tool for this target (L0 poison pill).
+			if errors.Is(err, eventlog.ErrPoisonPill) {
+				fmt.Fprintf(out, "agent: poison-pill %s×%s (key %s): switch tool for this target\n",
+					best.Spec.Tool, best.Entity.ID, key)
+				steps = append(steps, agentStepLog{stepsTaken, best.Entity.ID, best.Spec.Action, "poison-pill-quarantined", best.Spec.Tool, ""})
+			} else {
+				steps = append(steps, agentStepLog{stepsTaken, best.Entity.ID, best.Spec.Action, "duplicate-or-quarantined", best.Spec.Tool, ""})
+			}
 			continue
 		}
 		done[best.Entity.ID+"\x00"+best.Spec.Action] = true

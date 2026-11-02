@@ -1,0 +1,14 @@
+{
+  "id": "exec-1793102480284954600",
+  "command": "bash",
+  "args": [
+    "-c",
+    "ip addr show 2\u003e/dev/null || ifconfig -a 2\u003e/dev/null || hostname -I"
+  ],
+  "status": "failed",
+  "startedAt": 1793102480,
+  "completedAt": 1793102480,
+  "exitCode": 1,
+  "logPath": "executions/exec-1793102480284954600/output.log",
+  "artifactDir": "executions/exec-1793102480284954600/artifacts"
+}

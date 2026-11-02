@@ -42,6 +42,16 @@ type Server struct {
 	executions map[string]context.CancelFunc
 	done       chan struct{} // 用于优雅停止 goroutine
 	stopOnce   sync.Once
+	// unprocessedObs tracks raw observations awaiting consumption: key =
+	// observation ID (obs-<nano>-<hex4>), value = true. The Sisyphus gate
+	// counts these to break observation-only loops (see sisyphus_gate.go).
+	// Kept on Server (not a package global) so the zero value works in
+	// tests and each workspace server owns its own backlog.
+	unprocessedObs sync.Map
+	// rejectedFlags records platform-rejected flags (repeat-submission
+	// circuit breaker): key = flag string.
+	rejectedFlags   map[string]bool
+	rejectedFlagsMu sync.Mutex
 }
 
 // NewServer 创建新的API服务器
@@ -113,6 +123,9 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/frontier/dependencies", s.handleFrontierDependencies)
 	mux.HandleFunc("/api/ai/actions", s.handleAIActions)
 	mux.HandleFunc("/api/ai/actions/run", s.handleAIActionRun)
+	mux.HandleFunc("/api/ai/subloops", s.handleSubLoops)
+	mux.HandleFunc("/api/ai/mbee-intent", s.handleMBEEIntent)
+	mux.HandleFunc("/api/ai/spawn-direct", s.handleSpawnDirect)
 	mux.HandleFunc("/api/ai/chat", s.handleAIChat)
 	mux.HandleFunc("/api/ai/conversation/sessions", s.handleAIConversationSessions)
 	mux.HandleFunc("/api/ai/conversation/sessions/new", s.handleAIConversationSessionNew)

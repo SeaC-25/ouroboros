@@ -205,6 +205,12 @@ type ScopeConfig struct {
 		Targets      []ScopeTarget `yaml:"targets"`
 		Exclusions   []string      `yaml:"exclusions"`
 		TargetPolicy string        `yaml:"target_policy,omitempty"`
+		// Infrastructure endpoints are reachable but are NEVER targets: VPN
+		// health checks, proxies, DNS, the platform API itself. The observe
+		// gate rejects them with an explanatory error so the model can
+		// self-correct instead of pentesting its own plumbing (the run
+		// wasted 24 turns on the VPN health endpoint before this existed).
+		Infrastructure []ScopeTarget `yaml:"infrastructure,omitempty"`
 	} `yaml:"scope"`
 	Execution struct {
 		Isolation       string                   `yaml:"isolation,omitempty"`

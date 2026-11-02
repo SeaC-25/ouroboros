@@ -162,6 +162,22 @@ func (s *Server) StartExecution(request ExecutionCreateRequestDTO) (ExecutionDTO
 	if request.Command == "" {
 		return ExecutionDTO{}, fmt.Errorf("execution command is required")
 	}
+	// Physical-layer egress gate (S3): every caller of this entry — the chat
+	// ACTION:EXECUTE surface, mission start, toolchain actions, retry, and
+	// direct /api/executions HTTP traffic — crosses the same boundary before
+	// any process exists or any execution record is written. Rejection here
+	// leaves zero side effects (no process, no directory, no metadata).
+	commandForGate := request.Command
+	if len(request.Args) > 0 {
+		commandForGate = request.Command + " " + strings.Join(request.Args, " ")
+	}
+	if err := s.checkExecutionEgress(s.workspace, commandForGate); err != nil {
+		return ExecutionDTO{}, err
+	}
+	// TCE: a shell command touching an in-scope challenge host may mutate
+	// remote state — advance that host's causal epoch so observation cache
+	// entries re-validate instead of serving stale responses.
+	tceBumpForCommand(commandForGate, s.scopeTargetHosts())
 	workspaceRoot, err := filepath.Abs(s.workspace)
 	if err != nil {
 		return ExecutionDTO{}, err

@@ -8,12 +8,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ouroboros/ouroboros/internal/modelruntime"
@@ -27,6 +29,10 @@ type ProviderGenerationRequest struct {
 	RequiredCapabilities []string
 	Stream               bool
 	TimeoutMS            int
+	// CognitiveTier selects the model class for this request (Budget 门
+	// L1/L2 routing): 0 = default flagship, 1 = tactical small model when
+	// OURO_TACTIC_MODEL is set, 2 = forced flagship (gates/pivots).
+	CognitiveTier int `json:"cognitive_tier"`
 }
 
 type ProviderGenerationMessage struct {
@@ -95,7 +101,7 @@ func GenerateProviderMessage(ctx context.Context, root string, request ProviderG
 		if !ok {
 			return ProviderGenerationResult{}, noProviderMatchesRequiredCapabilitiesError("provider generation", strategy, requiredCapabilities, skippedProviders)
 		}
-		result, err := generateProviderMessageForProvider(ctx, provider, request)
+		result, err := generateProviderMessageWithTransientRetry(ctx, provider, request)
 		if err != nil {
 			return ProviderGenerationResult{}, err
 		}
@@ -111,7 +117,7 @@ func GenerateProviderMessage(ctx context.Context, root string, request ProviderG
 			continue
 		}
 		attemptCount++
-		result, err := generateProviderMessageForProvider(ctx, provider, request)
+		result, err := generateProviderMessageWithTransientRetry(ctx, provider, request)
 		if err == nil {
 			return providerGenerationResultWithRouting(result, strategy, attemptCount, failedProviderNames, requiredCapabilities, skippedProviders), nil
 		}
@@ -127,6 +133,51 @@ func GenerateProviderMessage(ctx context.Context, root string, request ProviderG
 	return ProviderGenerationResult{}, fmt.Errorf("provider generation failed after %s attempts: %s", strategy, strings.Join(failures, "; "))
 }
 
+// generateProviderMessageWithTransientRetry retries network-class failures
+// (TLS handshake timeouts, connection resets, proxy dials) a couple of times
+// with backoff before surfacing them: long-running loops (chat turns,
+// sub-loops) must survive provider hiccups instead of wedging on a single
+// flaky dial. Non-network errors return immediately.
+func generateProviderMessageWithTransientRetry(ctx context.Context, provider Provider, request ProviderGenerationRequest) (ProviderGenerationResult, error) {
+	result, err := generateProviderMessageForProvider(ctx, provider, request)
+	if err == nil {
+		return result, nil
+	}
+	for _, delay := range []time.Duration{3 * time.Second, 9 * time.Second} {
+		if !isTransientProviderNetworkError(err) {
+			return result, err
+		}
+		select {
+		case <-ctx.Done():
+			return result, ctx.Err()
+		case <-time.After(delay):
+		}
+		result, err = generateProviderMessageForProvider(ctx, provider, request)
+		if err == nil {
+			return result, nil
+		}
+	}
+	return result, err
+}
+
+// isTransientProviderNetworkError matches dial/TLS/reset/EOF shapes.
+func isTransientProviderNetworkError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"tls handshake timeout", "connection refused", "connection reset",
+		"i/o timeout", "proxyconnect", "dial tcp",
+		"connection timed out", "unexpected eof",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 func validateProviderGenerationRequestMessages(request ProviderGenerationRequest) error {
 	messages := providerGenerationMessages(request)
 	if len(messages) == 0 {
@@ -136,6 +187,18 @@ func validateProviderGenerationRequestMessages(request ProviderGenerationRequest
 		return fmt.Errorf("missing current user prompt")
 	}
 	return nil
+}
+
+// selectedModelForTier resolves the model name for a cognitive tier:
+// tier=1 with OURO_TACTIC_MODEL set routes to the tactical small model;
+// every other tier (and unset env) uses the provider's configured model.
+func selectedModelForTier(provider Provider, tier int) string {
+	if tier == 1 {
+		if tacticModel := strings.TrimSpace(os.Getenv("OURO_TACTIC_MODEL")); tacticModel != "" {
+			return tacticModel
+		}
+	}
+	return provider.Model
 }
 
 func providerGenerationMessages(request ProviderGenerationRequest) []ProviderGenerationMessage {
@@ -166,6 +229,12 @@ func cleanProviderGenerationMessages(messages []ProviderGenerationMessage) []Pro
 }
 
 func generateProviderMessageForProvider(ctx context.Context, provider Provider, request ProviderGenerationRequest) (ProviderGenerationResult, error) {
+	// Cognitive-tier routing (Budget 门 L1/L2): tier=1 with OURO_TACTIC_MODEL
+	// set sends this request with the tactical small model instead of the
+	// provider's flagship; tier=2/0 and unset env always use provider.Model.
+	// The routed copy is scoped to this call so result.Model / request body
+	// carry the same name the API actually receives.
+	provider.Model = selectedModelForTier(provider, request.CognitiveTier)
 	switch strings.TrimSpace(provider.Type) {
 	case "offline":
 		return ProviderGenerationResult{}, fmt.Errorf("provider %s type offline does not support generation", provider.Name)
@@ -230,6 +299,68 @@ func providerStatusCodeFromError(message string) string {
 	return "unknown"
 }
 
+// dnsCache caches resolved IPs for provider hosts. The host machine's
+// Docker DNS (192.168.65.7) intermittently dies after Docker Desktop
+// restarts; with a warm cache the dial bypasses DNS entirely and the
+// campaign survives the outage.
+var dnsCache sync.Map // host -> []string
+
+func cachedLookupHost(host string) ([]string, error) {
+	if ips, ok := dnsCache.Load(host); ok {
+		return ips.([]string), nil
+	}
+	ips, err := net.DefaultResolver.LookupHost(context.Background(), host)
+	if err != nil || len(ips) == 0 {
+		return ips, err
+	}
+	dnsCache.Store(host, ips)
+	return ips, nil
+}
+
+// openAICompatibleTransport is the shared keep-alive transport for
+// provider calls: pooled connections avoid the TLS handshake on every
+// turn (this network drops handshakes intermittently), and a short
+// handshake deadline fails fast into the caller's bounded retry.
+var openAICompatibleTransport = &http.Transport{
+	MaxIdleConns:        16,
+	MaxIdleConnsPerHost: 8,
+	IdleConnTimeout:     5 * time.Minute,
+	TLSHandshakeTimeout: 15 * time.Second,
+	DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+		// DNS-outage resilience: resolve via cache first; fall back to the
+		// original resolver only on a miss.
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return (&net.Dialer{Timeout: 30 * time.Second}).DialContext(ctx, network, addr)
+		}
+		if ips, lerr := cachedLookupHost(host); lerr == nil && len(ips) > 0 {
+			var lastErr error
+			for _, ip := range ips {
+				conn, derr := (&net.Dialer{Timeout: 30 * time.Second}).DialContext(ctx, network, net.JoinHostPort(ip, port))
+				if derr == nil {
+					return conn, nil
+				}
+				lastErr = derr
+			}
+			// Cache invalidation: every cached IP refused/timed out — the
+			// provider likely rotated its endpoint. Evict and re-resolve
+			// once (fresh DNS), so a stale IP never poisons the campaign.
+			dnsCache.Delete(host)
+			if fresh, ferr := net.DefaultResolver.LookupHost(context.Background(), host); ferr == nil && len(fresh) > 0 {
+				dnsCache.Store(host, fresh)
+				for _, ip := range fresh {
+					conn, derr := (&net.Dialer{Timeout: 30 * time.Second}).DialContext(ctx, network, net.JoinHostPort(ip, port))
+					if derr == nil {
+						return conn, nil
+					}
+				}
+			}
+			return nil, lastErr
+		}
+		return (&net.Dialer{Timeout: 30 * time.Second}).DialContext(ctx, network, addr)
+	},
+}
+
 func generateOpenAICompatibleMessage(ctx context.Context, provider Provider, request ProviderGenerationRequest) (ProviderGenerationResult, error) {
 	if err := ctx.Err(); err != nil {
 		return ProviderGenerationResult{}, err
@@ -272,12 +403,18 @@ func generateOpenAICompatibleMessage(ctx context.Context, provider Provider, req
 	if err := applyOpenAICompatibleBearer(httpRequest, provider); err != nil {
 		return ProviderGenerationResult{}, err
 	}
-	client := &http.Client{Timeout: openAICompatibleProviderTimeout(provider)}
+	client := &http.Client{Timeout: openAICompatibleProviderTimeout(provider), Transport: openAICompatibleTransport}
 	if request.TimeoutMS > 0 {
 		client.Timeout = time.Duration(request.TimeoutMS) * time.Millisecond
 	}
 	started := time.Now()
 	response, err := client.Do(httpRequest)
+	if err != nil && isTransientHTTPError(err) {
+		// TLS handshake drops are intermittent on this network: one
+		// fast retry on the pooled connection before failing the turn.
+		time.Sleep(2 * time.Second)
+		response, err = client.Do(httpRequest)
+	}
 	latency := time.Since(started)
 	if err != nil {
 		return ProviderGenerationResult{}, fmt.Errorf("provider %s generation failed: %w", provider.Name, err)
@@ -532,6 +669,9 @@ type openAICompatibleChatCompletionRequest struct {
 	MaxTokens     int                            `json:"max_tokens,omitempty"`
 	Stream        bool                           `json:"stream,omitempty"`
 	StreamOptions *openAICompatibleStreamOptions `json:"stream_options,omitempty"`
+	// ThinkingMode disables GLM-class in-content reasoning for bounded
+	// intent calls (the guillotine path); omitted otherwise.
+	Thinking *openAIThinkingControl `json:"thinking,omitempty"`
 }
 
 type openAICompatibleStreamOptions struct {
@@ -541,6 +681,13 @@ type openAICompatibleStreamOptions struct {
 type openAICompatibleChatMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
+	// ReasoningContent is the GLM-class thinking channel: streamed deltas
+	// carry it separately; some modes emit the entire answer there.
+	ReasoningContent string `json:"reasoning_content,omitempty"`
+}
+
+type openAIThinkingControl struct {
+	Type string `json:"type"`
 }
 
 type openAICompatibleTokenUsage struct {
@@ -616,4 +763,179 @@ func openAICompatibleProviderTimeout(provider Provider) time.Duration {
 
 func openAICompatibleModelEndpoint(baseURL *url.URL, model string) string {
 	return strings.TrimRight(baseURL.String(), "/") + "/models/" + url.PathEscape(strings.TrimSpace(model))
+}
+
+// StreamWithRootJSONGuillotine streams a chat completion but physically
+// cancels the connection the moment the root JSON object closes — the
+// "token guillotine" (v28.3). Non-separated-reasoning models will happily
+// write thousands of characters after the intent JSON; with the guillotine
+// the parent decision costs only the tokens up to the closing brace.
+//
+// The accumulated text is returned regardless of how the stream ended
+// (natural [DONE] or guillotine) — the caller parses the JSON prefix.
+func StreamWithRootJSONGuillotine(ctx context.Context, root string, request ProviderGenerationRequest) (ProviderGenerationResult, error) {
+	// Reuse the streaming request path with a forced Stream flag.
+	request.Stream = true
+	request.MaxTokens = 8192 // GLM-class thinking runs in-content; the brace cancel stops essays, this cap only bounds total cost
+
+	config, err := LoadProviderConfig(filepath.Join(root, "providers.yaml"))
+	if err != nil {
+		return ProviderGenerationResult{}, fmt.Errorf("load provider config: %w", err)
+	}
+	if err := ValidateProviderConfig(config); err != nil {
+		return ProviderGenerationResult{}, fmt.Errorf("invalid provider config: %w", err)
+	}
+	providers := EnabledProviders(config)
+	if len(providers) == 0 {
+		return ProviderGenerationResult{}, fmt.Errorf("provider config has no enabled provider")
+	}
+	selected := providers[0]
+
+	baseURLValue, err := effectiveProviderBaseURL(selected)
+	if err != nil {
+		return ProviderGenerationResult{}, err
+	}
+	baseURL, err := parseOpenAICompatibleProviderBaseURL(baseURLValue)
+	if err != nil {
+		return ProviderGenerationResult{}, fmt.Errorf("provider %s base_url is invalid: %w", selected.Name, err)
+	}
+
+	chatMessages := make([]openAICompatibleChatMessage, 0, 4)
+	if system := strings.TrimSpace(request.SystemPrompt); system != "" {
+		chatMessages = append(chatMessages, openAICompatibleChatMessage{Role: "system", Content: system})
+	}
+	chatMessages = append(chatMessages, openAICompatibleChatMessage{Role: "user", Content: request.UserPrompt})
+	body := openAICompatibleChatCompletionRequest{
+		Model:         selectedModelForTier(selected, request.CognitiveTier),
+		Messages:      chatMessages,
+		Stream:        true,
+		StreamOptions: &openAICompatibleStreamOptions{IncludeUsage: true},
+		MaxTokens:     8192,
+		// Intent envelopes must not burn the cap on in-content reasoning:
+		// GLM-class models honor this toggle; others ignore the field.
+		Thinking: &openAIThinkingControl{Type: "disabled"},
+	}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return ProviderGenerationResult{}, fmt.Errorf("provider %s guillotine request encode: %w", selected.Name, err)
+	}
+	endpoint := strings.TrimRight(baseURL.String(), "/") + "/chat/completions"
+	guillotineCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	httpRequest, err := http.NewRequestWithContext(guillotineCtx, http.MethodPost, endpoint, bytes.NewReader(payload))
+	if err != nil {
+		return ProviderGenerationResult{}, fmt.Errorf("provider %s guillotine request: %w", selected.Name, err)
+	}
+	httpRequest.Header.Set("Content-Type", "application/json")
+	if err := applyOpenAICompatibleBearer(httpRequest, selected); err != nil {
+		return ProviderGenerationResult{}, err
+	}
+	client := &http.Client{Timeout: 90 * time.Second}
+	started := time.Now()
+	response, err := client.Do(httpRequest)
+	if err != nil {
+		return ProviderGenerationResult{}, fmt.Errorf("provider %s guillotine transport: %w", selected.Name, err)
+	}
+	defer func() { _ = response.Body.Close() }()
+
+	// Incremental SSE scan with root-JSON brace tracking.
+	scanner := bufio.NewScanner(response.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	var text strings.Builder
+	depth := 0
+	seenRoot := false
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if data == "" || data == "[DONE]" {
+			continue
+		}
+		var chunk openAICompatibleChatCompletionStreamChunk
+		if json.Unmarshal([]byte(data), &chunk) != nil {
+			continue
+		}
+		for _, choice := range chunk.Choices {
+			// GLM-class models stream reasoning in reasoning_content and
+			// the answer in content; some modes emit the ENTIRE answer as
+			// reasoning. Accumulate both channels so the envelope JSON is
+			// captured whichever lane it arrives in (brace tracking runs
+			// over the same combined text).
+			delta := choice.Delta.Content
+			if delta == "" {
+				delta = choice.Delta.ReasoningContent
+			}
+			if delta == "" {
+				continue
+			}
+			text.WriteString(delta)
+			// Track brace depth outside strings.
+			for _, r := range delta {
+				switch r {
+				case '{':
+					if !inJSONString(text.String()) {
+						depth++
+						seenRoot = true
+					}
+				case '}':
+					if !inJSONString(text.String()) {
+						depth--
+						if seenRoot && depth == 0 {
+							// Root object closed: GUILLOTINE.
+							cancel()
+							return ProviderGenerationResult{
+								Text:         text.String(),
+								Model:        selectedModelForTier(selected, request.CognitiveTier),
+								Latency:      time.Since(started),
+								ProviderName: selected.Name,
+							}, nil
+						}
+					}
+				}
+			}
+		}
+	}
+	return ProviderGenerationResult{
+		Text:         text.String(),
+		Model:        selectedModelForTier(selected, request.CognitiveTier),
+		Latency:      time.Since(started),
+		ProviderName: selected.Name,
+	}, scanner.Err()
+}
+
+// inJSONString reports whether the LAST character of the accumulated text
+// sits inside a JSON string literal (cheap heuristic: count unescaped
+// quotes; odd count = inside a string). Used by the brace tracker so braces
+// inside string values don't fool the depth counter.
+func inJSONString(accumulated string) bool {
+	quotes := 0
+	escaped := false
+	for _, r := range accumulated {
+		if escaped {
+			escaped = false
+			continue
+		}
+		if r == '\\' {
+			escaped = true
+			continue
+		}
+		if r == '"' {
+			quotes++
+		}
+	}
+	return quotes%2 == 1
+}
+
+// isTransientHTTPError reports transport-level failures worth one retry.
+func isTransientHTTPError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "TLS handshake timeout") ||
+		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "EOF") ||
+		strings.Contains(msg, "broken pipe")
 }

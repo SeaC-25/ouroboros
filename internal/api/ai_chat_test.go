@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -58,6 +59,36 @@ func hasChatActionResult(results []ChatActionResult, kind string) bool {
 		}
 	}
 	return false
+}
+
+// TestAutonomyContractExplorationClauseInjected 验证系统提示词注入探索阶段
+// 条款（契约第 7 条）：对一条诱导直接解题的用户消息，主聊天系统提示词必须
+// 包含探索阶段关键词。只测提示词组装，不调用真实模型。
+func TestAutonomyContractExplorationClauseInjected(t *testing.T) {
+	workspace := t.TempDir()
+	server := &Server{workspace: workspace}
+
+	// 模拟主聊天路径的提示词组装：工作区摘要 + 诱导性消息上下文。
+	// 真实路径在 handleAIChatPost：systemPrompt 尾部拼接 autonomyContract。
+	systemPrompt := fmt.Sprintf(`你是 Ouroboros IDE 的 AI 安全操作员。
+
+工作区摘要:
+%s
+
+用户消息: 你要先做什么？直接开始解题吗
+
+重要：所有回复使用中文。`, server.buildWorkspaceSummary())
+	full := injectAutonomyContract(systemPrompt)
+
+	for _, keyword := range []string{"探索阶段", "关键路径已打通"} {
+		if !strings.Contains(full, keyword) {
+			t.Fatalf("system prompt missing exploration clause keyword %q", keyword)
+		}
+	}
+	// 契约是架构级附加段：必须位于基础提示词之后，完整追加而非覆盖。
+	if !strings.HasPrefix(full, systemPrompt) {
+		t.Fatalf("autonomy contract must append to, not replace, the base system prompt")
+	}
 }
 
 func TestAppendAIConversationWritesReplayEvents(t *testing.T) {

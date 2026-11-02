@@ -1,0 +1,10 @@
+version: 1
+providers:
+  - name: cloudrouter-glm
+    type: openai_compatible
+    model: glm-5.3-flash
+    base_url: https://console.cloudrouter.online/v1
+    api_key_env: OURO_GLM_KEY
+    timeout_ms: 120000
+    capabilities: [chat, code, reasoning]
+    enabled: true

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/ouroboros/ouroboros/internal/app"
+	"github.com/ouroboros/ouroboros/internal/blackboard"
 	"github.com/ouroboros/ouroboros/internal/eventlog"
 	"github.com/ouroboros/ouroboros/internal/nativetools"
 )
@@ -41,6 +42,9 @@ type ChatResponse struct {
 type ChatPostRequest struct {
 	Message string       `json:"message"`
 	Context *ChatContext `json:"context,omitempty"`
+	// MaxTokens caps this turn's generation (driver plumbing turns set it
+	// low — token limits are hard, timeouts are not).
+	MaxTokens int `json:"maxTokens,omitempty"`
 }
 
 type ChatContext struct {
@@ -133,7 +137,9 @@ func (s *Server) handleAIChatPost(w http.ResponseWriter, r *http.Request) {
 
 你可以：
 - 回答用户关于工作区状态的问题
-- HTTP 原始观测：使用 ACTION:OBSERVE <url> [可选JSON spec] 格式——返回完整原始观测（status/headers/时延/body 摘要/表单/链接/JSON 键/基线差分），零判定，结论由你分析证据得出；spec 可指定 {"method":"POST","path":"/login","body":"...","baseline":true}
+- HTTP 原始观测：使用 ACTION:OBSERVE <url> [可选JSON spec] 格式——URL/headers/body/query 支持 {{env:VAR}} 占位符（调用时展开为环境变量值），因此带认证的 API 也用观测原语直接调用，无需 shell——返回完整原始观测（status/headers/时延/body 摘要/表单/链接/JSON 键/基线差分），零判定，结论由你分析证据得出；spec 可指定 {"method":"POST","path":"/login","body":"...","baseline":true}；观测返回蒸馏摘要，需要看观测未显示的部分时用 ACTION:INSPECT 深挖（见下）
+- 深挖单条观测：ACTION:INSPECT <obs-id> <selector>——selector 空格分隔可组合：body:bytes=500..2000（字节区间翻页）｜body:regex=<正则>（响应体预览内正则提取匹配及上下文，最多5个）｜headers（完整响应头+SetCookies+Location+RedirectChain）；输出超1500字节截断，可换区间继续\n- 系统 jsonl 日志（runtime/ 与 ai-conversation.jsonl、bench-log.jsonl）禁止 ACTION:READ：观测证据用 ACTION:INSPECT，黑板事实用 ACTION:QUERY，子循环结果用 ACTION:COLLECT
+- 平台操作（列题/启动/提交/关闭/提示）：使用 ACTION:BENCH <op> [args]（如 ACTION:BENCH start e1-05）——确定性执行零 LLM，直接返回蒸馏结果
 - 执行命令：使用 ACTION:EXECUTE CONFIRMED: <命令> 格式（CONFIRMED: 前缀是操作员确认契约，缺前缀会被拒绝执行）
 - 读取文件：使用 ACTION:READ <文件路径> 格式
 - 写入文件：使用 ACTION:WRITE <文件路径> 格式，后跟文件内容
@@ -145,9 +151,12 @@ func (s *Server) handleAIChatPost(w http.ResponseWriter, r *http.Request) {
 - 创建子目标：使用 ACTION:GOAL <标题> 格式
 - 标记子目标完成：使用 ACTION:GOAL-DONE <标题> 格式
 - 记录结论笔记：使用 ACTION:BLACKBOARD <已验证的结论> 格式（持久化你的推理成果，不是推理本身）
+- 验证结论：ACTION:VERIFY <观测ID> <预期信号>——重放观测对比信号，通过则该观测支撑的结论晋升 E3（已证实）
+- 观测必须核销：每条 OBSERVE 的证据需被 BLACKBOARD/VERIFY 引用（在结论文本中写 obs-id）才视为已处理；积压 3 条后暂停新观测
+- 下游攻击链只依赖 E3 结论；关键结论（凭据可用/漏洞存在）写入后先 VERIFY 再依赖
 - 保存 prompt：使用 ACTION:PROMPT-SAVE <名称> <内容> 格式
 - 运行 harness：使用 ACTION:HARNESS <prompt名称> <输入> 格式
-- 启动并行子循环：使用 ACTION:SPAWN <名字> : <独立目标> 格式——为相互独立的调查目标各开一条后台观测-推理循环（自主运行，有自己的上下文与轮次预算；上限受 OURO_MAX_SUB_LOOPS 控制，默认 2）
+- 启动并行子循环（任务要拆细！每个子循环只做一个小任务，几分钟内完成并 DONE——不是整题外包）：格式 ACTION:SPAWN 循环名 : 单一目标任务。拆分示例：一道题拆成多个微任务并行——ACTION:SPAWN a05-fingerprint : 观测 http://10.0.0.1:80 识别技术栈与攻击面，结论写黑板后 DONE；ACTION:SPAWN a05-login : 测试默认凭据 admin/password 等常见组合，结果写黑板后 DONE；ACTION:SPAWN a05-content : 枚举页面找 flag 存放位置，发现即写黑板并 DONE。拆分指引：优先微任务（侦察/测凭据/枚举各一条），但简单题（easy）可以直接派整题子循环（目标含观测→拿flag→BENCH submit→DONE 完整链）。黑板是同步介质。上限受 OURO_MAX_SUB_LOOPS 控制
 - 收集子循环结果：使用 ACTION:COLLECT [<名字>] 格式——查看全部或指定子循环的状态与最后回复；子循环的 BLACKBOARD 结论会自动进入共享黑板
 - 启动多智能体调度：使用 ACTION:SWARM <目标> 格式，可带 ;角色:命令，例如 ACTION:SWARM 目标;Planner:echo plan;Operator:echo run
 - 失败恢复：使用 ACTION:RETRY <执行ID> <可选原因> 格式
@@ -159,7 +168,7 @@ func (s *Server) handleAIChatPost(w http.ResponseWriter, r *http.Request) {
 - 每个动作占单独一行，动作本身必须放在回复末尾。
 - 动作执行结果会自动追加显示，不需要在文字里猜测文件内容或命令输出。
 
-重要：所有回复使用中文。`, s.buildWorkspaceSummary(), contextPrompt)
+重要：所有回复使用中文。`+autonomyContract, s.buildWorkspaceSummary(), contextPrompt)
 
 	// 调用真实 provider
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
@@ -168,7 +177,7 @@ func (s *Server) handleAIChatPost(w http.ResponseWriter, r *http.Request) {
 	result, err := app.GenerateProviderMessage(ctx, s.workspace, app.ProviderGenerationRequest{
 		SystemPrompt:         systemPrompt,
 		UserPrompt:           message,
-		MaxTokens:            2048,
+		MaxTokens:            chatRequestMaxTokens(request.MaxTokens),
 		RequiredCapabilities: []string{"chat"},
 		Stream:               false,
 	})
@@ -465,11 +474,88 @@ func (s *Server) waitForExecution(executionID string, timeout time.Duration) Exe
 	return execution
 }
 
-// parseAndExecuteAIActions 解析并执行 AI 回复中的动作标记
+// coalesceActionLines merges continuation lines into an ACTION line while
+// its braces/brackets are unbalanced. Models naturally emit the observe
+// JSON spec on the next line (markdown habit); without coalescing the
+// spec is dropped and the request goes out without headers (the v6 run
+// wedged on a 422 loop exactly here).
+func coalesceActionLines(raw []string) []string {
+	out := make([]string, 0, len(raw))
+	for i := 0; i < len(raw); i++ {
+		line := raw[i]
+		if !strings.HasPrefix(strings.TrimSpace(line), "ACTION:") {
+			out = append(out, line)
+			continue
+		}
+		// Two shapes absorb continuation lines:
+		//  1. trailing unbalanced JSON (spec opened but not closed),
+		//  2. no spec on this line while a following non-empty line opens
+		//     one — models put the observe spec on its own line (markdown
+		//     habit). Blank lines between are tolerated.
+		if unbalancedBrackets(line) {
+			for i+1 < len(raw) && unbalancedBrackets(line) {
+				i++
+				line = line + " " + strings.TrimSpace(raw[i])
+			}
+		} else if !strings.Contains(stripEnvPlaceholders(line), "{") {
+			// Look ahead past blank lines for a spec-opening line.
+			j := i + 1
+			for j < len(raw) && strings.TrimSpace(raw[j]) == "" {
+				j++
+			}
+			if j < len(raw) && strings.HasPrefix(strings.TrimSpace(raw[j]), "{") {
+				for k := i + 1; k <= j; k++ {
+					line = line + " " + strings.TrimSpace(raw[k])
+				}
+				i = j
+				// The spec itself may still span lines; balance it.
+				for i+1 < len(raw) && unbalancedBrackets(line) {
+					i++
+					line = line + " " + strings.TrimSpace(raw[i])
+				}
+			}
+		}
+		out = append(out, line)
+	}
+	return out
+}
+
+// stripEnvPlaceholders removes {{env:VAR}} spans so bracket detection can
+// distinguish real JSON specs from placeholder syntax.
+var apiEnvPlaceholderPattern = regexp.MustCompile(`\{\{env:[A-Za-z_][A-Za-z0-9_]*\}\}`)
+
+func stripEnvPlaceholders(text string) string {
+	return apiEnvPlaceholderPattern.ReplaceAllString(text, "")
+}
+
+// unbalancedBrackets reports whether the text has more opening than
+// closing braces/brackets (ignoring those inside simple double-quoted
+// strings).
+func unbalancedBrackets(text string) bool {
+	depth := 0
+	inString := false
+	escaped := false
+	for _, r := range text {
+		switch {
+		case escaped:
+			escaped = false
+		case r == '\\' && inString:
+			escaped = true
+		case r == '"':
+			inString = !inString
+		case !inString && (r == '{' || r == '['):
+			depth++
+		case !inString && (r == '}' || r == ']'):
+			depth--
+		}
+	}
+	return depth > 0
+}
+
 func (s *Server) parseAndExecuteAIActions(text string) ([]string, []ChatActionResult) {
 	var refs []string
 	var results []ChatActionResult
-	lines := strings.Split(text, "\n")
+	lines := coalesceActionLines(strings.Split(text, "\n"))
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "ACTION:EXECUTE ") {
@@ -542,6 +628,21 @@ func (s *Server) parseAndExecuteAIActions(text string) ([]string, []ChatActionRe
 			filePath := strings.TrimPrefix(line, "ACTION:READ ")
 			filePath = strings.TrimSpace(filePath)
 			filePath = strings.TrimPrefix(filePath, "./")
+			// Executions echo absolute workspace paths in their metadata;
+			// models copy them verbatim. Strip the workspace prefix so a
+			// pasted absolute path resolves to the same file as relative
+			// (both slash styles — models echo either).
+			for _, sep := range []string{"/", string(filepath.Separator)} {
+				filePath = strings.TrimPrefix(filePath, s.workspace+sep)
+			}
+			// System journals are the L2 evidence store: raw pulls drag the
+			// whole history into context and bypass the INSPECT scalpel.
+			// Blocked with a redirect to the structured primitives so the
+			// model self-corrects instead of retrying READ.
+			if denied := deniedJournalRead(filePath); denied != "" {
+				results = append(results, ChatActionResult{Kind: "read", Summary: "系统日志禁止直接 READ（" + denied + "）：观测用 ACTION:INSPECT <obs-id> <selector>，事实用 ACTION:QUERY，结果用 ACTION:COLLECT", Path: filePath})
+				continue
+			}
 			if filePath != "" {
 				file, err := ReadWorkspaceFile(s.workspace, filePath)
 				if err != nil {
@@ -702,7 +803,43 @@ func (s *Server) parseAndExecuteAIActions(text string) ([]string, []ChatActionRe
 				if len(parts) == 2 {
 					specJSON = strings.TrimSpace(parts[1])
 				}
-				out, err := nativetools.ObserveHTTP(context.Background(), targetURL, nativetools.ObserveSpec{}, nativetools.Options{SpecJSON: specJSON, Timeout: 30 * time.Second})
+				// Parse the spec HERE: ObserveHTTP expands {{env:}} inside the
+				// spec struct it receives — the SpecJSON option field is only
+				// honored on the Run() path (http_probe.go). Passing an empty
+				// spec with raw SpecJSON silently dropped every header (the
+				// workspace run 422-looped for two containers on exactly this).
+				observeSpec := nativetools.ObserveSpec{}
+				if specJSON != "" {
+					// Smart-quote / fullwidth normalization: models emit “ ” ‘ ’
+					// or fullwidth punctuation inside JSON specs (observed:
+					// invalid character 'æ'). JSON only accepts ASCII quotes.
+					normalized := strings.NewReplacer(
+						"\u201c", `"`, "\u201d", `"`, // “ ”
+						"\u2018", `'`, "\u2019", `'`, // ‘ ’
+						"\uff1a", ":", // ：
+						"\uff0c", ",", // ，
+						"\uff1b", ";", // ；
+					).Replace(specJSON)
+					if err := json.Unmarshal([]byte(normalized), &observeSpec); err != nil {
+						results = append(results, ChatActionResult{Kind: "observe", Summary: "观测 spec JSON 解析失败（spec 必须是纯 ASCII 的 JSON，字符串值里的中文没问题，但引号/冒号/逗号必须是半角）: " + err.Error()})
+						continue
+					}
+				}
+				// TCE dedup: an identical request at the current causal
+				// epoch is served from cache — no network, no new journal
+				// entry, plus a pointer to INSPECT/QUERY for depth.
+				if hit, ok := s.cachedObservationHit(targetURL, specJSON); ok {
+					results = append(results, ChatActionResult{Kind: "observe", Summary: "缓存命中（未发网络请求）", Path: targetURL, Output: hit})
+					continue
+				}
+				// Sisyphus backlog gate: raw evidence must be reasoned over
+				// (BLACKBOARD/VERIFY citing the obs-id) before more network
+				// requests pile up. Cache hits bypass (no new evidence).
+				if refusal := s.checkSisyphusGate(); refusal != "" {
+					results = append(results, ChatActionResult{Kind: "observe", Summary: refusal})
+					continue
+				}
+				out, err := nativetools.ObserveHTTP(context.Background(), targetURL, observeSpec, nativetools.Options{SpecJSON: specJSON, Timeout: 30 * time.Second})
 				if err != nil {
 					results = append(results, ChatActionResult{Kind: "observe", Summary: "观测失败: " + err.Error()})
 				} else {
@@ -719,9 +856,43 @@ func (s *Server) parseAndExecuteAIActions(text string) ([]string, []ChatActionRe
 					obsRef := ""
 					if obsErr == nil {
 						obsRef = fmt.Sprintf(" [观测ID %s — 在 ACTION:BLACKBOARD 结论中引用此ID即可回链证据]", obs.ID)
+						// Enqueue as unprocessed evidence (drained when a
+						// BLACKBOARD/VERIFY conclusion cites this obs-id).
+						s.registerUnprocessedObservation(obs.ID)
+						// TCE cache: remember this fingerprint -> obs-id so a
+						// repeat of the same request hits the cache instead
+						// of the network.
+						s.tceRememberObservation(targetURL, specJSON, obs.ID, out)
 					}
-					results = append(results, ChatActionResult{Kind: "observe", Summary: "HTTP 观测完成（原始观测，无判定）", Path: targetURL, Output: truncateForAI(out, 4000) + obsRef})
+					results = append(results, ChatActionResult{Kind: "observe", Summary: "HTTP 观测完成（原始观测，无判定）", Path: targetURL, Output: distillObservationForAI(out) + obsRef})
 				}
+			}
+		} else if strings.HasPrefix(line, "ACTION:INSPECT ") {
+			// L2 scalpel: re-open one stored observation without loading
+			// the journal into context. Selector picks the slice — byte
+			// window, regex extract, or full headers — and the output is
+			// hard-capped (inspectOutputLimit) so a deep-dive stays a
+			// deep-dive, not a journal dump.
+			if inspectSummary, inspectErr := s.executeInspectAction(strings.TrimSpace(strings.TrimPrefix(line, "ACTION:INSPECT "))); inspectErr != nil {
+				results = append(results, ChatActionResult{Kind: "inspect", Summary: "INSPECT 失败: " + inspectErr.Error()})
+			} else {
+				results = append(results, ChatActionResult{Kind: "inspect", Summary: inspectSummary})
+			}
+		} else if strings.HasPrefix(line, "ACTION:BENCH ") {
+			// Deterministic benchmark-platform conveyor (zero LLM): the
+			// model emits `ACTION:BENCH <op> [args]` with op ∈
+			// {list,start,submit,close,hint}; the handler calls the platform
+			// API directly (credentials from BENCHMARK_BASE_URL /
+			// BENCHMARK_TOKEN env), distills the response to a compact
+			// summary (never raw JSON), and journals the raw response to
+			// runtime/bench-log.jsonl for audit (model can ACTION:READ it).
+			// Scope: the platform API is not a range target, so this does
+			// NOT pass authorizeObserveTarget; the submit flag is capped.
+			benchSummary, benchErr := s.executeBenchAction(strings.TrimSpace(strings.TrimPrefix(line, "ACTION:BENCH ")))
+			if benchErr != nil {
+				results = append(results, ChatActionResult{Kind: "bench", Summary: "BENCH 失败: " + benchErr.Error()})
+			} else {
+				results = append(results, ChatActionResult{Kind: "bench", Summary: benchSummary, Path: "runtime/bench-log.jsonl"})
 			}
 		} else if strings.HasPrefix(line, "ACTION:BLACKBOARD ") {
 			statement := strings.TrimPrefix(line, "ACTION:BLACKBOARD ")
@@ -733,6 +904,24 @@ func (s *Server) parseAndExecuteAIActions(text string) ([]string, []ChatActionRe
 				} else {
 					refs = append(refs, fmt.Sprintf("blackboard:%s", fact.ID))
 					results = append(results, ChatActionResult{Kind: "blackboard", Summary: "已记录黑板发现", Path: fact.ID, Output: truncateForAI(fact.Statement, 2000)})
+					// Sisyphus settle: conclusions citing obs-ids drain them.
+					s.consumeObservations(fact.SourceObservations)
+				}
+			}
+		} else if strings.HasPrefix(line, "ACTION:VERIFY ") {
+			// Evidence gate: replay the observation the conclusion cites and
+			// check the expected signal. Signal may contain spaces, so split
+			// into at most 3 segments: VERIFY <obs-id> <signal...> — a
+			// single-word signal arrives as 2 segments.
+			verifyParts := strings.SplitN(strings.TrimSpace(strings.TrimPrefix(line, "ACTION:VERIFY ")), " ", 3)
+			if len(verifyParts) < 2 || strings.TrimSpace(verifyParts[0]) == "" || strings.TrimSpace(verifyParts[len(verifyParts)-1]) == "" {
+				results = append(results, ChatActionResult{Kind: "verify", Summary: "VERIFY 格式错误: 需要 ACTION:VERIFY <观测ID> <预期信号>（信号可含空格）"})
+			} else {
+				verifySummary, verifyErr := s.executeVerifyAction(strings.TrimSpace(verifyParts[0]), strings.TrimSpace(verifyParts[len(verifyParts)-1]))
+				if verifyErr != nil {
+					results = append(results, ChatActionResult{Kind: "verify", Summary: "VERIFY 失败: " + verifyErr.Error()})
+				} else {
+					results = append(results, ChatActionResult{Kind: "verify", Summary: verifySummary, Path: "runtime/observations.jsonl"})
 				}
 			}
 		} else if strings.HasPrefix(line, "ACTION:PROMPT-SAVE ") {
@@ -863,6 +1052,13 @@ func (s *Server) parseAndExecuteAIActions(text string) ([]string, []ChatActionRe
 			}
 		} else if strings.HasPrefix(line, "ACTION:SPAWN ") {
 			spec := strings.TrimPrefix(line, "ACTION:SPAWN ")
+			// Placeholder guard: models copy the documented angle-bracket
+			// syntax verbatim (observed live). Correct with a concrete
+			// example instead of a format error they will misread again.
+			if name, _, ok := splitSpawnSpec(spec); !ok || strings.ContainsAny(name, "<>") || name == "" {
+				results = append(results, ChatActionResult{Kind: "spawn", Summary: "SPAWN 参数里含尖括号占位符（未替换）。正确示例：ACTION:SPAWN a-05-solver : 解题 a-05，靶场 http://10.x.x.x:80，找到 flag 后用 ACTION:BENCH submit a-05 flag{...} 提交，然后 DONE"})
+				continue
+			}
 			if name, goal, ok := splitSpawnSpec(spec); ok {
 				summary, err := s.spawnSubLoop(name, goal)
 				if err != nil {
@@ -872,7 +1068,7 @@ func (s *Server) parseAndExecuteAIActions(text string) ([]string, []ChatActionRe
 					results = append(results, ChatActionResult{Kind: "spawn", Summary: summary, Path: name})
 				}
 			} else {
-				results = append(results, ChatActionResult{Kind: "spawn", Summary: "格式: ACTION:SPAWN <名字> : <目标>"})
+				results = append(results, ChatActionResult{Kind: "spawn", Summary: "格式: ACTION:SPAWN 名字 : 目标（冒号前后都有实际内容；示例：ACTION:SPAWN a-05-solver : 解题a-05并提交flag）"})
 			}
 		} else if strings.HasPrefix(line, "ACTION:COLLECT ") || line == "ACTION:COLLECT" {
 			name := ""
@@ -1016,8 +1212,13 @@ type BlackboardFact struct {
 	// it was derived from (the evidence chain of the observation-reasoning
 	// loop; consumed by sisyphus.ProcessedObservationIDs to drain backlog).
 	SourceObservations []string `json:"source_observations,omitempty"`
-	CreatedAt          int64    `json:"createdAt"`
-	UpdatedAt          int64    `json:"updatedAt,omitempty"`
+	// EvidenceLevel grades the recorded evidence (2 tentative / 3 verified,
+	// mirroring blackboard.EvidenceTentative / EvidenceVerified). omitempty
+	// keeps legacy journal records (no field) load-compatible: they decode
+	// as the zero value, i.e. no evidence gate has run.
+	EvidenceLevel int   `json:"evidence_level,omitempty"`
+	CreatedAt     int64 `json:"createdAt"`
+	UpdatedAt     int64 `json:"updatedAt,omitempty"`
 }
 
 func (s *Server) blackboardPath() string {
@@ -1161,6 +1362,10 @@ func (s *Server) appendBlackboardFact(kind string, statement string) (Blackboard
 		// becomes a source observation, so concluding over evidence drains
 		// the observation backlog (sisyphus.ProcessedObservationIDs).
 		SourceObservations: observationIDsFromText(statement),
+		// Evidence gate: a model conclusion starts tentative (E2) — it
+		// cites observations but the expected signal has not been
+		// replay-verified. ACTION:VERIFY promotes back-linked facts to E3.
+		EvidenceLevel: blackboard.EvidenceTentative,
 	}
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
@@ -1842,4 +2047,13 @@ func (r *responseRecorder) Write(data []byte) (int, error) {
 	}
 	r.body += string(data)
 	return len(data), nil
+}
+
+// chatRequestMaxTokens resolves the per-turn cap: caller value wins when
+// set (1..8192), otherwise the default.
+func chatRequestMaxTokens(requested int) int {
+	if requested >= 16 && requested <= 131072 {
+		return requested
+	}
+	return 8192
 }

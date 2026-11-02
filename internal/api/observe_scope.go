@@ -26,12 +26,23 @@ func (s *Server) authorizeObserveTarget(targetURL string) error {
 		return fmt.Errorf("无法读取工作区 scope.yaml（%v）；观测需要有效的 scope 配置", err)
 	}
 	if strings.TrimSpace(scopeConfig.Scope.TargetPolicy) == "disabled" {
+		// Even with the policy disabled, infrastructure endpoints stay
+		// non-targets: reachability never implies authorization to attack.
+		// The model gets the classification in the error and self-corrects.
+		if infErr := rejectInfrastructureTarget(scopeConfig, targetURL); infErr != nil {
+			return infErr
+		}
 		return nil
 	}
 
 	parsed, err := url.Parse(targetURL)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return fmt.Errorf("观测目标必须是绝对 URL: %q", targetURL)
+	}
+	// Infrastructure check first: a misconfigured scope listing an infra
+	// host as a target is still infrastructure.
+	if infErr := rejectInfrastructureTarget(scopeConfig, targetURL); infErr != nil {
+		return infErr
 	}
 	for _, target := range scopeConfig.Scope.Targets {
 		if strings.TrimSpace(target.Kind) != "url" || strings.TrimSpace(target.Value) == "" {
@@ -72,6 +83,38 @@ func (s *Server) checkObserveExclusion(parsed *url.URL, exclusions []string) err
 		}
 		if excludedPath == "/" || strings.HasPrefix(parsed.Path, excludedPath) {
 			return fmt.Errorf("观测目标 %q 命中 scope 排除项 %q", parsed.String(), exclusion)
+		}
+	}
+	return nil
+}
+
+// rejectInfrastructureTarget classifies a URL against the scope's
+// infrastructure list and rejects observations aimed at it. The error
+// carries the classification so the model can redirect without another
+// round of guessing.
+func rejectInfrastructureTarget(config app.ScopeConfig, targetURL string) error {
+	parsed, err := url.Parse(strings.TrimSpace(targetURL))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return nil // malformed URLs fail later shape checks, not here
+	}
+	// Health-check allowance: a bare root GET to an infra endpoint is the
+	// documented connectivity probe (VPN preflight). Deep paths (anything
+	// beyond "/" or a probe query) stay rejected — probing is allowed,
+	// attacking infrastructure is not.
+	isBareProbe := (parsed.Path == "" || parsed.Path == "/") && parsed.RawQuery == ""
+	for _, infra := range config.Scope.Infrastructure {
+		if strings.TrimSpace(infra.Kind) != "url" || strings.TrimSpace(infra.Value) == "" {
+			continue
+		}
+		infraURL, parseErr := url.Parse(strings.TrimSpace(infra.Value))
+		if parseErr != nil || infraURL.Scheme == "" || infraURL.Host == "" {
+			continue
+		}
+		if parsed.Scheme == infraURL.Scheme && parsed.Host == infraURL.Host {
+			if isBareProbe {
+				return nil
+			}
+			return fmt.Errorf("观测目标 %q 是基础设施端点（scope.yaml infrastructure：%s），不是靶场目标——靶场地址只来自任务指定的 start API 响应（根路径连通性预检除外）", targetURL, strings.TrimSpace(infra.Value))
 		}
 	}
 	return nil

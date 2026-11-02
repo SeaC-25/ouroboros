@@ -2,6 +2,27 @@ package blackboard
 
 import "time"
 
+// Evidence gate levels for Fact.EvidenceLevel: a fact derived from raw
+// observations starts tentative; a successful observation replay that
+// reproduces the expected signal promotes it to verified. Zero means no
+// evidence gate ran (facts asserted without observation evidence, legacy
+// journal records) — downstream chains must not treat them as verified.
+const (
+	// EvidenceNone marks facts with no evidence-gate classification. It is
+	// the zero value so legacy JSONL records without the field load as 0.
+	EvidenceNone EvidenceLevel = 0
+	// EvidenceTentative: the fact was concluded over raw observations but
+	// the expected signal has not been replay-verified.
+	EvidenceTentative EvidenceLevel = 2
+	// EvidenceVerified: ACTION:VERIFY replayed the supporting observation
+	// and reproduced the expected signal.
+	EvidenceVerified EvidenceLevel = 3
+)
+
+// EvidenceLevel grades how strongly the recorded evidence supports a fact
+// (none / tentative / verified). Serialized as a plain int in the journals.
+type EvidenceLevel = int
+
 type IntentState string
 
 const (
@@ -24,6 +45,13 @@ type Fact struct {
 	// observations it reassembled. Empty for facts asserted without
 	// observation evidence.
 	SourceObservations []string
+
+	// EvidenceLevel grades the recorded evidence (0 none / 2 tentative /
+	// 3 verified). Facts written by the chat BLACKBOARD action start at
+	// EvidenceTentative; ACTION:VERIFY replaying a supporting observation
+	// promotes every fact back-linking it to EvidenceVerified. Legacy
+	// records without this field load as the zero value (EvidenceNone).
+	EvidenceLevel EvidenceLevel
 }
 
 type Intent struct {

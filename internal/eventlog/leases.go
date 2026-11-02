@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS execution_leases (
 	heartbeat_at INTEGER NOT NULL,
 	timeout_ms INTEGER NOT NULL,
 	attempt_count INTEGER NOT NULL DEFAULT 1,
+	crash_count INTEGER NOT NULL DEFAULT 0,
 	raw_artifact_path TEXT,
 	created_at TEXT NOT NULL
 );
@@ -102,25 +103,71 @@ func NewLeaseStore(store *SQLiteStore) (*LeaseStore, error) {
 	if _, err := store.db.Exec(createExecutionLeasesSQL); err != nil {
 		return nil, fmt.Errorf("create execution_leases: %w", err)
 	}
+	if err := migrateLeaseCrashCount(store.db); err != nil {
+		return nil, err
+	}
 	return &LeaseStore{db: store.db}, nil
+}
+
+// migrateLeaseCrashCount adds the crash_count column to execution_leases
+// tables created before poison-pill quarantine (L0). CREATE TABLE IF NOT
+// EXISTS never alters an existing table, so the column is detected via
+// PRAGMA table_info and added with ALTER TABLE; pre-existing rows default
+// to 0 crashes.
+func migrateLeaseCrashCount(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(execution_leases)`)
+	if err != nil {
+		return fmt.Errorf("inspect execution_leases schema: %w", err)
+	}
+	hasCrashCount := false
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, colType string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scan execution_leases schema: %w", err)
+		}
+		if name == "crash_count" {
+			hasCrashCount = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return fmt.Errorf("iterate execution_leases schema: %w", err)
+	}
+	_ = rows.Close()
+	if hasCrashCount {
+		return nil
+	}
+	if _, err := db.Exec(`ALTER TABLE execution_leases ADD COLUMN crash_count INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return fmt.Errorf("migrate execution_leases.crash_count: %w", err)
+	}
+	return nil
 }
 
 // Claim inserts a CLAIMED row; ErrDuplicateClaim when the key is owned.
 // A prior FAILED/ABORTED row with attempts < PoisonThreshold is overwritten
-// (retry); attempts >= PoisonThreshold returns ErrPoisonPill.
+// (retry). A key whose persisted crash_count (recorded by orphan recovery)
+// or hard-failure attempts reached PoisonThreshold returns ErrPoisonPill —
+// wrapped with the key and a switch-tool advice; match with errors.Is.
 func (l *LeaseStore) Claim(ctx context.Context, lease ExecutionLease) error {
 	now := time.Now().UnixMilli()
 	lease.HeartbeatAt = now
 
-	// Poison-pill check first: crashed too often → quarantine.
-	var attempts int
+	// Poison-pill check first: this key's crash history (bumped by
+	// RecoverOrphans on every reclaim of an orphaned lease, surviving
+	// restarts) or repeated hard failures crossed the threshold → quarantine.
+	var attempts, crashes int
 	var status string
 	err := l.db.QueryRowContext(ctx,
-		`SELECT attempt_count, status FROM execution_leases WHERE idempotency_key = ?`,
-		lease.Key).Scan(&attempts, &status)
+		`SELECT attempt_count, crash_count, status FROM execution_leases WHERE idempotency_key = ?`,
+		lease.Key).Scan(&attempts, &crashes, &status)
 	if err == nil {
-		if attempts >= PoisonThreshold && (status == string(LeaseFailed) || status == string(LeaseAborted)) {
-			return ErrPoisonPill
+		if crashes >= PoisonThreshold ||
+			(attempts >= PoisonThreshold && (status == string(LeaseFailed) || status == string(LeaseAborted))) {
+			return fmt.Errorf("%w: idempotency key %s hit the crash threshold (crashes=%d attempts=%d) — pick a different tool for this target",
+				ErrPoisonPill, lease.Key, crashes, attempts)
 		}
 		if status == string(LeaseClaimed) || status == string(LeaseRunning) ||
 			status == string(LeaseArtifactSaved) || status == string(LeaseCommitted) {
@@ -198,10 +245,12 @@ func (l *LeaseStore) Transition(ctx context.Context, key string, next LeaseStatu
 // heartbeat (transition also updates heartbeat_at), and the unconditional
 // Transition would then kill a live run. RowsAffected==0 means someone else
 // refreshed or re-claimed the row — the caller must skip that lease.
+// A successful stale flip is one worker crash: crash_count is bumped in the
+// same atomic UPDATE so RecoverOrphans feeds the poison-pill quarantine.
 func (l *LeaseStore) TransitionIfStale(ctx context.Context, key string, next LeaseStatus, staleBeforeMS int64) error {
 	res, err := l.db.ExecContext(ctx, `
 		UPDATE execution_leases
-		SET status=?, heartbeat_at=?
+		SET status=?, heartbeat_at=?, crash_count=crash_count+1
 		WHERE idempotency_key=? AND status IN (?, ?) AND heartbeat_at=?`,
 		string(next), time.Now().UnixMilli(), key,
 		string(LeaseClaimed), string(LeaseRunning), staleBeforeMS)
@@ -224,7 +273,9 @@ type OrphanLease struct {
 
 // RecoverOrphans returns expired RUNNING leases for requeue and transitions
 // them to FAILED. Keys at/above the poison threshold are marked ABORTED and
-// returned separately (caller must switch to an alternative tool).
+// returned separately (caller must switch to an alternative tool). Every
+// reclaim — requeue or abort — bumps the key's crash_count (poison-pill
+// quarantine input for future Claims).
 func (l *LeaseStore) RecoverOrphans(ctx context.Context, nowMS int64) (requeue []OrphanLease, quarantined []OrphanLease, err error) {
 	// CLAIMED counts too: a worker crashing between Claim and the RUNNING
 	// transition left the row CLAIMED forever (nothing else requeues it —

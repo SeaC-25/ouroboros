@@ -1,0 +1,7 @@
+version: 1
+scope:
+  target_policy: disabled
+  targets: []
+  exclusions: []
+execution:
+  isolation: process

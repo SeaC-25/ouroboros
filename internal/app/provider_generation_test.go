@@ -702,3 +702,96 @@ providers:
 		t.Fatalf("expected request to hit configured base URL, servedBy=%q", servedBy)
 	}
 }
+
+// TestGenerateProviderMessageCognitiveTierRoutesTacticModel pins the Budget
+// 门 L1 routing: tier=1 with OURO_TACTIC_MODEL set sends the tactical model
+// name in the request body AND reports it as result.Model (the routed copy
+// is scoped to the call). Tiers 2/0 keep provider.Model regardless of env.
+func TestGenerateProviderMessageCognitiveTierRoutesTacticModel(t *testing.T) {
+	cases := []struct {
+		name          string
+		tacticEnv     string
+		cognitiveTier int
+		wantModel     string
+	}{
+		{name: "tier1 with tactic env uses tactic model", tacticEnv: "m1", cognitiveTier: 1, wantModel: "m1"},
+		{name: "tier1 without tactic env keeps provider model", tacticEnv: "", cognitiveTier: 1, wantModel: "gpt-test"},
+		{name: "tier2 keeps provider model even with tactic env", tacticEnv: "m1", cognitiveTier: 2, wantModel: "gpt-test"},
+		{name: "tier0 keeps provider model even with tactic env", tacticEnv: "m1", cognitiveTier: 0, wantModel: "gpt-test"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "workspace")
+			if err := InitWorkspace(root); err != nil {
+				t.Fatalf("init workspace: %v", err)
+			}
+			var captured struct {
+				Model string `json:"model"`
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != "/v1/chat/completions" {
+					t.Fatalf("unexpected provider request %s %s", r.Method, r.URL.Path)
+				}
+				if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+					t.Fatalf("decode generation request: %v", err)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"tier routing reply"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+			}))
+			defer server.Close()
+			t.Setenv("OURO_TEST_PROVIDER_KEY", "secret-value")
+			t.Setenv("OURO_TACTIC_MODEL", tc.tacticEnv)
+			providers := fmt.Sprintf(`version: 1
+providers:
+  - name: local-openai
+    type: openai_compatible
+    model: gpt-test
+    base_url: %s/v1
+    api_key_env: OURO_TEST_PROVIDER_KEY
+    enabled: true
+`, server.URL)
+			if err := os.WriteFile(filepath.Join(root, "providers.yaml"), []byte(providers), 0o644); err != nil {
+				t.Fatalf("write providers: %v", err)
+			}
+
+			result, err := GenerateProviderMessage(context.Background(), root, ProviderGenerationRequest{
+				UserPrompt:    "hello",
+				CognitiveTier: tc.cognitiveTier,
+			})
+			if err != nil {
+				t.Fatalf("generate with cognitive tier %d: %v", tc.cognitiveTier, err)
+			}
+			if captured.Model != tc.wantModel {
+				t.Fatalf("request body model = %q, want %q (tier=%d tacticEnv=%q)", captured.Model, tc.wantModel, tc.cognitiveTier, tc.tacticEnv)
+			}
+			if result.Model != tc.wantModel {
+				t.Fatalf("result.Model = %q, want %q (tier=%d tacticEnv=%q)", result.Model, tc.wantModel, tc.cognitiveTier, tc.tacticEnv)
+			}
+		})
+	}
+}
+
+// TestSubLoopCognitiveTierCallSiteAnnotations asserts the runSubLoop call
+// sites carry the Budget 门 tier annotations by source inspection: the
+// request includes CognitiveTier, gated turns (Progress pivot / DONE
+// rejection) pin tier 2 via flagshipTurn, routine turns use tier 1.
+func TestSubLoopCognitiveTierCallSiteAnnotations(t *testing.T) {
+	source, err := os.ReadFile(filepath.Join("..", "api", "subloop.go"))
+	if err != nil {
+		t.Fatalf("read subloop.go: %v", err)
+	}
+	text := string(source)
+	for _, want := range []string{
+		"CognitiveTier:        cognitiveTier",
+		"cognitiveTier := state.BaseTier",
+		"if flagshipTurn {",
+		"cognitiveTier = 2",
+		"flagshipTurn = true // L2 flagship: terminal-decision turn",
+		"flagshipTurn = true // L2 flagship: forced-pivot turn",
+		"flagshipTurn = false",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("subloop.go missing call-site annotation %q", want)
+		}
+	}
+}

@@ -1,0 +1,14 @@
+{
+  "id": "exec-1793102458313689900",
+  "command": "bash",
+  "args": [
+    "-c",
+    "hostname -I; ip -4 addr show | grep -E 'inet '"
+  ],
+  "status": "failed",
+  "startedAt": 1793102458,
+  "completedAt": 1793102458,
+  "exitCode": 1,
+  "logPath": "executions/exec-1793102458313689900/output.log",
+  "artifactDir": "executions/exec-1793102458313689900/artifacts"
+}
